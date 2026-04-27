@@ -1,7 +1,7 @@
 mod volume;
 
 use serde::Serialize;
-use volume::{volume_load, volume_release, volume_slice_axial, VolumeCache};
+use volume::{volume_load, volume_release, volume_slice, volume_slice_axial, VolumeCache};
 
 #[derive(Serialize)]
 struct AppInfo {
@@ -33,6 +33,7 @@ fn main() {
             app_info,
             validate_content_pack,
             volume_load,
+            volume_slice,
             volume_slice_axial,
             volume_release
         ])

@@ -8,7 +8,7 @@ This is a clean starter rebuild for **VascEdu** using a modern desktop-oriented 
 - Case library
 - Case detail screen
 - Training workspace
-- Real NRRD axial viewer spike through Rust/Tauri
+- Real NRRD MPR viewer spike through Rust/Tauri
 - Quiz engine
 - Progress saved in localStorage
 - Admin/content preview screen
@@ -27,22 +27,35 @@ Install:
 - Rust stable
 - Tauri prerequisites for your OS
 
-## Run as web app first
+## Run Web Mode
 
 ```bash
-cd VascEdu-v0.1
 pnpm install
-pnpm dev:web  # UI-only; NRRD viewer needs desktop mode
+pnpm dev:web
 ```
 
-Open the Vite URL shown in the terminal.
+This starts the React/Vite UI in a normal browser at the URL shown in the terminal.
+Most screens work in this mode, but the NRRD viewer will show:
 
-## Run as desktop app with Tauri
+```text
+NRRD viewer requires Tauri desktop mode. Run pnpm dev.
+```
+
+That is expected. Browser mode cannot call the Rust commands that load local NRRD volume bytes.
+
+## Run Desktop Mode
 
 ```bash
-cd VascEdu-v0.1
 pnpm install
 pnpm dev
+```
+
+This starts the Tauri desktop app. Tauri runs the Vite dev server, opens the desktop window, and enables the Rust command bridge used by the NRRD viewer.
+
+You can also run the desktop package directly:
+
+```bash
+pnpm --dir apps/desktop dev
 ```
 
 ## Build
@@ -58,7 +71,7 @@ pnpm build
 - Case library
 - Case detail
 - Start training from a case
-- Real NRRD axial viewer with slice/window/level controls
+- Real NRRD axial/coronal/sagittal MPR viewer with slice/window/level controls
 - Multiple question types:
   - multiple choice
   - multi-select
@@ -74,10 +87,10 @@ pnpm build
 
 ## What is intentionally not implemented yet
 
-- Coronal/sagittal MPR and orientation-aware reslicing
+- Orientation-aware reslicing and linked multi-viewport MPR
 - DICOM ingest
 - Rust-side SQLite persistence
-- True MPR axial/coronal/sagittal volume rendering
+- Oblique/curved MPR and 3D volume rendering
 - Measurement drawing tools
 - Crosshair synchronization
 - Full device catalog
@@ -87,7 +100,7 @@ pnpm build
 
 ## Recommended next development order
 
-1. Add coronal/sagittal MPR and orientation-aware reslicing.
+1. Add orientation-aware reslicing and linked multi-viewport MPR.
 2. Replace base64 slice transfer with Tauri binary channel transport.
 3. Move attempt/progress persistence from localStorage to SQLite.
 4. Add real measurement tools.
@@ -97,12 +110,12 @@ pnpm build
 8. Add vessel composer later.
 
 
-## NRRD viewer spike
+## NRRD MPR viewer spike
 
 The AAA sample case now points to `content/aaa/volumes/sample-aaa-001.nrrd`. In desktop mode, the React `NrrdViewer` calls these Rust commands:
 
-- `volume_load(path)` parses a 3D NRRD file, caches it in memory, and returns dimensions, spacing, and HU range.
-- `volume_slice_axial(handle_id, slice_index, window_width, window_level)` windows one axial slice and returns 8-bit grayscale pixels as base64.
+- `volume_load(path)` parses a 3D NRRD file, caches it in memory, and returns a handle, dimensions, spacing, intensity range, and per-plane slice ranges.
+- `volume_slice(handle_id, plane, slice_index, window_width, window_level)` windows one axial, coronal, or sagittal slice and returns 8-bit grayscale pixels as base64.
 - `volume_release(handle_id)` removes the cached volume.
 
 Supported NRRD scope for this spike:
@@ -111,7 +124,8 @@ Supported NRRD scope for this spike:
 - `raw` and `ascii/text` encoding
 - common integer voxel types: int8/uint8/int16/uint16/int32/uint32
 - no gzip encoding yet
-- axial only; no coronal/sagittal reslicing yet
+- axial, coronal, and sagittal orthogonal slices only
+- no oblique or orientation-aware reslicing yet
 
 Run the real viewer with:
 
@@ -119,4 +133,11 @@ Run the real viewer with:
 pnpm --dir apps/desktop dev
 ```
 
-`pnpm dev:web` still opens the React UI, but it cannot call the native Rust volume backend.
+`pnpm dev:web` still opens the React UI, but it cannot call the native Rust volume backend. The desktop app can load the sample even when the loose `content/` file is unavailable because the Rust backend bundles `sample-aaa-001.nrrd` into the binary at compile time.
+
+## Common Windows Errors
+
+- `cargo` or `rustc` is not recognized: install Rust from <https://rustup.rs/>, then open a new terminal.
+- `link.exe` not found: install Visual Studio Build Tools with the C++ desktop workload, including the MSVC compiler and Windows SDK.
+- Missing `icon.ico`: Tauri expects `apps/desktop/src-tauri/icons/icon.ico`. This repo includes it; if it is deleted, restore it or regenerate icons before running `pnpm build`.
+- Tauri window does not open from `pnpm dev`: first run `pnpm --dir apps/desktop dev:web` to confirm Vite starts, then run `pnpm --dir apps/desktop dev` again from a terminal that has Rust/MSVC on PATH.

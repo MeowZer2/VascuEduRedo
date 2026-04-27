@@ -1,47 +1,60 @@
-import { safeInvoke } from './tauri';
+import { safeInvoke, TAURI_DESKTOP_REQUIRED_MESSAGE } from './tauri';
+
+export type VolumePlane = 'axial' | 'coronal' | 'sagittal';
+
+export interface SliceRange {
+  min: number;
+  max: number;
+  count: number;
+}
+
+export type PlaneSliceRanges = Record<VolumePlane, SliceRange>;
 
 export interface VolumeInfo {
-  id: string;
+  handleId: string;
   sourcePath: string;
   dims: [number, number, number];
   spacing: [number, number, number];
-  intensityRange: [number, number];
-  axialSliceCount: number;
+  intensityMin: number;
+  intensityMax: number;
+  planeSliceRanges: PlaneSliceRanges;
 }
 
 export interface SliceImage {
   handleId: string;
-  plane: 'axial';
+  plane: VolumePlane;
   sliceIndex: number;
   width: number;
   height: number;
   windowWidth: number;
   windowLevel: number;
-  bytesBase64: string;
+  pixelsBase64: string;
 }
 
 export async function loadVolume(path: string): Promise<VolumeInfo> {
   const result = await safeInvoke<VolumeInfo>('volume_load', { path });
   if (!result) {
-    throw new Error('Tauri volume backend is not available. Run with pnpm dev, not pnpm dev:web.');
+    throw new Error(TAURI_DESKTOP_REQUIRED_MESSAGE);
   }
   return result;
 }
 
-export async function loadAxialSlice(
+export async function loadVolumeSlice(
   handleId: string,
+  plane: VolumePlane,
   sliceIndex: number,
   windowWidth: number,
   windowLevel: number,
 ): Promise<SliceImage> {
-  const result = await safeInvoke<SliceImage>('volume_slice_axial', {
+  const result = await safeInvoke<SliceImage>('volume_slice', {
     handleId,
+    plane,
     sliceIndex,
     windowWidth,
     windowLevel,
   });
   if (!result) {
-    throw new Error('Tauri volume backend is not available. Run with pnpm dev, not pnpm dev:web.');
+    throw new Error(TAURI_DESKTOP_REQUIRED_MESSAGE);
   }
   return result;
 }

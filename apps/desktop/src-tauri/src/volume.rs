@@ -7,7 +7,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
-const SAMPLE_AAA_NRRD: &[u8] = include_bytes!("../../../../content/aaa/volumes/sample-aaa-001.nrrd");
+const SAMPLE_AAA_NRRD: &[u8] =
+    include_bytes!("../../../../content/aaa/volumes/sample-aaa-001.nrrd");
 
 #[derive(Default)]
 pub struct VolumeCache {
@@ -30,25 +31,86 @@ struct Volume {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeInfo {
-    id: String,
+    handle_id: String,
     source_path: String,
     dims: [usize; 3],
     spacing: [f32; 3],
-    intensity_range: [i16; 2],
-    axial_slice_count: usize,
+    intensity_min: i16,
+    intensity_max: i16,
+    plane_slice_ranges: PlaneSliceRanges,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaneSliceRanges {
+    axial: SliceRange,
+    coronal: SliceRange,
+    sagittal: SliceRange,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SliceRange {
+    min: usize,
+    max: usize,
+    count: usize,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SliceImage {
     handle_id: String,
-    plane: &'static str,
+    plane: String,
     slice_index: usize,
     width: usize,
     height: usize,
     window_width: f32,
     window_level: f32,
-    bytes_base64: String,
+    pixels_base64: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Plane {
+    Axial,
+    Coronal,
+    Sagittal,
+}
+
+impl Plane {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "axial" => Ok(Self::Axial),
+            "coronal" => Ok(Self::Coronal),
+            "sagittal" => Ok(Self::Sagittal),
+            other => Err(format!(
+                "Unsupported MPR plane '{other}'. Expected axial, coronal, or sagittal."
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Axial => "axial",
+            Self::Coronal => "coronal",
+            Self::Sagittal => "sagittal",
+        }
+    }
+
+    fn image_size(self, volume: &Volume) -> (usize, usize) {
+        match self {
+            Self::Axial => (volume.width, volume.height),
+            Self::Coronal => (volume.width, volume.depth),
+            Self::Sagittal => (volume.height, volume.depth),
+        }
+    }
+
+    fn slice_count(self, volume: &Volume) -> usize {
+        match self {
+            Self::Axial => volume.depth,
+            Self::Coronal => volume.height,
+            Self::Sagittal => volume.width,
+        }
+    }
 }
 
 #[tauri::command]
@@ -68,13 +130,15 @@ pub fn volume_load(path: String, cache: State<'_, VolumeCache>) -> Result<Volume
 }
 
 #[tauri::command]
-pub fn volume_slice_axial(
+pub fn volume_slice(
     handle_id: String,
+    plane: String,
     slice_index: usize,
     window_width: f32,
     window_level: f32,
     cache: State<'_, VolumeCache>,
 ) -> Result<SliceImage, String> {
+    let plane = Plane::parse(&plane)?;
     let volumes = cache
         .volumes
         .lock()
@@ -83,30 +147,32 @@ pub fn volume_slice_axial(
         .get(&handle_id)
         .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?;
 
-    let z = slice_index.min(volume.depth.saturating_sub(1));
-    let mut pixels = Vec::with_capacity(volume.width * volume.height);
-    let low = window_level - window_width / 2.0;
-    let width = window_width.max(1.0);
-
-    for y in 0..volume.height {
-        for x in 0..volume.width {
-            let idx = z * volume.width * volume.height + y * volume.width + x;
-            let hu = volume.voxels[idx] as f32;
-            let gray = (((hu - low) / width) * 255.0).clamp(0.0, 255.0).round() as u8;
-            pixels.push(gray);
-        }
-    }
-
-    Ok(SliceImage {
+    render_slice(
+        volume,
         handle_id,
-        plane: "axial",
-        slice_index: z,
-        width: volume.width,
-        height: volume.height,
+        plane,
+        slice_index,
         window_width,
         window_level,
-        bytes_base64: general_purpose::STANDARD.encode(pixels),
-    })
+    )
+}
+
+#[tauri::command]
+pub fn volume_slice_axial(
+    handle_id: String,
+    slice_index: usize,
+    window_width: f32,
+    window_level: f32,
+    cache: State<'_, VolumeCache>,
+) -> Result<SliceImage, String> {
+    volume_slice(
+        handle_id,
+        "axial".to_string(),
+        slice_index,
+        window_width,
+        window_level,
+        cache,
+    )
 }
 
 #[tauri::command]
@@ -121,14 +187,164 @@ pub fn volume_release(handle_id: String, cache: State<'_, VolumeCache>) -> Resul
 impl Volume {
     fn info(&self) -> VolumeInfo {
         VolumeInfo {
-            id: self.id.clone(),
+            handle_id: self.id.clone(),
             source_path: self.source_path.clone(),
             dims: [self.width, self.height, self.depth],
             spacing: self.spacing,
-            intensity_range: [self.min_hu, self.max_hu],
-            axial_slice_count: self.depth,
+            intensity_min: self.min_hu,
+            intensity_max: self.max_hu,
+            plane_slice_ranges: PlaneSliceRanges {
+                axial: SliceRange::from_count(self.depth),
+                coronal: SliceRange::from_count(self.height),
+                sagittal: SliceRange::from_count(self.width),
+            },
         }
     }
+
+    fn voxel(&self, x: usize, y: usize, z: usize) -> Result<i16, String> {
+        if x >= self.width || y >= self.height || z >= self.depth {
+            return Err(format!(
+                "Voxel coordinate out of range: x={x}, y={y}, z={z} for volume {} x {} x {}",
+                self.width, self.height, self.depth
+            ));
+        }
+
+        let plane_size = self
+            .width
+            .checked_mul(self.height)
+            .ok_or_else(|| "Volume plane dimensions are too large".to_string())?;
+        let z_offset = z
+            .checked_mul(plane_size)
+            .ok_or_else(|| "Volume Z offset is too large".to_string())?;
+        let y_offset = y
+            .checked_mul(self.width)
+            .ok_or_else(|| "Volume Y offset is too large".to_string())?;
+        let idx = z_offset
+            .checked_add(y_offset)
+            .and_then(|offset| offset.checked_add(x))
+            .ok_or_else(|| "Volume voxel offset is too large".to_string())?;
+
+        self.voxels
+            .get(idx)
+            .copied()
+            .ok_or_else(|| format!("Volume data is missing voxel at offset {idx}"))
+    }
+}
+
+impl SliceRange {
+    fn from_count(count: usize) -> Self {
+        Self {
+            min: 0,
+            max: count.saturating_sub(1),
+            count,
+        }
+    }
+}
+
+fn render_slice(
+    volume: &Volume,
+    handle_id: String,
+    plane: Plane,
+    slice_index: usize,
+    window_width: f32,
+    window_level: f32,
+) -> Result<SliceImage, String> {
+    validate_volume_dimensions(volume)?;
+    validate_window(window_width, window_level)?;
+
+    let slice_count = plane.slice_count(volume);
+    if slice_index >= slice_count {
+        return Err(format!(
+            "{} slice index {slice_index} is out of range. Valid range is 0 to {}.",
+            plane.as_str(),
+            slice_count.saturating_sub(1)
+        ));
+    }
+
+    let (width, height) = plane.image_size(volume);
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or_else(|| "MPR slice dimensions are too large".to_string())?;
+    let mut pixels = Vec::with_capacity(pixel_count);
+
+    match plane {
+        Plane::Axial => {
+            let z = slice_index;
+            for y in 0..volume.height {
+                for x in 0..volume.width {
+                    pixels.push(window_voxel(
+                        volume.voxel(x, y, z)?,
+                        window_width,
+                        window_level,
+                    ));
+                }
+            }
+        }
+        Plane::Coronal => {
+            let y = slice_index;
+            for z in 0..volume.depth {
+                for x in 0..volume.width {
+                    pixels.push(window_voxel(
+                        volume.voxel(x, y, z)?,
+                        window_width,
+                        window_level,
+                    ));
+                }
+            }
+        }
+        Plane::Sagittal => {
+            let x = slice_index;
+            for z in 0..volume.depth {
+                for y in 0..volume.height {
+                    pixels.push(window_voxel(
+                        volume.voxel(x, y, z)?,
+                        window_width,
+                        window_level,
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(SliceImage {
+        handle_id,
+        plane: plane.as_str().to_string(),
+        slice_index,
+        width,
+        height,
+        window_width,
+        window_level,
+        pixels_base64: general_purpose::STANDARD.encode(pixels),
+    })
+}
+
+fn validate_volume_dimensions(volume: &Volume) -> Result<(), String> {
+    if volume.width == 0 || volume.height == 0 || volume.depth == 0 {
+        return Err("Volume has invalid zero dimensions".to_string());
+    }
+    Ok(())
+}
+
+fn validate_window(window_width: f32, window_level: f32) -> Result<(), String> {
+    if !window_width.is_finite() || window_width <= 0.0 {
+        return Err(format!(
+            "Window width must be a positive number; got {window_width}"
+        ));
+    }
+    if !window_level.is_finite() {
+        return Err(format!(
+            "Window level must be a finite number; got {window_level}"
+        ));
+    }
+    Ok(())
+}
+
+fn window_voxel(value: i16, window_width: f32, window_level: f32) -> u8 {
+    let low = window_level - window_width / 2.0;
+    let hu = f32::from(value);
+    (((hu - low) / window_width) * 255.0)
+        .clamp(0.0, 255.0)
+        .round() as u8
 }
 
 fn make_volume_id() -> String {
@@ -142,7 +358,16 @@ fn make_volume_id() -> String {
 fn read_volume_bytes(path: &str) -> Result<Vec<u8>, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "sample" || trimmed.ends_with("sample-aaa-001.nrrd") {
-        if let Some(candidate) = resolve_path(trimmed) {
+        if !trimmed.is_empty() && trimmed != "sample" {
+            if let Some(candidate) = resolve_path(trimmed) {
+                return fs::read(&candidate)
+                    .map_err(|error| format!("Failed to read {}: {error}", candidate.display()));
+            }
+        }
+        if trimmed == "sample" {
+            return Ok(SAMPLE_AAA_NRRD.to_vec());
+        }
+        if let Some(candidate) = resolve_path("content/aaa/volumes/sample-aaa-001.nrrd") {
             return fs::read(&candidate)
                 .map_err(|error| format!("Failed to read {}: {error}", candidate.display()));
         }
@@ -183,7 +408,8 @@ fn resolve_path(input: &str) -> Option<PathBuf> {
 }
 
 fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
-    let header_end = find_header_end(bytes).ok_or("Invalid NRRD: missing blank line after header")?;
+    let header_end =
+        find_header_end(bytes).ok_or("Invalid NRRD: missing blank line after header")?;
     let header_text = std::str::from_utf8(&bytes[..header_end])
         .map_err(|_| "Invalid NRRD: header is not UTF-8".to_string())?;
     let data = &bytes[header_end..];
@@ -193,17 +419,24 @@ fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
     }
 
     let fields = parse_header_fields(header_text);
-    let dimension = get_field(&fields, "dimension")?.parse::<usize>()
+    let dimension = get_field(&fields, "dimension")?
+        .parse::<usize>()
         .map_err(|_| "Invalid NRRD: dimension must be a number".to_string())?;
     if dimension != 3 {
-        return Err(format!("Only 3D NRRD volumes are supported in this spike; got dimension {dimension}"));
+        return Err(format!(
+            "Only 3D NRRD volumes are supported in this spike; got dimension {dimension}"
+        ));
     }
 
     let sizes = parse_usize_list(get_field(&fields, "sizes")?)?;
     if sizes.len() != 3 {
         return Err("Invalid NRRD: sizes must contain exactly 3 values".to_string());
     }
-    let voxel_count = sizes[0] * sizes[1] * sizes[2];
+    let dims = [sizes[0], sizes[1], sizes[2]];
+    if dims.iter().any(|size| *size == 0) {
+        return Err("Invalid NRRD: sizes must be greater than zero".to_string());
+    }
+    let voxel_count = checked_voxel_count(dims)?;
 
     let encoding = fields
         .get("encoding")
@@ -225,16 +458,18 @@ fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
         }
     };
 
-    let min_hu = *voxels.iter().min().unwrap_or(&0);
-    let max_hu = *voxels.iter().max().unwrap_or(&0);
-    let spacing = parse_spacing(fields.get("space directions").map(String::as_str));
+    let (min_hu, max_hu) = intensity_range(&voxels)?;
+    let spacing = parse_spacing(
+        fields.get("space directions").map(String::as_str),
+        fields.get("spacings").map(String::as_str),
+    );
 
     Ok(Volume {
         id: String::new(),
         source_path,
-        width: sizes[0],
-        height: sizes[1],
-        depth: sizes[2],
+        width: dims[0],
+        height: dims[1],
+        depth: dims[2],
         spacing,
         min_hu,
         max_hu,
@@ -289,6 +524,28 @@ fn parse_usize_list(raw: &str) -> Result<Vec<usize>, String> {
         .collect()
 }
 
+fn checked_voxel_count(dims: [usize; 3]) -> Result<usize, String> {
+    dims[0]
+        .checked_mul(dims[1])
+        .and_then(|xy| xy.checked_mul(dims[2]))
+        .ok_or_else(|| "Invalid NRRD: volume dimensions are too large".to_string())
+}
+
+fn intensity_range(voxels: &[i16]) -> Result<(i16, i16), String> {
+    let first = *voxels
+        .first()
+        .ok_or_else(|| "Invalid NRRD: volume contains no voxels".to_string())?;
+    let mut min_hu = first;
+    let mut max_hu = first;
+
+    for value in voxels.iter().copied().skip(1) {
+        min_hu = min_hu.min(value);
+        max_hu = max_hu.max(value);
+    }
+
+    Ok((min_hu, max_hu))
+}
+
 fn parse_raw_voxels(
     data: &[u8],
     nrrd_type: &str,
@@ -305,7 +562,11 @@ fn parse_raw_voxels(
     match nrrd_type {
         "signed char" | "int8" | "int8_t" => {
             ensure_len(data, voxel_count, 1)?;
-            voxels.extend(data.iter().take(voxel_count).map(|value| *value as i8 as i16));
+            voxels.extend(
+                data.iter()
+                    .take(voxel_count)
+                    .map(|value| *value as i8 as i16),
+            );
         }
         "uchar" | "unsigned char" | "uint8" | "uint8_t" => {
             ensure_len(data, voxel_count, 1)?;
@@ -315,14 +576,22 @@ fn parse_raw_voxels(
             ensure_len(data, voxel_count, 2)?;
             for chunk in data.chunks_exact(2).take(voxel_count) {
                 let arr = [chunk[0], chunk[1]];
-                voxels.push(if little { i16::from_le_bytes(arr) } else { i16::from_be_bytes(arr) });
+                voxels.push(if little {
+                    i16::from_le_bytes(arr)
+                } else {
+                    i16::from_be_bytes(arr)
+                });
             }
         }
         "ushort" | "unsigned short" | "uint16" | "uint16_t" => {
             ensure_len(data, voxel_count, 2)?;
             for chunk in data.chunks_exact(2).take(voxel_count) {
                 let arr = [chunk[0], chunk[1]];
-                let value = if little { u16::from_le_bytes(arr) } else { u16::from_be_bytes(arr) };
+                let value = if little {
+                    u16::from_le_bytes(arr)
+                } else {
+                    u16::from_be_bytes(arr)
+                };
                 voxels.push(value.min(i16::MAX as u16) as i16);
             }
         }
@@ -330,7 +599,11 @@ fn parse_raw_voxels(
             ensure_len(data, voxel_count, 4)?;
             for chunk in data.chunks_exact(4).take(voxel_count) {
                 let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
-                let value = if little { i32::from_le_bytes(arr) } else { i32::from_be_bytes(arr) };
+                let value = if little {
+                    i32::from_le_bytes(arr)
+                } else {
+                    i32::from_be_bytes(arr)
+                };
                 voxels.push(value.clamp(i16::MIN as i32, i16::MAX as i32) as i16);
             }
         }
@@ -338,7 +611,11 @@ fn parse_raw_voxels(
             ensure_len(data, voxel_count, 4)?;
             for chunk in data.chunks_exact(4).take(voxel_count) {
                 let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
-                let value = if little { u32::from_le_bytes(arr) } else { u32::from_be_bytes(arr) };
+                let value = if little {
+                    u32::from_le_bytes(arr)
+                } else {
+                    u32::from_be_bytes(arr)
+                };
                 voxels.push(value.min(i16::MAX as u32) as i16);
             }
         }
@@ -378,7 +655,9 @@ fn parse_ascii_voxels(data: &[u8], voxel_count: usize) -> Result<Vec<i16>, Strin
 }
 
 fn ensure_len(data: &[u8], voxel_count: usize, bytes_per_voxel: usize) -> Result<(), String> {
-    let required = voxel_count * bytes_per_voxel;
+    let required = voxel_count
+        .checked_mul(bytes_per_voxel)
+        .ok_or_else(|| "Invalid NRRD: required data length is too large".to_string())?;
     if data.len() < required {
         return Err(format!(
             "Invalid NRRD: data too short, expected at least {required} bytes but found {}",
@@ -388,36 +667,44 @@ fn ensure_len(data: &[u8], voxel_count: usize, bytes_per_voxel: usize) -> Result
     Ok(())
 }
 
-fn parse_spacing(space_directions: Option<&str>) -> [f32; 3] {
-    let Some(raw) = space_directions else {
-        return [1.0, 1.0, 1.0];
-    };
+fn parse_spacing(space_directions: Option<&str>, spacings: Option<&str>) -> [f32; 3] {
+    if let Some(raw) = space_directions {
+        let vectors: Vec<[f32; 3]> = raw
+            .split(')')
+            .filter_map(|part| {
+                let start = part.find('(')?;
+                let nums: Vec<f32> = part[start + 1..]
+                    .split(',')
+                    .filter_map(|value| value.trim().parse::<f32>().ok())
+                    .collect();
+                if nums.len() == 3 {
+                    Some([nums[0], nums[1], nums[2]])
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-    let vectors: Vec<[f32; 3]> = raw
-        .split(')')
-        .filter_map(|part| {
-            let start = part.find('(')?;
-            let nums: Vec<f32> = part[start + 1..]
-                .split(',')
-                .filter_map(|value| value.trim().parse::<f32>().ok())
-                .collect();
-            if nums.len() == 3 {
-                Some([nums[0], nums[1], nums[2]])
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if vectors.len() != 3 {
-        return [1.0, 1.0, 1.0];
+        if vectors.len() == 3 {
+            return [
+                vector_length(vectors[0]),
+                vector_length(vectors[1]),
+                vector_length(vectors[2]),
+            ];
+        }
     }
 
-    [
-        vector_length(vectors[0]),
-        vector_length(vectors[1]),
-        vector_length(vectors[2]),
-    ]
+    if let Some(raw) = spacings {
+        let values: Vec<f32> = raw
+            .split_whitespace()
+            .filter_map(|value| value.trim().parse::<f32>().ok())
+            .collect();
+        if values.len() == 3 && values.iter().all(|value| value.is_finite() && *value > 0.0) {
+            return [values[0], values[1], values[2]];
+        }
+    }
+
+    [1.0, 1.0, 1.0]
 }
 
 fn vector_length(vector: [f32; 3]) -> f32 {
