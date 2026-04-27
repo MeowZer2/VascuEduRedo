@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type PointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { isTauriDesktop, TAURI_DESKTOP_REQUIRED_MESSAGE } from '../lib/tauri';
 import {
   base64ToUint8Array,
@@ -15,6 +15,7 @@ interface NrrdViewerProps {
 }
 
 type ViewerStatus = 'browser' | 'loading' | 'ready' | 'error';
+type ViewerToolMode = 'scroll' | 'distance';
 
 interface WindowPreset {
   label: string;
@@ -30,6 +31,37 @@ interface PlaneOption {
 interface ImageSize {
   width: number;
   height: number;
+}
+
+interface SlicePixels extends ImageSize {
+  pixels: Uint8Array;
+}
+
+interface ImagePoint {
+  x: number;
+  y: number;
+}
+
+interface DisplayPoint {
+  x: number;
+  y: number;
+}
+
+interface FittedImageRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  scale: number;
+}
+
+interface DistanceMeasurement {
+  id: string;
+  plane: VolumePlane;
+  sliceIndex: number;
+  start: ImagePoint;
+  end: ImagePoint;
+  distanceMm: number;
 }
 
 const DEFAULT_WINDOW_WIDTH = 700;
@@ -76,14 +108,77 @@ function getPlaneLabel(plane: VolumePlane): string {
   return PLANE_OPTIONS.find((option) => option.value === plane)?.label ?? plane;
 }
 
+function getPlaneSpacing(spacing: [number, number, number], plane: VolumePlane): [number, number] {
+  switch (plane) {
+    case 'axial':
+      return [spacing[0], spacing[1]];
+    case 'coronal':
+      return [spacing[0], spacing[2]];
+    case 'sagittal':
+      return [spacing[1], spacing[2]];
+  }
+}
+
+function distanceMm(start: ImagePoint, end: ImagePoint, spacing: [number, number]): number {
+  const deltaA = (end.x - start.x) * spacing[0];
+  const deltaB = (end.y - start.y) * spacing[1];
+  return Math.sqrt(deltaA * deltaA + deltaB * deltaB);
+}
+
+function fitImageToPanel(imageSize: ImageSize | null, panelSize: ImageSize): FittedImageRect | null {
+  if (!imageSize || imageSize.width <= 0 || imageSize.height <= 0 || panelSize.width <= 0 || panelSize.height <= 0) {
+    return null;
+  }
+
+  const scale = Math.min(panelSize.width / imageSize.width, panelSize.height / imageSize.height);
+  const width = imageSize.width * scale;
+  const height = imageSize.height * scale;
+
+  return {
+    left: (panelSize.width - width) / 2,
+    top: (panelSize.height - height) / 2,
+    width,
+    height,
+    scale,
+  };
+}
+
+function imageToDisplayPoint(point: ImagePoint, fitRect: FittedImageRect): DisplayPoint {
+  return {
+    x: fitRect.left + point.x * fitRect.scale,
+    y: fitRect.top + point.y * fitRect.scale,
+  };
+}
+
+function displayToImagePoint(point: DisplayPoint, imageSize: ImageSize, fitRect: FittedImageRect): ImagePoint | null {
+  const localX = point.x - fitRect.left;
+  const localY = point.y - fitRect.top;
+
+  if (localX < 0 || localY < 0 || localX > fitRect.width || localY > fitRect.height) {
+    return null;
+  }
+
+  return {
+    x: clamp(localX / fitRect.scale, 0, imageSize.width),
+    y: clamp(localY / fitRect.scale, 0, imageSize.height),
+  };
+}
+
 export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const measurementCounterRef = useRef(0);
   const [volume, setVolume] = useState<VolumeInfo | null>(null);
   const [status, setStatus] = useState<ViewerStatus>('loading');
   const [error, setError] = useState<string | null>(null);
   const [plane, setPlane] = useState<VolumePlane>('axial');
+  const [toolMode, setToolMode] = useState<ViewerToolMode>('scroll');
   const [slice, setSlice] = useState(0);
   const [imageSize, setImageSize] = useState<ImageSize | null>(null);
+  const [slicePixels, setSlicePixels] = useState<SlicePixels | null>(null);
+  const [panelSize, setPanelSize] = useState<ImageSize>({ width: 0, height: 0 });
+  const [pendingPoint, setPendingPoint] = useState<ImagePoint | null>(null);
+  const [measurements, setMeasurements] = useState<DistanceMeasurement[]>([]);
   const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH);
   const [windowLevel, setWindowLevel] = useState(DEFAULT_WINDOW_LEVEL);
 
@@ -94,8 +189,11 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     clearCanvas(canvasRef.current);
     setError(null);
     setImageSize(null);
+    setSlicePixels(null);
     setVolume(null);
     setPlane('axial');
+    setPendingPoint(null);
+    setMeasurements([]);
     setSlice(0);
 
     if (!isTauriDesktop()) {
@@ -138,6 +236,43 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
   const totalSlices = currentRange?.count ?? 0;
   const currentSliceIndex = currentRange ? clamp(slice, currentRange.min, currentRange.max) : 0;
   const planeLabel = getPlaneLabel(plane);
+  const fitRect = useMemo(() => fitImageToPanel(imageSize, panelSize), [imageSize, panelSize]);
+
+  useEffect(() => {
+    const observedPanel = panelRef.current;
+    if (!observedPanel) return;
+
+    function updatePanelSize() {
+      setPanelSize((current) => {
+        const next = { width: observedPanel!.clientWidth, height: observedPanel!.clientHeight };
+        if (current.width === next.width && current.height === next.height) {
+          return current;
+        }
+        return next;
+      });
+    }
+
+    updatePanelSize();
+    const observer = new ResizeObserver(updatePanelSize);
+    observer.observe(observedPanel);
+
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setPendingPoint(null);
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  useEffect(() => {
+    setPendingPoint(null);
+  }, [plane, currentSliceIndex, toolMode]);
 
   useEffect(() => {
     if (!volume || status !== 'ready' || !currentRange) return;
@@ -148,32 +283,18 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     const safeWindowLevel = clamp(windowLevel, MIN_WINDOW_LEVEL, MAX_WINDOW_LEVEL);
 
     setImageSize(null);
+    setSlicePixels(null);
+    clearCanvas(canvasRef.current);
     loadVolumeSlice(volume.handleId, plane, safeSlice, safeWindowWidth, safeWindowLevel)
       .then((image) => {
         if (cancelled) return;
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        canvas.width = image.width;
-        canvas.height = image.height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
         const gray = base64ToUint8Array(image.pixelsBase64);
         if (gray.length !== image.width * image.height) {
           throw new Error(`${planeLabel} slice returned ${gray.length} pixels for ${image.width} x ${image.height}.`);
         }
 
-        const rgba = ctx.createImageData(image.width, image.height);
-        for (let index = 0; index < gray.length; index += 1) {
-          const pixelOffset = index * 4;
-          const value = gray[index];
-          rgba.data[pixelOffset] = value;
-          rgba.data[pixelOffset + 1] = value;
-          rgba.data[pixelOffset + 2] = value;
-          rgba.data[pixelOffset + 3] = 255;
-        }
-        ctx.putImageData(rgba, 0, 0);
         setImageSize({ width: image.width, height: image.height });
+        setSlicePixels({ width: image.width, height: image.height, pixels: gray });
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
@@ -186,6 +307,40 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     };
   }, [volume, plane, slice, windowWidth, windowLevel, status, currentRange, planeLabel]);
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !slicePixels || !fitRect) return;
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.max(1, Math.round(fitRect.width * dpr));
+    canvas.height = Math.max(1, Math.round(fitRect.height * dpr));
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const rawCanvas = document.createElement('canvas');
+    rawCanvas.width = slicePixels.width;
+    rawCanvas.height = slicePixels.height;
+    const rawCtx = rawCanvas.getContext('2d');
+    if (!rawCtx) return;
+
+    const rgba = rawCtx.createImageData(slicePixels.width, slicePixels.height);
+    for (let index = 0; index < slicePixels.pixels.length; index += 1) {
+      const pixelOffset = index * 4;
+      const value = slicePixels.pixels[index];
+      rgba.data[pixelOffset] = value;
+      rgba.data[pixelOffset + 1] = value;
+      rgba.data[pixelOffset + 2] = value;
+      rgba.data[pixelOffset + 3] = 255;
+    }
+    rawCtx.putImageData(rgba, 0, 0);
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, fitRect.width, fitRect.height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(rawCanvas, 0, 0, slicePixels.width, slicePixels.height, 0, 0, fitRect.width, fitRect.height);
+  }, [fitRect, slicePixels]);
+
   const metadata = useMemo(() => {
     if (!volume) return null;
     const [width, height, depth] = volume.dims;
@@ -196,6 +351,10 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
   const sliceLabel = volume ? `${currentSliceIndex + 1} / ${totalSlices}` : '-';
   const imageSizeLabel = imageSize ? `${imageSize.width} x ${imageSize.height}` : '-';
   const controlsDisabled = !volume || status !== 'ready';
+  const visibleMeasurements = useMemo(
+    () => measurements.filter((measurement) => measurement.plane === plane && measurement.sliceIndex === currentSliceIndex),
+    [measurements, plane, currentSliceIndex],
+  );
 
   function handlePlaneChange(nextPlane: VolumePlane) {
     setPlane(nextPlane);
@@ -230,6 +389,52 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     setWindowLevel(clamp(value, MIN_WINDOW_LEVEL, MAX_WINDOW_LEVEL));
   }
 
+  function imagePointFromPointer(event: PointerEvent<HTMLDivElement>): ImagePoint | null {
+    const panel = panelRef.current;
+    if (!panel || !imageSize || !fitRect) return null;
+
+    const rect = panel.getBoundingClientRect();
+    const displayPoint = {
+      x: event.clientX - rect.left - panel.clientLeft,
+      y: event.clientY - rect.top - panel.clientTop,
+    };
+
+    return displayToImagePoint(displayPoint, imageSize, fitRect);
+  }
+
+  function handleCanvasPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || toolMode !== 'distance' || !volume || controlsDisabled) return;
+    const nextPoint = imagePointFromPointer(event);
+    if (!nextPoint) return;
+
+    event.preventDefault();
+    if (!pendingPoint) {
+      setPendingPoint(nextPoint);
+      return;
+    }
+
+    const spacing = getPlaneSpacing(volume.spacing, plane);
+    measurementCounterRef.current += 1;
+    const measurement: DistanceMeasurement = {
+      id: `measurement-${measurementCounterRef.current}`,
+      plane,
+      sliceIndex: currentSliceIndex,
+      start: pendingPoint,
+      end: nextPoint,
+      distanceMm: distanceMm(pendingPoint, nextPoint, spacing),
+    };
+
+    setMeasurements((current) => [...current, measurement]);
+    setPendingPoint(null);
+  }
+
+  function clearCurrentMeasurements() {
+    setMeasurements((current) =>
+      current.filter((measurement) => measurement.plane !== plane || measurement.sliceIndex !== currentSliceIndex),
+    );
+    setPendingPoint(null);
+  }
+
   return (
     <section className="viewer-card">
       <div className="viewer-header">
@@ -241,21 +446,54 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
         <span className="pill">{planeLabel} / Real NRRD</span>
       </div>
 
-      <div className="plane-tabs" role="group" aria-label="MPR plane">
-        {PLANE_OPTIONS.map((option) => (
+      <div className="viewer-tool-row">
+        <div className="plane-tabs" role="group" aria-label="MPR plane">
+          {PLANE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={option.value === plane ? 'plane-tab active' : 'plane-tab'}
+              disabled={controlsDisabled}
+              onClick={() => handlePlaneChange(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <div className="tool-tabs" role="group" aria-label="Viewer tool">
           <button
-            key={option.value}
             type="button"
-            className={option.value === plane ? 'plane-tab active' : 'plane-tab'}
+            className={toolMode === 'scroll' ? 'tool-tab active' : 'tool-tab'}
             disabled={controlsDisabled}
-            onClick={() => handlePlaneChange(option.value)}
+            onClick={() => setToolMode('scroll')}
           >
-            {option.label}
+            Scroll
           </button>
-        ))}
+          <button
+            type="button"
+            className={toolMode === 'distance' ? 'tool-tab active' : 'tool-tab'}
+            disabled={controlsDisabled}
+            onClick={() => setToolMode('distance')}
+          >
+            Distance
+          </button>
+        </div>
+        <button
+          type="button"
+          className="secondary-button small"
+          disabled={controlsDisabled || visibleMeasurements.length === 0}
+          onClick={clearCurrentMeasurements}
+        >
+          Clear measurements
+        </button>
       </div>
+      {toolMode === 'distance' ? <p className="viewer-instruction">Click two points to measure distance.</p> : null}
 
-      <div className="canvas-wrap nrrd-canvas-wrap">
+      <div
+        ref={panelRef}
+        className={toolMode === 'distance' ? 'canvas-wrap nrrd-canvas-wrap measuring' : 'canvas-wrap nrrd-canvas-wrap'}
+        onPointerDown={handleCanvasPointerDown}
+      >
         {status === 'loading' ? <div className="viewer-state">Loading bundled NRRD volume through Rust...</div> : null}
         {status === 'browser' ? (
           <div className="viewer-state viewer-state-info">
@@ -269,7 +507,56 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
             <span>{error}</span>
           </div>
         ) : null}
-        <canvas ref={canvasRef} aria-label={`${planeLabel} slice rendered from an NRRD volume`} />
+        <canvas
+          ref={canvasRef}
+          aria-label={`${planeLabel} slice rendered from an NRRD volume`}
+          style={
+            fitRect
+              ? {
+                  left: `${fitRect.left}px`,
+                  top: `${fitRect.top}px`,
+                  width: `${fitRect.width}px`,
+                  height: `${fitRect.height}px`,
+                }
+              : { display: 'none' }
+          }
+        />
+        {imageSize && fitRect && panelSize.width > 0 && panelSize.height > 0 ? (
+            <svg className="measurement-svg" viewBox={`0 0 ${panelSize.width} ${panelSize.height}`} aria-hidden="true">
+              {visibleMeasurements.map((measurement) => {
+                const label = `${measurement.distanceMm.toFixed(1)} mm`;
+                const start = imageToDisplayPoint(measurement.start, fitRect);
+                const end = imageToDisplayPoint(measurement.end, fitRect);
+                const labelX = clamp((start.x + end.x) / 2, 18, panelSize.width - 18);
+                const labelY = clamp((start.y + end.y) / 2 - 10, 18, panelSize.height - 18);
+                return (
+                  <g key={measurement.id}>
+                    <line
+                      x1={start.x}
+                      y1={start.y}
+                      x2={end.x}
+                      y2={end.y}
+                      className="measurement-line"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <circle cx={start.x} cy={start.y} r="4.5" className="measurement-point" />
+                    <circle cx={end.x} cy={end.y} r="4.5" className="measurement-point" />
+                    <text x={labelX} y={labelY} className="measurement-label" textAnchor="middle">
+                      {label}
+                    </text>
+                  </g>
+                );
+              })}
+              {pendingPoint ? (
+                <circle
+                  cx={imageToDisplayPoint(pendingPoint, fitRect).x}
+                  cy={imageToDisplayPoint(pendingPoint, fitRect).y}
+                  r="5"
+                  className="measurement-pending"
+                />
+              ) : null}
+            </svg>
+        ) : null}
         {volume && status === 'ready' ? (
           <div className="measurement-overlay">
             {planeLabel} {currentSliceIndex + 1}/{totalSlices} | {imageSizeLabel} | W {windowWidth} / L {windowLevel}

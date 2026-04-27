@@ -71,7 +71,7 @@ pnpm build
 - Case library
 - Case detail
 - Start training from a case
-- Real NRRD axial/coronal/sagittal MPR viewer with slice/window/level controls
+- Real NRRD axial/coronal/sagittal MPR viewer with slice/window/level and basic distance measurement controls
 - Multiple question types:
   - multiple choice
   - multi-select
@@ -91,7 +91,7 @@ pnpm build
 - DICOM ingest
 - Rust-side SQLite persistence
 - Oblique/curved MPR and 3D volume rendering
-- Measurement drawing tools
+- Advanced measurement tools beyond basic distance
 - Crosshair synchronization
 - Full device catalog
 - Vessel composer
@@ -103,7 +103,7 @@ pnpm build
 1. Add orientation-aware reslicing and linked multi-viewport MPR.
 2. Replace base64 slice transfer with Tauri binary channel transport.
 3. Move attempt/progress persistence from localStorage to SQLite.
-4. Add real measurement tools.
+4. Expand measurement tools beyond basic distance.
 5. Add strict content validation with Zod.
 6. Build a true admin case authoring workflow.
 7. Add content-pack import/export.
