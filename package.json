@@ -1,0 +1,18 @@
+{
+  "name": "vascedu-v0.1-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "VascEdu v0.1 starter scaffold: React + TypeScript + Tauri-ready desktop app.",
+  "scripts": {
+    "dev": "pnpm --dir apps/desktop dev",
+    "dev:web": "pnpm --dir apps/desktop dev:web",
+    "build": "pnpm --dir apps/desktop build",
+    "build:web": "pnpm --dir apps/desktop build:web",
+    "typecheck": "pnpm --dir apps/desktop typecheck"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}

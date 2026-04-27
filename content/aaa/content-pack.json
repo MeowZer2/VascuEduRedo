@@ -1,0 +1,14 @@
+{
+  "id": "aaa-foundations",
+  "title": "AAA Foundations",
+  "version": "0.1.0",
+  "vascularDomain": "Aortic disease",
+  "description": "Starter content pack for AAA CTA interpretation and EVAR planning.",
+  "reviewStatus": "draft",
+  "author": "VascEdu",
+  "recommendedLevel": ["resident", "fellow"],
+  "assets": {
+    "volumes": ["volumes/sample-aaa-001.nrrd"],
+    "diagrams": []
+  }
+}
