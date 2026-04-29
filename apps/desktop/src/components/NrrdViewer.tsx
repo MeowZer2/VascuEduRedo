@@ -1,10 +1,11 @@
-import { type PointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type PointerEvent, type WheelEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { isTauriDesktop, TAURI_DESKTOP_REQUIRED_MESSAGE } from '../lib/tauri';
 import {
   base64ToUint8Array,
   loadVolume,
   loadVolumeSlice,
   releaseVolume,
+  sampleVolume,
   type VolumeInfo,
   type VolumePlane,
 } from '../lib/volume';
@@ -15,7 +16,7 @@ interface NrrdViewerProps {
 }
 
 type ViewerStatus = 'browser' | 'loading' | 'ready' | 'error';
-type ViewerToolMode = 'scroll' | 'distance';
+type ViewerToolMode = 'scroll' | 'pan' | 'distance';
 
 interface WindowPreset {
   label: string;
@@ -55,6 +56,18 @@ interface FittedImageRect {
   scale: number;
 }
 
+interface PanDragState {
+  pointerId: number;
+  start: DisplayPoint;
+  panStart: DisplayPoint;
+}
+
+interface HuReadout {
+  x: number;
+  y: number;
+  intensity: number;
+}
+
 interface DistanceMeasurement {
   id: string;
   plane: VolumePlane;
@@ -70,6 +83,9 @@ const MIN_WINDOW_WIDTH = 1;
 const MAX_WINDOW_WIDTH = 4000;
 const MIN_WINDOW_LEVEL = -1200;
 const MAX_WINDOW_LEVEL = 1200;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 8;
+const ZOOM_STEP = 1.25;
 
 const PLANE_OPTIONS: PlaneOption[] = [
   { value: 'axial', label: 'Axial' },
@@ -125,18 +141,23 @@ function distanceMm(start: ImagePoint, end: ImagePoint, spacing: [number, number
   return Math.sqrt(deltaA * deltaA + deltaB * deltaB);
 }
 
-function fitImageToPanel(imageSize: ImageSize | null, panelSize: ImageSize): FittedImageRect | null {
+function fitImageToPanel(
+  imageSize: ImageSize | null,
+  panelSize: ImageSize,
+  zoom: number,
+  panOffset: DisplayPoint,
+): FittedImageRect | null {
   if (!imageSize || imageSize.width <= 0 || imageSize.height <= 0 || panelSize.width <= 0 || panelSize.height <= 0) {
     return null;
   }
 
-  const scale = Math.min(panelSize.width / imageSize.width, panelSize.height / imageSize.height);
+  const scale = Math.min(panelSize.width / imageSize.width, panelSize.height / imageSize.height) * zoom;
   const width = imageSize.width * scale;
   const height = imageSize.height * scale;
 
   return {
-    left: (panelSize.width - width) / 2,
-    top: (panelSize.height - height) / 2,
+    left: (panelSize.width - width) / 2 + panOffset.x,
+    top: (panelSize.height - height) / 2 + panOffset.y,
     width,
     height,
     scale,
@@ -177,6 +198,11 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
   const [imageSize, setImageSize] = useState<ImageSize | null>(null);
   const [slicePixels, setSlicePixels] = useState<SlicePixels | null>(null);
   const [panelSize, setPanelSize] = useState<ImageSize>({ width: 0, height: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [panOffset, setPanOffset] = useState<DisplayPoint>({ x: 0, y: 0 });
+  const [panDrag, setPanDrag] = useState<PanDragState | null>(null);
+  const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
+  const [huReadout, setHuReadout] = useState<HuReadout | null>(null);
   const [pendingPoint, setPendingPoint] = useState<ImagePoint | null>(null);
   const [measurements, setMeasurements] = useState<DistanceMeasurement[]>([]);
   const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH);
@@ -192,6 +218,11 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     setSlicePixels(null);
     setVolume(null);
     setPlane('axial');
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+    setPanDrag(null);
+    setHoverPoint(null);
+    setHuReadout(null);
     setPendingPoint(null);
     setMeasurements([]);
     setSlice(0);
@@ -236,15 +267,16 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
   const totalSlices = currentRange?.count ?? 0;
   const currentSliceIndex = currentRange ? clamp(slice, currentRange.min, currentRange.max) : 0;
   const planeLabel = getPlaneLabel(plane);
-  const fitRect = useMemo(() => fitImageToPanel(imageSize, panelSize), [imageSize, panelSize]);
+  const fitRect = useMemo(() => fitImageToPanel(imageSize, panelSize, zoom, panOffset), [imageSize, panelSize, zoom, panOffset]);
 
   useEffect(() => {
     const observedPanel = panelRef.current;
     if (!observedPanel) return;
+    const panel = observedPanel;
 
     function updatePanelSize() {
       setPanelSize((current) => {
-        const next = { width: observedPanel!.clientWidth, height: observedPanel!.clientHeight };
+        const next = { width: panel.clientWidth, height: panel.clientHeight };
         if (current.width === next.width && current.height === next.height) {
           return current;
         }
@@ -254,7 +286,7 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
 
     updatePanelSize();
     const observer = new ResizeObserver(updatePanelSize);
-    observer.observe(observedPanel);
+    observer.observe(panel);
 
     return () => observer.disconnect();
   }, []);
@@ -273,6 +305,12 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
   useEffect(() => {
     setPendingPoint(null);
   }, [plane, currentSliceIndex, toolMode]);
+
+  useEffect(() => {
+    setHoverPoint(null);
+    setHuReadout(null);
+    setPanDrag(null);
+  }, [plane, currentSliceIndex]);
 
   useEffect(() => {
     if (!volume || status !== 'ready' || !currentRange) return;
@@ -341,6 +379,33 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     ctx.drawImage(rawCanvas, 0, 0, slicePixels.width, slicePixels.height, 0, 0, fitRect.width, fitRect.height);
   }, [fitRect, slicePixels]);
 
+  useEffect(() => {
+    if (!volume || !hoverPoint || !imageSize || status !== 'ready') {
+      setHuReadout(null);
+      return;
+    }
+
+    const sampleX = Math.floor(clamp(hoverPoint.x, 0, imageSize.width - 1));
+    const sampleY = Math.floor(clamp(hoverPoint.y, 0, imageSize.height - 1));
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      sampleVolume(volume.handleId, plane, currentSliceIndex, sampleX, sampleY)
+        .then((sample) => {
+          if (cancelled) return;
+          setHuReadout({ x: sample.x, y: sample.y, intensity: sample.intensity });
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setHuReadout(null);
+        });
+    }, 75);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [currentSliceIndex, hoverPoint, imageSize, plane, status, volume]);
+
   const metadata = useMemo(() => {
     if (!volume) return null;
     const [width, height, depth] = volume.dims;
@@ -361,6 +426,8 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     if (volume) {
       setSlice(midpoint(getSliceCount(volume, nextPlane)));
       setImageSize(null);
+      setZoom(1);
+      setPanOffset({ x: 0, y: 0 });
       if (status === 'error') {
         setStatus('ready');
         setError(null);
@@ -377,6 +444,10 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     if (volume) {
       setSlice(midpoint(getSliceCount(volume, plane)));
     }
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+    setPanDrag(null);
+    setPendingPoint(null);
     setWindowWidth(DEFAULT_WINDOW_WIDTH);
     setWindowLevel(DEFAULT_WINDOW_LEVEL);
   }
@@ -389,21 +460,52 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     setWindowLevel(clamp(value, MIN_WINDOW_LEVEL, MAX_WINDOW_LEVEL));
   }
 
-  function imagePointFromPointer(event: PointerEvent<HTMLDivElement>): ImagePoint | null {
+  function setBoundedZoom(value: number) {
+    const nextZoom = clamp(value, MIN_ZOOM, MAX_ZOOM);
+    setZoom(nextZoom);
+    if (nextZoom <= 1) {
+      setPanOffset({ x: 0, y: 0 });
+    }
+  }
+
+  function zoomBy(factor: number) {
+    setBoundedZoom(zoom * factor);
+  }
+
+  function displayPointFromPointer(event: PointerEvent<HTMLDivElement>): DisplayPoint | null {
     const panel = panelRef.current;
-    if (!panel || !imageSize || !fitRect) return null;
+    if (!panel) return null;
 
     const rect = panel.getBoundingClientRect();
-    const displayPoint = {
+    return {
       x: event.clientX - rect.left - panel.clientLeft,
       y: event.clientY - rect.top - panel.clientTop,
     };
+  }
+
+  function imagePointFromPointer(event: PointerEvent<HTMLDivElement>): ImagePoint | null {
+    const displayPoint = displayPointFromPointer(event);
+    if (!displayPoint || !imageSize || !fitRect) return null;
 
     return displayToImagePoint(displayPoint, imageSize, fitRect);
   }
 
   function handleCanvasPointerDown(event: PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || toolMode !== 'distance' || !volume || controlsDisabled) return;
+    if (!volume || controlsDisabled) return;
+
+    const canStartPan = zoom > 1 && ((toolMode === 'pan' && event.button === 0) || event.button === 1 || event.button === 2);
+    if (canStartPan) {
+      const start = displayPointFromPointer(event);
+      if (!start) return;
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setPanDrag({ pointerId: event.pointerId, start, panStart: panOffset });
+      setHoverPoint(null);
+      setHuReadout(null);
+      return;
+    }
+
+    if (event.button !== 0 || toolMode !== 'distance') return;
     const nextPoint = imagePointFromPointer(event);
     if (!nextPoint) return;
 
@@ -426,6 +528,50 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
 
     setMeasurements((current) => [...current, measurement]);
     setPendingPoint(null);
+  }
+
+  function handleCanvasPointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (panDrag) {
+      const point = displayPointFromPointer(event);
+      if (!point) return;
+      event.preventDefault();
+      setPanOffset({
+        x: panDrag.panStart.x + point.x - panDrag.start.x,
+        y: panDrag.panStart.y + point.y - panDrag.start.y,
+      });
+      return;
+    }
+
+    setHoverPoint(imagePointFromPointer(event));
+  }
+
+  function endPanDrag(event: PointerEvent<HTMLDivElement>) {
+    if (panDrag?.pointerId === event.pointerId) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      setPanDrag(null);
+    }
+  }
+
+  function handleCanvasPointerLeave() {
+    if (!panDrag) {
+      setHoverPoint(null);
+      setHuReadout(null);
+    }
+  }
+
+  function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
+    if (controlsDisabled || !currentRange || event.deltaY === 0) return;
+
+    event.preventDefault();
+    if (event.ctrlKey) {
+      zoomBy(event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+      return;
+    }
+
+    const step = event.deltaY > 0 ? 1 : -1;
+    setSlice((current) => clamp(current + step, currentRange.min, currentRange.max));
   }
 
   function clearCurrentMeasurements() {
@@ -471,6 +617,14 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
           </button>
           <button
             type="button"
+            className={toolMode === 'pan' ? 'tool-tab active' : 'tool-tab'}
+            disabled={controlsDisabled}
+            onClick={() => setToolMode('pan')}
+          >
+            Pan
+          </button>
+          <button
+            type="button"
             className={toolMode === 'distance' ? 'tool-tab active' : 'tool-tab'}
             disabled={controlsDisabled}
             onClick={() => setToolMode('distance')}
@@ -478,6 +632,18 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
             Distance
           </button>
         </div>
+        <div className="zoom-tools" aria-label="Zoom controls">
+          <button type="button" className="tool-tab" disabled={controlsDisabled} onClick={() => zoomBy(1 / ZOOM_STEP)}>
+            Zoom -
+          </button>
+          <span>{Math.round(zoom * 100)}%</span>
+          <button type="button" className="tool-tab" disabled={controlsDisabled} onClick={() => zoomBy(ZOOM_STEP)}>
+            Zoom +
+          </button>
+        </div>
+        <button type="button" className="secondary-button small" disabled={controlsDisabled} onClick={resetView}>
+          Reset view
+        </button>
         <button
           type="button"
           className="secondary-button small"
@@ -491,8 +657,14 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
 
       <div
         ref={panelRef}
-        className={toolMode === 'distance' ? 'canvas-wrap nrrd-canvas-wrap measuring' : 'canvas-wrap nrrd-canvas-wrap'}
+        className={`canvas-wrap nrrd-canvas-wrap ${toolMode === 'distance' ? 'measuring' : ''} ${toolMode === 'pan' ? 'panning' : ''}`}
         onPointerDown={handleCanvasPointerDown}
+        onPointerMove={handleCanvasPointerMove}
+        onPointerUp={endPanDrag}
+        onPointerCancel={endPanDrag}
+        onPointerLeave={handleCanvasPointerLeave}
+        onWheel={handleCanvasWheel}
+        onContextMenu={(event) => event.preventDefault()}
       >
         {status === 'loading' ? <div className="viewer-state">Loading bundled NRRD volume through Rust...</div> : null}
         {status === 'browser' ? (
@@ -575,6 +747,15 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
           {status === 'error' ? 'The viewer stopped before rendering the slice.' : null}
         </span>
       </div>
+      <div className="viewer-readout">
+        {huReadout ? (
+          <span>
+            {planeLabel} {currentSliceIndex + 1}/{totalSlices} | pixel {huReadout.x}, {huReadout.y} | intensity {huReadout.intensity}
+          </span>
+        ) : (
+          <span>Hover over the image for pixel intensity.</span>
+        )}
+      </div>
 
       <div className="viewer-controls">
         <label className="control-wide">
@@ -655,9 +836,6 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
             {preset.label}
           </button>
         ))}
-        <button type="button" className="secondary-button small" disabled={controlsDisabled} onClick={resetView}>
-          Reset view
-        </button>
       </div>
     </section>
   );

@@ -31,6 +31,15 @@ export interface SliceImage {
   pixelsBase64: string;
 }
 
+export interface VolumeSample {
+  handleId: string;
+  plane: VolumePlane;
+  sliceIndex: number;
+  x: number;
+  y: number;
+  intensity: number;
+}
+
 export async function loadVolume(path: string): Promise<VolumeInfo> {
   const result = await safeInvoke<VolumeInfo>('volume_load', { path });
   if (!result) {
@@ -52,6 +61,26 @@ export async function loadVolumeSlice(
     sliceIndex,
     windowWidth,
     windowLevel,
+  });
+  if (!result) {
+    throw new Error(TAURI_DESKTOP_REQUIRED_MESSAGE);
+  }
+  return result;
+}
+
+export async function sampleVolume(
+  handleId: string,
+  plane: VolumePlane,
+  sliceIndex: number,
+  x: number,
+  y: number,
+): Promise<VolumeSample> {
+  const result = await safeInvoke<VolumeSample>('volume_sample', {
+    handleId,
+    plane,
+    sliceIndex,
+    x,
+    y,
   });
   if (!result) {
     throw new Error(TAURI_DESKTOP_REQUIRED_MESSAGE);

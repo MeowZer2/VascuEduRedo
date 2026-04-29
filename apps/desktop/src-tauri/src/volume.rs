@@ -69,6 +69,17 @@ pub struct SliceImage {
     pixels_base64: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeSample {
+    handle_id: String,
+    plane: String,
+    slice_index: usize,
+    x: usize,
+    y: usize,
+    intensity: i16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Plane {
     Axial,
@@ -109,6 +120,20 @@ impl Plane {
             Self::Axial => volume.depth,
             Self::Coronal => volume.height,
             Self::Sagittal => volume.width,
+        }
+    }
+
+    fn sample_voxel(
+        self,
+        volume: &Volume,
+        slice_index: usize,
+        x: usize,
+        y: usize,
+    ) -> Result<i16, String> {
+        match self {
+            Self::Axial => volume.voxel(x, y, slice_index),
+            Self::Coronal => volume.voxel(x, slice_index, y),
+            Self::Sagittal => volume.voxel(slice_index, x, y),
         }
     }
 }
@@ -173,6 +198,49 @@ pub fn volume_slice_axial(
         window_level,
         cache,
     )
+}
+
+#[tauri::command]
+pub fn volume_sample(
+    handle_id: String,
+    plane: String,
+    slice_index: usize,
+    x: f32,
+    y: f32,
+    cache: State<'_, VolumeCache>,
+) -> Result<VolumeSample, String> {
+    let plane = Plane::parse(&plane)?;
+    let volumes = cache
+        .volumes
+        .lock()
+        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    let volume = volumes
+        .get(&handle_id)
+        .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?;
+
+    validate_volume_dimensions(volume)?;
+    let slice_count = plane.slice_count(volume);
+    if slice_index >= slice_count {
+        return Err(format!(
+            "{} slice index {slice_index} is out of range. Valid range is 0 to {}.",
+            plane.as_str(),
+            slice_count.saturating_sub(1)
+        ));
+    }
+
+    let (image_width, image_height) = plane.image_size(volume);
+    let x_index = image_coordinate_to_index(x, image_width, "x")?;
+    let y_index = image_coordinate_to_index(y, image_height, "y")?;
+    let intensity = plane.sample_voxel(volume, slice_index, x_index, y_index)?;
+
+    Ok(VolumeSample {
+        handle_id,
+        plane: plane.as_str().to_string(),
+        slice_index,
+        x: x_index,
+        y: y_index,
+        intensity,
+    })
 }
 
 #[tauri::command]
@@ -337,6 +405,27 @@ fn validate_window(window_width: f32, window_level: f32) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn image_coordinate_to_index(value: f32, limit: usize, axis: &str) -> Result<usize, String> {
+    if !value.is_finite() {
+        return Err(format!(
+            "Sample {axis} coordinate must be finite; got {value}"
+        ));
+    }
+    if limit == 0 {
+        return Err(format!(
+            "Cannot sample {axis} coordinate from an empty image axis"
+        ));
+    }
+    if value < 0.0 || value >= limit as f32 {
+        return Err(format!(
+            "Sample {axis} coordinate {value} is out of range. Valid range is 0 to {}.",
+            limit.saturating_sub(1)
+        ));
+    }
+
+    Ok(value.floor() as usize)
 }
 
 fn window_voxel(value: i16, window_width: f32, window_level: f32) -> u8 {
