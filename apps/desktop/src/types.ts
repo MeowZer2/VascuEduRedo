@@ -91,6 +91,7 @@ export interface ShortTextQuestion extends QuestionBase {
 export interface MeasurementQuestion extends QuestionBase {
   type: 'measurement';
   target: string;
+  plane: 'axial' | 'coronal' | 'sagittal';
   correctValue: number;
   tolerance: number;
   unit: string;

@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react';
+import type { ViewerMeasurement } from '../../components/NrrdViewer';
 import { evaluateAnswer, newAttemptId } from '../../lib/quiz';
-import type { AttemptResult, Question, QuestionResult, UserAnswer, VascCase } from '../../types';
+import type { AttemptResult, MeasurementQuestion, Question, QuestionResult, UserAnswer, VascCase } from '../../types';
 
 interface QuestionPanelProps {
   vascCase: VascCase;
+  latestMeasurement: ViewerMeasurement | null;
   onComplete: (attempt: AttemptResult) => void;
+  onQuestionChange: (index: number) => void;
 }
 
 function defaultAnswer(question: Question): UserAnswer {
@@ -14,7 +17,7 @@ function defaultAnswer(question: Question): UserAnswer {
   return '';
 }
 
-export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
+export function QuestionPanel({ vascCase, latestMeasurement, onComplete, onQuestionChange }: QuestionPanelProps) {
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState<UserAnswer>(defaultAnswer(vascCase.questions[0]));
   const [hintsUsed, setHintsUsed] = useState<Record<string, number>>({});
@@ -27,13 +30,27 @@ export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
 
   const totalPossible = useMemo(() => vascCase.questions.reduce((sum, item) => sum + item.points, 0), [vascCase.questions]);
 
+  // For measurement questions, determine if the latest viewer measurement is on the right plane.
+  const measurementQuestion = question.type === 'measurement' ? (question as MeasurementQuestion) : null;
+  const measurementOnCorrectPlane = measurementQuestion && latestMeasurement?.plane === measurementQuestion.plane;
+  // Convert mm to the question's unit (currently only mm and cm are expected).
+  function convertToUnit(mm: number, unit: string): number {
+    if (unit === 'cm') return mm / 10;
+    return mm;
+  }
+  const selectedMeasurementValue =
+    measurementQuestion && measurementOnCorrectPlane && latestMeasurement
+      ? convertToUnit(latestMeasurement.distanceMm, measurementQuestion.unit)
+      : null;
+
   function revealHint() {
     if (!question.hints || shownHints >= question.hints.length) return;
     setHintsUsed((current) => ({ ...current, [question.id]: shownHints + 1 }));
   }
 
   function submit() {
-    const result = evaluateAnswer(question, answer, shownHints);
+    const effectiveAnswer = measurementQuestion ? selectedMeasurementValue : answer;
+    const result = evaluateAnswer(question, effectiveAnswer, shownHints);
     setSubmittedResult(result);
   }
 
@@ -59,9 +76,11 @@ export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
       return;
     }
 
-    const nextQuestion = vascCase.questions[index + 1];
-    setIndex((current) => current + 1);
+    const nextIndex = index + 1;
+    const nextQuestion = vascCase.questions[nextIndex];
+    setIndex(nextIndex);
     setAnswer(defaultAnswer(nextQuestion));
+    onQuestionChange(nextIndex);
   }
 
   function renderAnswerInput() {
@@ -108,15 +127,26 @@ export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
       case 'trueFalse':
         return (
           <div className="binary-row">
-            <button className={answer === true ? 'choice-button selected' : 'choice-button'} onClick={() => setAnswer(true)} disabled={Boolean(submittedResult)}>True</button>
-            <button className={answer === false ? 'choice-button selected' : 'choice-button'} onClick={() => setAnswer(false)} disabled={Boolean(submittedResult)}>False</button>
+            <button
+              className={answer === true ? 'choice-button selected' : 'choice-button'}
+              onClick={() => setAnswer(true)}
+              disabled={Boolean(submittedResult)}
+            >
+              True
+            </button>
+            <button
+              className={answer === false ? 'choice-button selected' : 'choice-button'}
+              onClick={() => setAnswer(false)}
+              disabled={Boolean(submittedResult)}
+            >
+              False
+            </button>
           </div>
         );
       case 'numeric':
-      case 'measurement':
         return (
           <label className="field-label">
-            Answer {question.type === 'numeric' ? question.unit ?? '' : question.unit}
+            Answer {question.unit ?? ''}
             <input
               className="text-input"
               type="number"
@@ -127,6 +157,45 @@ export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
             />
           </label>
         );
+      case 'measurement': {
+        const mq = question as MeasurementQuestion;
+        const planeName = mq.plane.charAt(0).toUpperCase() + mq.plane.slice(1);
+        const wrongPlane = latestMeasurement && latestMeasurement.plane !== mq.plane;
+        return (
+          <div className="measurement-answer-panel">
+            <div className="measurement-instructions">
+              <p>
+                Use the <strong>Distance</strong> tool on the{' '}
+                <strong>{planeName}</strong> plane to measure: <em>{mq.target}</em>.
+              </p>
+              <p className="measurement-instructions-sub">
+                The most recent measurement on the {planeName} plane will be submitted as your answer.
+              </p>
+            </div>
+            {wrongPlane ? (
+              <div className="measurement-plane-warning">
+                Current measurement is on the{' '}
+                <strong>{latestMeasurement.plane.charAt(0).toUpperCase() + latestMeasurement.plane.slice(1)}</strong> plane.
+                Switch to <strong>{planeName}</strong> and draw a new measurement.
+              </div>
+            ) : null}
+            <div className={`measurement-readout ${selectedMeasurementValue !== null ? 'has-value' : 'no-value'}`}>
+              {selectedMeasurementValue !== null ? (
+                <>
+                  <span className="measurement-readout-label">Selected measurement</span>
+                  <span className="measurement-readout-value">
+                    {selectedMeasurementValue.toFixed(2)} {mq.unit}
+                  </span>
+                </>
+              ) : (
+                <span className="measurement-readout-empty">
+                  No {planeName} measurement yet — draw one in the viewer.
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      }
       case 'shortText':
         return (
           <label className="field-label">
@@ -143,6 +212,32 @@ export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
     }
   }
 
+  function canSubmit(): boolean {
+    if (submittedResult) return false;
+    if (measurementQuestion) return selectedMeasurementValue !== null;
+    if (answer === null) return false;
+    if (Array.isArray(answer) && answer.length === 0) return false;
+    if (typeof answer === 'string' && answer.trim() === '') return false;
+    return true;
+  }
+
+  function renderFeedback() {
+    if (!submittedResult || !measurementQuestion) return null;
+    const submitted = submittedResult.answer as number;
+    const expected = measurementQuestion.correctValue;
+    const diff = Math.abs(submitted - expected);
+    return (
+      <div className={submittedResult.correct ? 'result-box correct' : 'result-box incorrect'}>
+        <strong>{submittedResult.correct ? 'Correct' : 'Not correct'}</strong>
+        <p>Your measurement: {submitted.toFixed(2)} {measurementQuestion.unit}</p>
+        <p>Expected: {expected} {measurementQuestion.unit} ± {measurementQuestion.tolerance} {measurementQuestion.unit}</p>
+        <p>Difference: {diff.toFixed(2)} {measurementQuestion.unit}</p>
+        <p>{submittedResult.explanation}</p>
+        <p>Score: {submittedResult.awardedPoints} / {submittedResult.maxPoints}</p>
+      </div>
+    );
+  }
+
   return (
     <section className="question-card">
       <div className="question-progress">
@@ -151,11 +246,15 @@ export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
       </div>
       <h3>{question.prompt}</h3>
 
-      {renderAnswerInput()}
+      {!submittedResult ? renderAnswerInput() : null}
 
       {question.hints && question.hints.length > 0 ? (
         <div className="hint-box">
-          <button className="secondary-button small" onClick={revealHint} disabled={shownHints >= question.hints.length || Boolean(submittedResult)}>
+          <button
+            className="secondary-button small"
+            onClick={revealHint}
+            disabled={shownHints >= question.hints.length || Boolean(submittedResult)}
+          >
             Show hint
           </button>
           {question.hints.slice(0, shownHints).map((hint, hintIndex) => (
@@ -165,19 +264,25 @@ export function QuestionPanel({ vascCase, onComplete }: QuestionPanelProps) {
       ) : null}
 
       {submittedResult ? (
-        <div className={submittedResult.correct ? 'result-box correct' : 'result-box incorrect'}>
-          <strong>{submittedResult.correct ? 'Correct' : 'Not correct'}</strong>
-          <p>Expected: {submittedResult.expected}</p>
-          <p>{submittedResult.explanation}</p>
-          <p>Score: {submittedResult.awardedPoints} / {submittedResult.maxPoints}</p>
-        </div>
+        measurementQuestion ? renderFeedback() : (
+          <div className={submittedResult.correct ? 'result-box correct' : 'result-box incorrect'}>
+            <strong>{submittedResult.correct ? 'Correct' : 'Not correct'}</strong>
+            <p>Expected: {submittedResult.expected}</p>
+            <p>{submittedResult.explanation}</p>
+            <p>Score: {submittedResult.awardedPoints} / {submittedResult.maxPoints}</p>
+          </div>
+        )
       ) : null}
 
       <div className="question-actions">
         {!submittedResult ? (
-          <button className="primary-button" onClick={submit}>Submit answer</button>
+          <button className="primary-button" onClick={submit} disabled={!canSubmit()}>
+            Submit answer
+          </button>
         ) : (
-          <button className="primary-button" onClick={next}>{isLast ? 'Finish case' : 'Next question'}</button>
+          <button className="primary-button" onClick={next}>
+            {isLast ? 'Finish case' : 'Next question'}
+          </button>
         )}
       </div>
     </section>

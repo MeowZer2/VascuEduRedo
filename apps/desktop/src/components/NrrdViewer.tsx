@@ -10,9 +10,20 @@ import {
   type VolumePlane,
 } from '../lib/volume';
 
+export interface ViewerMeasurement {
+  id: string;
+  plane: VolumePlane;
+  sliceIndex: number;
+  distanceMm: number;
+}
+
 interface NrrdViewerProps {
   volumePath: string;
   description: string;
+  /** Suggest a tool mode (e.g. 'distance' when a measurement question is active). */
+  requestedTool?: ViewerToolMode;
+  /** Called whenever the most recently completed measurement changes or is cleared. */
+  onLatestMeasurementChange?: (measurement: ViewerMeasurement | null) => void;
 }
 
 type ViewerStatus = 'browser' | 'loading' | 'ready' | 'error';
@@ -185,7 +196,7 @@ function displayToImagePoint(point: DisplayPoint, imageSize: ImageSize, fitRect:
   };
 }
 
-export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
+export function NrrdViewer({ volumePath, description, requestedTool, onLatestMeasurementChange }: NrrdViewerProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const measurementCounterRef = useRef(0);
@@ -207,6 +218,8 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
   const [measurements, setMeasurements] = useState<DistanceMeasurement[]>([]);
   const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH);
   const [windowLevel, setWindowLevel] = useState(DEFAULT_WINDOW_LEVEL);
+  const onLatestMeasurementChangeRef = useRef(onLatestMeasurementChange);
+  onLatestMeasurementChangeRef.current = onLatestMeasurementChange;
 
   useEffect(() => {
     let cancelled = false;
@@ -311,6 +324,25 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
     setHuReadout(null);
     setPanDrag(null);
   }, [plane, currentSliceIndex]);
+
+  // Apply a suggested tool mode from the parent (e.g. when a measurement question is active).
+  useEffect(() => {
+    if (requestedTool && status === 'ready') {
+      setToolMode(requestedTool);
+    }
+  }, [requestedTool, status]);
+
+  // Notify parent whenever the set of measurements changes so it can track the latest one.
+  useEffect(() => {
+    const cb = onLatestMeasurementChangeRef.current;
+    if (!cb) return;
+    if (measurements.length === 0) {
+      cb(null);
+    } else {
+      const last = measurements[measurements.length - 1];
+      cb({ id: last.id, plane: last.plane, sliceIndex: last.sliceIndex, distanceMm: last.distanceMm });
+    }
+  }, [measurements]);
 
   useEffect(() => {
     if (!volume || status !== 'ready' || !currentRange) return;
@@ -695,7 +727,8 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
         />
         {imageSize && fitRect && panelSize.width > 0 && panelSize.height > 0 ? (
             <svg className="measurement-svg" viewBox={`0 0 ${panelSize.width} ${panelSize.height}`} aria-hidden="true">
-              {visibleMeasurements.map((measurement) => {
+              {visibleMeasurements.map((measurement, idx) => {
+                const isLatest = idx === visibleMeasurements.length - 1 && measurements[measurements.length - 1]?.id === measurement.id;
                 const label = `${measurement.distanceMm.toFixed(1)} mm`;
                 const start = imageToDisplayPoint(measurement.start, fitRect);
                 const end = imageToDisplayPoint(measurement.end, fitRect);
@@ -708,7 +741,7 @@ export function NrrdViewer({ volumePath, description }: NrrdViewerProps) {
                       y1={start.y}
                       x2={end.x}
                       y2={end.y}
-                      className="measurement-line"
+                      className={isLatest ? 'measurement-line measurement-line-selected' : 'measurement-line'}
                       vectorEffect="non-scaling-stroke"
                     />
                     <circle cx={start.x} cy={start.y} r="4.5" className="measurement-point" />
