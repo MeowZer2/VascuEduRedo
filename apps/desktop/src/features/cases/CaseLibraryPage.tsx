@@ -1,12 +1,14 @@
 import { Tag } from '../../components/Tag';
-import { cases, categories } from '../../data/sampleContent';
+import { categories } from '../../data/sampleContent';
+import type { VascCase } from '../../types';
 
 interface CaseLibraryPageProps {
+  cases: VascCase[];
   onOpenCase: (caseId: string) => void;
   onStartCase: (caseId: string) => void;
 }
 
-export function CaseLibraryPage({ onOpenCase, onStartCase }: CaseLibraryPageProps) {
+export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryPageProps) {
   return (
     <div className="page-stack">
       <header className="page-header">

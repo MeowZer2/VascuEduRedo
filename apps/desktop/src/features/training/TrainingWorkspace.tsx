@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NrrdViewer, type ViewerMeasurement } from '../../components/NrrdViewer';
+import { createAttempt } from '../../lib/attempts';
 import { saveAttempt } from '../../lib/progress';
 import type { AttemptResult, MeasurementQuestion, VascCase } from '../../types';
 import { QuestionPanel } from './QuestionPanel';
@@ -13,6 +14,20 @@ interface TrainingWorkspaceProps {
 export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: TrainingWorkspaceProps) {
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
+  const [attemptId, setAttemptId] = useState<string | null>(null);
+
+  // Create an attempt row in SQLite when the workspace opens. In browser mode this returns
+  // null and we just track the attempt locally without persistent ids.
+  useEffect(() => {
+    let cancelled = false;
+    createAttempt(vascCase.id).then((attempt) => {
+      if (cancelled) return;
+      setAttemptId(attempt?.id ?? null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [vascCase.id]);
 
   const activeQuestion = vascCase.questions[activeQuestionIndex];
   const isMeasurementQuestion = activeQuestion?.type === 'measurement';
@@ -53,6 +68,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
       <aside className="training-aside">
         <QuestionPanel
           vascCase={vascCase}
+          attemptId={attemptId}
           latestMeasurement={latestMeasurement}
           onComplete={handleComplete}
           onQuestionChange={setActiveQuestionIndex}

@@ -1,13 +1,15 @@
 import { StatCard } from '../../components/StatCard';
-import { categories, cases } from '../../data/sampleContent';
+import { categories } from '../../data/sampleContent';
 import { getProgressSummary } from '../../lib/progress';
+import type { VascCase } from '../../types';
 
 interface HomePageProps {
+  cases: VascCase[];
   onStart: () => void;
   onOpenCases: () => void;
 }
 
-export function HomePage({ onStart, onOpenCases }: HomePageProps) {
+export function HomePage({ cases, onStart, onOpenCases }: HomePageProps) {
   const progress = getProgressSummary();
 
   return (

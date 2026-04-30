@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react';
 import type { ViewerMeasurement } from '../../components/NrrdViewer';
+import { completeAttempt, submitQuestionResponse } from '../../lib/attempts';
 import { evaluateAnswer, newAttemptId } from '../../lib/quiz';
 import type { AttemptResult, MeasurementQuestion, Question, QuestionResult, UserAnswer, VascCase } from '../../types';
 
 interface QuestionPanelProps {
   vascCase: VascCase;
+  /** SQLite attempt id created by `TrainingWorkspace`, or null in browser mode. */
+  attemptId: string | null;
   latestMeasurement: ViewerMeasurement | null;
   onComplete: (attempt: AttemptResult) => void;
   onQuestionChange: (index: number) => void;
@@ -17,7 +20,7 @@ function defaultAnswer(question: Question): UserAnswer {
   return '';
 }
 
-export function QuestionPanel({ vascCase, latestMeasurement, onComplete, onQuestionChange }: QuestionPanelProps) {
+export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComplete, onQuestionChange }: QuestionPanelProps) {
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState<UserAnswer>(defaultAnswer(vascCase.questions[0]));
   const [hintsUsed, setHintsUsed] = useState<Record<string, number>>({});
@@ -52,6 +55,10 @@ export function QuestionPanel({ vascCase, latestMeasurement, onComplete, onQuest
     const effectiveAnswer = measurementQuestion ? selectedMeasurementValue : answer;
     const result = evaluateAnswer(question, effectiveAnswer, shownHints);
     setSubmittedResult(result);
+    // Persist the response in SQLite (no-op in browser mode).
+    if (attemptId) {
+      void submitQuestionResponse(attemptId, question.id, effectiveAnswer, result.correct);
+    }
   }
 
   function next() {
@@ -63,7 +70,7 @@ export function QuestionPanel({ vascCase, latestMeasurement, onComplete, onQuest
     if (isLast) {
       const score = updatedResults.reduce((sum, item) => sum + item.awardedPoints, 0);
       const attempt: AttemptResult = {
-        id: newAttemptId(),
+        id: attemptId ?? newAttemptId(),
         caseId: vascCase.id,
         caseTitle: vascCase.title,
         completedAt: new Date().toISOString(),
@@ -72,6 +79,10 @@ export function QuestionPanel({ vascCase, latestMeasurement, onComplete, onQuest
         percent: Number(((score / totalPossible) * 100).toFixed(1)),
         questionResults: updatedResults,
       };
+      // Mark the SQLite attempt complete with the final score (no-op in browser mode).
+      if (attemptId) {
+        void completeAttempt(attemptId, attempt.score);
+      }
       onComplete(attempt);
       return;
     }

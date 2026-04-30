@@ -1,6 +1,12 @@
+mod db;
 mod volume;
 
+use db::{
+    complete_attempt, create_attempt, get_case, get_case_questions, list_attempts, list_cases,
+    open_and_initialize, submit_question_response, DbState,
+};
 use serde::Serialize;
+use tauri::Manager;
 use volume::{
     volume_load, volume_release, volume_sample, volume_slice, volume_slice_axial, VolumeCache,
 };
@@ -31,6 +37,12 @@ fn validate_content_pack(raw_json: String) -> Result<bool, String> {
 fn main() {
     tauri::Builder::default()
         .manage(VolumeCache::default())
+        .setup(|app| {
+            let conn = open_and_initialize(&app.handle())
+                .map_err(|e| format!("Failed to initialize SQLite database: {e}"))?;
+            app.manage(DbState::new(conn));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             validate_content_pack,
@@ -38,7 +50,14 @@ fn main() {
             volume_sample,
             volume_slice,
             volume_slice_axial,
-            volume_release
+            volume_release,
+            list_cases,
+            get_case,
+            get_case_questions,
+            create_attempt,
+            submit_question_response,
+            complete_attempt,
+            list_attempts
         ])
         .run(tauri::generate_context!())
         .expect("error while running VascEdu desktop app");
