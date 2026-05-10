@@ -43,6 +43,7 @@ fn validate_content_pack(raw_json: String) -> Result<bool, String> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(VolumeCache::default())
         .setup(|app| {
             let conn = open_and_initialize(&app.handle())

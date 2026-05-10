@@ -226,6 +226,28 @@ export function getDisplayFlips(
   return convention === 'pacs' ? PACS_FLIPS[plane] : NO_FLIPS;
 }
 
+/**
+ * Compose convention-derived flips with the user's manual fallback flips.
+ * The two layers XOR — toggling a manual axis flips the displayed pixels and
+ * labels relative to whatever the convention chose, without ever touching
+ * voxel state, measurements, or the canonical orientation transform.
+ */
+export function composeFlips(
+  base: DisplayFlips,
+  manual: DisplayFlips,
+): DisplayFlips {
+  return {
+    flipX: base.flipX !== manual.flipX,
+    flipY: base.flipY !== manual.flipY,
+  };
+}
+
+export const NO_MANUAL_FLIPS: DisplayFlips = { flipX: false, flipY: false };
+
+export function manualFlipsActive(manual: DisplayFlips): boolean {
+  return manual.flipX || manual.flipY;
+}
+
 /** Involutive image-space ⇄ viewer-space flip. */
 export function applyDisplayFlips(
   point: ImagePoint,

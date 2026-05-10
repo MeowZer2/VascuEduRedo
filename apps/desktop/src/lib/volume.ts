@@ -52,6 +52,10 @@ export interface VolumeInfo {
   dims: [number, number, number];
   spacing: [number, number, number];
   orientation: VolumeOrientationInfo;
+  /** NRRD encoding string (e.g. "raw", "gzip", "ascii"). */
+  encoding: string;
+  /** NRRD voxel type as written in the file (e.g. "short", "int16"). */
+  voxelType: string;
   intensityMin: number;
   intensityMax: number;
   planeSliceRanges: PlaneSliceRanges;

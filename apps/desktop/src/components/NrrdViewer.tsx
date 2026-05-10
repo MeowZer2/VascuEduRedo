@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { isTauriDesktop, TAURI_DESKTOP_REQUIRED_MESSAGE } from '../lib/tauri';
 import {
   loadVolume,
@@ -6,6 +7,17 @@ import {
   type VolumeInfo,
   type VolumePlane,
 } from '../lib/volume';
+import {
+  addRecentFile,
+  basenameFromPath,
+  loadRecentFiles,
+  removeRecentFile,
+  type RecentVolumeEntry,
+} from '../lib/recentFiles';
+import {
+  loadDisplayConvention,
+  saveDisplayConvention,
+} from '../lib/viewerSettings';
 import { ViewportPane, type PaneSnapshot } from './ViewportPane';
 import {
   DEFAULT_PANE_PLANES,
@@ -30,12 +42,15 @@ import {
   voxelWithSlice,
   type CrosshairVoxel,
   type DisplayConvention,
+  type DisplayFlips,
   type DisplayPoint,
   type ImagePoint,
   type Measurement,
   type ViewerLayout,
   type ViewerMeasurement,
   type ViewerToolMode,
+  NO_MANUAL_FLIPS,
+  manualFlipsActive,
 } from './viewerShared';
 
 type ViewerStatus = 'browser' | 'loading' | 'ready' | 'error';
@@ -96,6 +111,27 @@ function makePane(
  * The quiz integration only cares about distance — angle measurements are
  * intentionally ignored here so existing measurement questions keep working.
  */
+function describeErrorTitle(error: string | null): string {
+  if (!error) return 'Unable to load NRRD volume';
+  const lower = error.toLowerCase();
+  if (lower.includes('not found') || lower.includes('no such file')) {
+    return 'File not found';
+  }
+  if (lower.includes('unsupported')) {
+    return 'Unsupported NRRD format';
+  }
+  if (lower.includes('gzip')) {
+    return 'Compressed payload could not be read';
+  }
+  if (lower.includes('orientation')) {
+    return 'Bad orientation metadata';
+  }
+  if (lower.includes('invalid nrrd') || lower.includes('nrrd magic')) {
+    return 'Malformed NRRD file';
+  }
+  return 'Unable to load NRRD volume';
+}
+
 function findLatestDistance(panes: PaneSnapshot[]): ViewerMeasurement | null {
   let best: { m: Measurement; createdAt: number } | null = null;
   for (const pane of panes) {
@@ -128,7 +164,25 @@ export function NrrdViewer({
   const [activePane, setActivePane] = useState(0);
   const [toolMode, setToolMode] = useState<ViewerToolMode>('scroll');
   const [sync, setSync] = useState<SyncFlags>({ slice: true, wl: true, zoom: true });
-  const [displayConvention, setDisplayConvention] = useState<DisplayConvention>('pacs');
+  const [displayConvention, setDisplayConventionState] =
+    useState<DisplayConvention>(() => loadDisplayConvention());
+  const [manualFlips, setManualFlips] = useState<DisplayFlips>(NO_MANUAL_FLIPS);
+  const [currentVolumePath, setCurrentVolumePath] = useState<string>(volumePath);
+  const [recentFiles, setRecentFiles] = useState<RecentVolumeEntry[]>(() => loadRecentFiles());
+  const [recentMenuOpen, setRecentMenuOpen] = useState(false);
+  const [metaOpen, setMetaOpen] = useState(false);
+
+  // Whenever the case-supplied volumePath changes, snap back to it as the
+  // active source. The user can still override via "Open NRRD…" afterwards.
+  useEffect(() => {
+    setCurrentVolumePath(volumePath);
+  }, [volumePath]);
+
+  // Persist the display convention choice across app restarts.
+  const setDisplayConvention = useCallback((next: DisplayConvention) => {
+    setDisplayConventionState(next);
+    saveDisplayConvention(next);
+  }, []);
   const [crosshair, setCrosshair] = useState<CrosshairVoxel | null>(null);
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
   const layoutRef = useRef<ViewerLayout>(layout);
@@ -137,7 +191,7 @@ export function NrrdViewer({
   const onLatestMeasurementChangeRef = useRef(onLatestMeasurementChange);
   onLatestMeasurementChangeRef.current = onLatestMeasurementChange;
 
-  // Load the volume once per `volumePath`. Slice loading happens inside each pane.
+  // Load the volume whenever `currentVolumePath` changes. Slice loading happens inside each pane.
   useEffect(() => {
     let cancelled = false;
     let loadedHandle: string | null = null;
@@ -149,6 +203,7 @@ export function NrrdViewer({
     setCrosshair(null);
     setLatestMeasurement(null);
     setActivePane(0);
+    setManualFlips(NO_MANUAL_FLIPS);
 
     if (!isTauriDesktop()) {
       setStatus('browser');
@@ -156,7 +211,7 @@ export function NrrdViewer({
       return;
     }
 
-    loadVolume(volumePath)
+    loadVolume(currentVolumePath)
       .then((info) => {
         if (cancelled) {
           void releaseVolume(info.handleId);
@@ -184,7 +239,7 @@ export function NrrdViewer({
       cancelled = true;
       if (loadedHandle) void releaseVolume(loadedHandle);
     };
-  }, [volumePath]);
+  }, [currentVolumePath]);
 
   // Apply a suggested tool mode from the parent (e.g. measurement question) when ready.
   useEffect(() => {
@@ -506,6 +561,70 @@ export function NrrdViewer({
   }, [volume]);
 
   const orientationWarnings = volume?.orientation?.warnings ?? [];
+  const orientationStatus = volume?.orientation?.status ?? null;
+  const manualOverrideActive = manualFlipsActive(manualFlips);
+  const orientationBadge: { label: string; tone: 'trusted' | 'uncertain' | 'manual' } | null =
+    !volume
+      ? null
+      : manualOverrideActive
+        ? { label: 'Manual override', tone: 'manual' }
+        : orientationStatus === 'trusted'
+          ? { label: 'Trusted metadata', tone: 'trusted' }
+          : { label: 'Orientation uncertain', tone: 'uncertain' };
+  const isShowingCaseVolume = currentVolumePath === volumePath;
+  const currentVolumeName = useMemo(
+    () => basenameFromPath(volume?.sourcePath ?? currentVolumePath ?? '') || '(sample)',
+    [volume?.sourcePath, currentVolumePath],
+  );
+
+  async function handleOpenLocalFile() {
+    if (!isTauriDesktop()) {
+      setError(TAURI_DESKTOP_REQUIRED_MESSAGE);
+      return;
+    }
+    try {
+      setRecentMenuOpen(false);
+      const selected = await openDialog({
+        multiple: false,
+        title: 'Open NRRD volume',
+        filters: [
+          { name: 'NRRD volumes', extensions: ['nrrd', 'nhdr'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (typeof selected === 'string' && selected.length > 0) {
+        setRecentFiles(addRecentFile(selected));
+        setCurrentVolumePath(selected);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  function handleOpenRecent(path: string) {
+    setRecentMenuOpen(false);
+    setRecentFiles(addRecentFile(path));
+    setCurrentVolumePath(path);
+  }
+
+  function handleRemoveRecent(path: string) {
+    setRecentFiles(removeRecentFile(path));
+  }
+
+  function handleUseCaseVolume() {
+    if (currentVolumePath !== volumePath) setCurrentVolumePath(volumePath);
+  }
+
+  function toggleManualFlip(axis: 'x' | 'y') {
+    setManualFlips((current) => ({
+      flipX: axis === 'x' ? !current.flipX : current.flipX,
+      flipY: axis === 'y' ? !current.flipY : current.flipY,
+    }));
+  }
+
+  function resetDisplayOrientation() {
+    setManualFlips(NO_MANUAL_FLIPS);
+  }
 
   const activeWindow = panes[activePane] ?? null;
   const controlsDisabled = !volume || status !== 'ready' || panes.length === 0;
@@ -517,6 +636,20 @@ export function NrrdViewer({
           <h3>NRRD MPR Viewer</h3>
           <p>{description}</p>
           {metadata ? <p className="viewer-metadata">{metadata}</p> : null}
+          <p className="viewer-source-line">
+            <span className="viewer-source-label">File:</span>
+            <strong>{currentVolumeName}</strong>
+            {!isShowingCaseVolume ? (
+              <button
+                type="button"
+                className="link-button small"
+                onClick={handleUseCaseVolume}
+                title="Reload the volume that came with this case"
+              >
+                Use case volume
+              </button>
+            ) : null}
+          </p>
           {orientationWarnings.length > 0 ? (
             <ul className="viewer-orientation-warnings" aria-label="Orientation warnings">
               {orientationWarnings.map((warning, idx) => (
@@ -525,7 +658,83 @@ export function NrrdViewer({
             </ul>
           ) : null}
         </div>
-        <span className="pill">{layout.toUpperCase()} · MPR</span>
+        <div className="viewer-header-meta">
+          {orientationBadge ? (
+            <span
+              className={`orientation-badge orientation-badge-${orientationBadge.tone}`}
+              title={
+                orientationBadge.tone === 'manual'
+                  ? 'Manual fallback flips are active. Use Reset orientation to revert to the metadata-derived view.'
+                  : orientationBadge.tone === 'uncertain'
+                    ? 'Orientation metadata was missing or could not be canonicalized — labels are best-effort.'
+                    : 'Orientation derived from trusted NRRD metadata.'
+              }
+            >
+              {orientationBadge.label}
+            </span>
+          ) : null}
+          <span className="pill">{layout.toUpperCase()} · MPR</span>
+        </div>
+      </div>
+      <div className="viewer-source-row">
+        <button
+          type="button"
+          className="secondary-button small"
+          onClick={handleOpenLocalFile}
+          disabled={!isTauriDesktop()}
+          title={
+            isTauriDesktop()
+              ? 'Open a local NRRD or NHDR volume'
+              : 'Native file picker requires the desktop build'
+          }
+        >
+          Open NRRD…
+        </button>
+        <div className="recent-menu">
+          <button
+            type="button"
+            className="secondary-button small"
+            onClick={() => setRecentMenuOpen((open) => !open)}
+            disabled={recentFiles.length === 0}
+            aria-haspopup="listbox"
+            aria-expanded={recentMenuOpen}
+          >
+            Recent ▾
+          </button>
+          {recentMenuOpen && recentFiles.length > 0 ? (
+            <ul className="recent-menu-list" role="listbox">
+              {recentFiles.map((entry) => (
+                <li key={entry.path} className="recent-menu-row">
+                  <button
+                    type="button"
+                    className="recent-menu-button"
+                    onClick={() => handleOpenRecent(entry.path)}
+                    title={entry.path}
+                  >
+                    <strong>{entry.name}</strong>
+                    <span className="muted small">{entry.path}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="recent-menu-remove"
+                    onClick={() => handleRemoveRecent(entry.path)}
+                    aria-label={`Remove ${entry.name} from recent list`}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="secondary-button small"
+          onClick={() => setMetaOpen((open) => !open)}
+          aria-expanded={metaOpen}
+        >
+          {metaOpen ? 'Hide details' : 'Show details'}
+        </button>
       </div>
 
       <div className="viewer-tool-row">
@@ -575,6 +784,35 @@ export function NrrdViewer({
             onClick={() => setToolMode('angle')}
           >
             Angle
+          </button>
+        </div>
+        <div className="sync-tabs" role="group" aria-label="Manual orientation fallback">
+          <button
+            type="button"
+            className={manualFlips.flipX ? 'tool-tab active' : 'tool-tab'}
+            disabled={controlsDisabled}
+            onClick={() => toggleManualFlip('x')}
+            title="Flip the displayed image horizontally (display-only)"
+          >
+            Flip H
+          </button>
+          <button
+            type="button"
+            className={manualFlips.flipY ? 'tool-tab active' : 'tool-tab'}
+            disabled={controlsDisabled}
+            onClick={() => toggleManualFlip('y')}
+            title="Flip the displayed image vertically (display-only)"
+          >
+            Flip V
+          </button>
+          <button
+            type="button"
+            className="tool-tab"
+            disabled={controlsDisabled || !manualOverrideActive}
+            onClick={resetDisplayOrientation}
+            title="Clear manual flips and return to metadata-derived orientation"
+          >
+            Reset orientation
           </button>
         </div>
         <div className="sync-tabs" role="group" aria-label="Display convention">
@@ -664,10 +902,71 @@ export function NrrdViewer({
         <p className="viewer-instruction">Click anywhere to relocate the crosshair across viewports.</p>
       ) : null}
 
+      {metaOpen && volume ? (
+        <dl className="viewer-metadata-panel" aria-label="Volume metadata">
+          <div>
+            <dt>File</dt>
+            <dd title={volume.sourcePath}>{currentVolumeName}</dd>
+          </div>
+          <div>
+            <dt>Path</dt>
+            <dd className="muted small mono">{volume.sourcePath}</dd>
+          </div>
+          <div>
+            <dt>Dimensions</dt>
+            <dd>
+              {volume.dims[0]} × {volume.dims[1]} × {volume.dims[2]}
+            </dd>
+          </div>
+          <div>
+            <dt>Spacing (mm)</dt>
+            <dd>
+              {volume.spacing[0].toFixed(3)} × {volume.spacing[1].toFixed(3)} × {volume.spacing[2].toFixed(3)}
+            </dd>
+          </div>
+          <div>
+            <dt>Encoding</dt>
+            <dd>
+              {volume.encoding} · {volume.voxelType}
+            </dd>
+          </div>
+          <div>
+            <dt>Intensity range</dt>
+            <dd>
+              {volume.intensityMin} … {volume.intensityMax}
+            </dd>
+          </div>
+          <div>
+            <dt>Display convention</dt>
+            <dd>{displayConvention === 'pacs' ? 'PACS / radiology' : 'Canonical RAS'}</dd>
+          </div>
+          <div>
+            <dt>Orientation</dt>
+            <dd>
+              {orientationStatus === 'trusted' ? 'Trusted metadata' : 'Uncertain / fallback'}
+              {manualOverrideActive ? ' · manual override active' : ''}
+              {volume.orientation?.space ? ` · NRRD space: ${volume.orientation.space}` : ''}
+            </dd>
+          </div>
+          {orientationWarnings.length > 0 ? (
+            <div className="viewer-metadata-warnings">
+              <dt>Warnings</dt>
+              <dd>
+                <ul>
+                  {orientationWarnings.map((w, idx) => (
+                    <li key={idx}>{w}</li>
+                  ))}
+                </ul>
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
+
       {status === 'loading' ? (
         <div className="viewer-state viewer-state-info">
-          <strong>Loading volume…</strong>
-          <span>Preparing volume metadata and MPR slices.</span>
+          <strong>Loading {basenameFromPath(currentVolumePath) || 'volume'}…</strong>
+          <span>Reading NRRD header, decoding voxels, and preparing MPR slices.</span>
         </div>
       ) : null}
       {status === 'browser' ? (
@@ -678,8 +977,26 @@ export function NrrdViewer({
       ) : null}
       {status === 'error' ? (
         <div className="viewer-state viewer-state-error">
-          <strong>Unable to load NRRD volume</strong>
+          <strong>{describeErrorTitle(error)}</strong>
           <span>{error}</span>
+          <span className="muted small">
+            File: {basenameFromPath(currentVolumePath) || currentVolumePath}
+          </span>
+          <div className="viewer-state-actions">
+            {!isShowingCaseVolume ? (
+              <button type="button" className="secondary-button small" onClick={handleUseCaseVolume}>
+                Use case volume
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="secondary-button small"
+              onClick={handleOpenLocalFile}
+              disabled={!isTauriDesktop()}
+            >
+              Open another file…
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -693,6 +1010,7 @@ export function NrrdViewer({
               index={idx}
               toolMode={toolMode}
               displayConvention={displayConvention}
+              manualFlips={manualFlips}
               crosshairVoxel={crosshair}
               showCrosshair
               active={idx === activePane}

@@ -4,7 +4,9 @@
       "Bash(cargo check *)",
       "Bash(pnpm typecheck *)",
       "Bash(pnpm --dir apps/desktop typecheck)",
-      "Bash(pnpm --dir apps/desktop exec tsc -b --pretty --force)"
+      "Bash(pnpm --dir apps/desktop exec tsc -b --pretty --force)",
+      "Bash(cd /c/Users/al-_-/Projects/VascuEduRedo && grep -n \"viewer-state\\\\|status === 'loading'\\\\|status === 'error'\\\\|status === 'browser'\" apps/desktop/src/components/NrrdViewer.tsx | head -20)",
+      "Read(//c/c/Users/al-_-/Projects/VascuEduRedo/apps/desktop/src/components/**)"
     ]
   }
 }

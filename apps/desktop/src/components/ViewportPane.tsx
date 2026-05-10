@@ -12,6 +12,7 @@ import {
   angleDeg,
   clamp,
   clearCanvas,
+  composeFlips,
   displayToImagePoint,
   distanceMm,
   fitImageToPanel,
@@ -27,6 +28,7 @@ import {
   type CrosshairVoxel,
   type DisplayConvention,
   type DisplayConventionContext,
+  type DisplayFlips,
   type DisplayPoint,
   type DistanceMeasurement,
   type ImagePoint,
@@ -73,6 +75,8 @@ export interface ViewportPaneProps {
   toolMode: ViewerToolMode;
   /** Display-only viewer convention (PACS vs canonical RAS). */
   displayConvention: DisplayConvention;
+  /** Manual fallback flips composed with the convention (display-only). */
+  manualFlips: DisplayFlips;
   /** Crosshair in volume voxel coordinates (or null when not yet set). */
   crosshairVoxel: CrosshairVoxel | null;
   /** Whether this pane is the "primary" — driven by the parent toolbar's WL slider. */
@@ -104,6 +108,7 @@ export function ViewportPane({
   index,
   toolMode,
   displayConvention,
+  manualFlips,
   crosshairVoxel,
   active,
   showCrosshair,
@@ -147,8 +152,8 @@ export function ViewportPane({
     [imageSize, panelSize, pane.zoom, pane.pan, planeSpacing],
   );
   const flips = useMemo(
-    () => getDisplayFlips(pane.plane, displayConvention),
-    [pane.plane, displayConvention],
+    () => composeFlips(getDisplayFlips(pane.plane, displayConvention), manualFlips),
+    [pane.plane, displayConvention, manualFlips],
   );
   const conventionContext = useMemo<DisplayConventionContext | null>(
     () => (imageSize ? { imageSize, flips } : null),
