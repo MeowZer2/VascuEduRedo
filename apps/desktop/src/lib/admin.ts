@@ -123,3 +123,85 @@ export async function adminReorderQuestions(
   ensureDesktop();
   await safeInvoke<void>('admin_reorder_questions', { caseId, orderedQuestionIds });
 }
+
+// ---------------------------------------------------------------------------
+// v0.9 — validation, import, export
+// ---------------------------------------------------------------------------
+
+export interface ValidationIssue {
+  severity: 'error' | 'warning';
+  field: string;
+  message: string;
+  questionId: string | null;
+}
+
+export interface ValidationReport {
+  ok: boolean;
+  errors: ValidationIssue[];
+  warnings: ValidationIssue[];
+}
+
+export interface ImportCaseInput {
+  slug: string;
+  title: string;
+  summary: string;
+  category: string;
+  volumePath: string | null;
+  data?: Record<string, unknown>;
+}
+
+export interface ImportQuestionInput {
+  type: string;
+  prompt: string;
+  orderIndex?: number;
+  data: Record<string, unknown>;
+}
+
+export interface CaseImportPayload {
+  version?: string;
+  case: ImportCaseInput;
+  questions: ImportQuestionInput[];
+}
+
+export interface CaseExportPayload extends CaseImportPayload {
+  version: string;
+  exportedAt: string;
+  questions: Array<ImportQuestionInput & { orderIndex: number }>;
+}
+
+export interface ImportOptions {
+  /** "error" (default) rejects on slug collision, "rename" auto-suffixes the slug. */
+  slugStrategy?: 'error' | 'rename';
+}
+
+export async function adminValidateCase(caseId: string): Promise<ValidationReport | null> {
+  ensureDesktop();
+  return (await safeInvoke<ValidationReport>('admin_validate_case', { caseId })) ?? null;
+}
+
+export async function adminValidateCasePayload(
+  payload: CaseImportPayload,
+): Promise<ValidationReport | null> {
+  ensureDesktop();
+  return (
+    (await safeInvoke<ValidationReport>('admin_validate_case_payload', { payload })) ?? null
+  );
+}
+
+export async function adminExportCase(caseId: string): Promise<CaseExportPayload | null> {
+  ensureDesktop();
+  return (await safeInvoke<CaseExportPayload>('admin_export_case', { caseId })) ?? null;
+}
+
+export async function adminImportCase(
+  payload: CaseImportPayload,
+  options?: ImportOptions,
+): Promise<AdminCaseRow> {
+  ensureDesktop();
+  const row = await safeInvoke<AdminCaseRow>('admin_import_case', {
+    payload,
+    options: options ?? {},
+  });
+  if (!row) throw new Error('admin_import_case returned no row');
+  return row;
+}

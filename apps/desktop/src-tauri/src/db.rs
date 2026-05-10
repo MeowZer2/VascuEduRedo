@@ -1459,3 +1459,670 @@ pub fn get_attempt_details(
 
     Ok(Some(AttemptDetails { attempt, questions }))
 }
+
+// ---------------------------------------------------------------------------
+// Content validation + import/export (v0.9)
+// ---------------------------------------------------------------------------
+
+const CASE_EXPORT_VERSION: &str = "vascedu/case@1";
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationIssue {
+    pub severity: String, // "error" | "warning"
+    pub field: String,
+    pub message: String,
+    pub question_id: Option<String>,
+}
+
+impl ValidationIssue {
+    fn err(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: "error".into(),
+            field: field.into(),
+            message: message.into(),
+            question_id: None,
+        }
+    }
+    fn warn(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: "warning".into(),
+            field: field.into(),
+            message: message.into(),
+            question_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationReport {
+    pub ok: bool,
+    pub errors: Vec<ValidationIssue>,
+    pub warnings: Vec<ValidationIssue>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCaseInput {
+    pub slug: String,
+    pub title: String,
+    pub summary: String,
+    pub category: String,
+    #[serde(default)]
+    pub volume_path: Option<String>,
+    #[serde(default)]
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportQuestionInput {
+    pub r#type: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub order_index: Option<i64>,
+    pub data: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseImportPayload {
+    #[serde(default)]
+    pub version: Option<String>,
+    pub case: ImportCaseInput,
+    pub questions: Vec<ImportQuestionInput>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseExportQuestion {
+    pub r#type: String,
+    pub prompt: String,
+    pub order_index: i64,
+    pub data: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseExport {
+    pub version: String,
+    pub exported_at: String,
+    pub case: ImportCaseInput,
+    pub questions: Vec<CaseExportQuestion>,
+}
+
+fn slug_is_valid(slug: &str) -> bool {
+    let trimmed = slug.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+}
+
+/// Validate a case + questions package. Returns errors (block save/import) and warnings
+/// (content-health hints — don't block, but worth flagging).
+fn validate_case(
+    case: &ImportCaseInput,
+    questions: &[ImportQuestionInput],
+) -> ValidationReport {
+    let mut errors: Vec<ValidationIssue> = Vec::new();
+    let mut warnings: Vec<ValidationIssue> = Vec::new();
+
+    if case.title.trim().is_empty() {
+        errors.push(ValidationIssue::err("title", "Title is required."));
+    }
+    if case.slug.trim().is_empty() {
+        errors.push(ValidationIssue::err("slug", "Slug is required."));
+    } else if !slug_is_valid(&case.slug) {
+        errors.push(ValidationIssue::err(
+            "slug",
+            "Slug must start alphanumeric and only use a-z, 0-9, dashes or underscores.",
+        ));
+    }
+    if case.summary.trim().is_empty() {
+        errors.push(ValidationIssue::err("summary", "Summary is required."));
+    }
+    if case.category.trim().is_empty() {
+        errors.push(ValidationIssue::err("category", "Category is required."));
+    }
+
+    let empty_data = serde_json::json!({});
+    let data = case.data.as_ref().unwrap_or(&empty_data);
+
+    let volume_present = case
+        .volume_path
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !volume_present {
+        warnings.push(ValidationIssue::warn(
+            "volumePath",
+            "No volume path — viewer will load nothing for this case.",
+        ));
+    }
+
+    if let Some(em) = data.get("estimatedMinutes") {
+        match em.as_i64() {
+            Some(v) if v > 0 => {}
+            _ => errors.push(ValidationIssue::err(
+                "estimatedMinutes",
+                "estimatedMinutes must be a positive integer.",
+            )),
+        }
+    }
+    if let Some(diff) = data.get("difficulty").and_then(Value::as_str) {
+        if !["beginner", "intermediate", "advanced"].contains(&diff) {
+            errors.push(ValidationIssue::err(
+                "difficulty",
+                "difficulty must be beginner, intermediate, or advanced.",
+            ));
+        }
+    }
+    let objectives = data
+        .get("learningObjectives")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if objectives.is_empty() {
+        warnings.push(ValidationIssue::warn(
+            "learningObjectives",
+            "No learning objectives.",
+        ));
+    } else {
+        for (idx, item) in objectives.iter().enumerate() {
+            if !item.is_string() || item.as_str().map(str::is_empty).unwrap_or(true) {
+                errors.push(ValidationIssue::err(
+                    format!("learningObjectives[{idx}]"),
+                    "Learning objectives must be non-empty strings.",
+                ));
+            }
+        }
+    }
+    if let Some(arr) = data.get("teachingPoints").and_then(Value::as_array) {
+        for (idx, item) in arr.iter().enumerate() {
+            if !item.is_string() {
+                errors.push(ValidationIssue::err(
+                    format!("teachingPoints[{idx}]"),
+                    "Teaching points must be strings.",
+                ));
+            }
+        }
+    }
+    let references = data
+        .get("references")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if references.is_empty() {
+        warnings.push(ValidationIssue::warn("references", "No references cited."));
+    } else {
+        for (idx, item) in references.iter().enumerate() {
+            if !item.is_string() {
+                errors.push(ValidationIssue::err(
+                    format!("references[{idx}]"),
+                    "References must be strings.",
+                ));
+            }
+        }
+    }
+    if let Some(arr) = data.get("tags").and_then(Value::as_array) {
+        for (idx, item) in arr.iter().enumerate() {
+            if !item.is_string() {
+                errors.push(ValidationIssue::err(
+                    format!("tags[{idx}]"),
+                    "Tags must be strings.",
+                ));
+            }
+        }
+    }
+
+    if questions.is_empty() {
+        warnings.push(ValidationIssue::warn(
+            "questions",
+            "Case has no questions yet.",
+        ));
+    }
+
+    let mut order_index_counts: HashMap<i64, i64> = HashMap::new();
+    for (idx, q) in questions.iter().enumerate() {
+        let qid_label = format!("questions[{idx}]");
+        if q.prompt.trim().is_empty() {
+            errors.push(ValidationIssue::err(
+                format!("{qid_label}.prompt"),
+                "Question prompt is required.",
+            ));
+        }
+        match q.r#type.as_str() {
+            "multipleChoice" => {
+                let choices = q
+                    .data
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if choices.len() < 2 {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.choices"),
+                        "multipleChoice needs at least 2 choices.",
+                    ));
+                }
+                let correct = q
+                    .data
+                    .get("correctChoiceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if correct.is_empty() {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.correctChoiceId"),
+                        "multipleChoice needs a correct choice.",
+                    ));
+                } else if !choices
+                    .iter()
+                    .any(|c| c.get("id").and_then(Value::as_str) == Some(correct))
+                {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.correctChoiceId"),
+                        "correctChoiceId does not match any choice id.",
+                    ));
+                }
+            }
+            "multiSelect" => {
+                let choices = q
+                    .data
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if choices.len() < 2 {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.choices"),
+                        "multiSelect needs at least 2 choices.",
+                    ));
+                }
+                let correct = q
+                    .data
+                    .get("correctChoiceIds")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let valid: Vec<&str> = correct.iter().filter_map(Value::as_str).collect();
+                if valid.is_empty() {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.correctChoiceIds"),
+                        "multiSelect needs at least one correct answer.",
+                    ));
+                } else {
+                    let choice_ids: Vec<&str> = choices
+                        .iter()
+                        .filter_map(|c| c.get("id").and_then(Value::as_str))
+                        .collect();
+                    for cid in &valid {
+                        if !choice_ids.contains(cid) {
+                            errors.push(ValidationIssue::err(
+                                format!("{qid_label}.correctChoiceIds"),
+                                format!("correctChoiceIds entry '{cid}' is not a valid choice."),
+                            ));
+                        }
+                    }
+                }
+            }
+            "trueFalse" => {
+                if !q.data.get("correct").map(Value::is_boolean).unwrap_or(false) {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.correct"),
+                        "trueFalse needs a boolean `correct`.",
+                    ));
+                }
+            }
+            "numeric" => {
+                if q.data.get("correctValue").and_then(Value::as_f64).is_none() {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.correctValue"),
+                        "numeric needs a correctValue.",
+                    ));
+                }
+                if let Some(t) = q.data.get("tolerance").and_then(Value::as_f64) {
+                    if t < 0.0 {
+                        errors.push(ValidationIssue::err(
+                            format!("{qid_label}.tolerance"),
+                            "tolerance must be ≥ 0.",
+                        ));
+                    }
+                }
+            }
+            "shortText" => {
+                let kws = q
+                    .data
+                    .get("requiredKeywords")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let non_empty: Vec<_> = kws
+                    .iter()
+                    .filter(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false))
+                    .collect();
+                if non_empty.is_empty() {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.requiredKeywords"),
+                        "shortText needs at least one accepted keyword.",
+                    ));
+                }
+            }
+            "measurement" => {
+                let plane = q.data.get("plane").and_then(Value::as_str).unwrap_or("");
+                if !["axial", "coronal", "sagittal"].contains(&plane) {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.plane"),
+                        "measurement requires plane axial/coronal/sagittal.",
+                    ));
+                }
+                let value_ok = q
+                    .data
+                    .get("correctValue")
+                    .and_then(Value::as_f64)
+                    .map(|v| v > 0.0)
+                    .unwrap_or(false);
+                if !value_ok {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.correctValue"),
+                        "measurement requires correctValue > 0.",
+                    ));
+                }
+                let tol_ok = q
+                    .data
+                    .get("tolerance")
+                    .and_then(Value::as_f64)
+                    .map(|v| v >= 0.0)
+                    .unwrap_or(false);
+                if !tol_ok {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.tolerance"),
+                        "measurement requires tolerance ≥ 0.",
+                    ));
+                }
+            }
+            other => {
+                errors.push(ValidationIssue::err(
+                    format!("{qid_label}.type"),
+                    format!("Unknown question type '{other}'."),
+                ));
+            }
+        }
+        if let Some(oi) = q.order_index {
+            *order_index_counts.entry(oi).or_insert(0) += 1;
+        }
+    }
+    for (oi, count) in order_index_counts {
+        if count > 1 {
+            errors.push(ValidationIssue::err(
+                "questions.orderIndex",
+                format!("Duplicate order_index {oi} appears {count} times."),
+            ));
+        }
+    }
+
+    ValidationReport {
+        ok: errors.is_empty(),
+        errors,
+        warnings,
+    }
+}
+
+fn case_row_to_import_input(row: &CaseRow) -> ImportCaseInput {
+    ImportCaseInput {
+        slug: row.slug.clone(),
+        title: row.title.clone(),
+        summary: row.summary.clone(),
+        category: row.category.clone(),
+        volume_path: row.volume_path.clone(),
+        data: Some(row.data.clone()),
+    }
+}
+
+fn question_row_to_import_input(row: &QuestionRow) -> ImportQuestionInput {
+    ImportQuestionInput {
+        r#type: row.r#type.clone(),
+        prompt: row.prompt.clone(),
+        order_index: Some(row.order_index),
+        data: row.data.clone(),
+    }
+}
+
+#[tauri::command]
+pub fn admin_validate_case_payload(payload: CaseImportPayload) -> Result<ValidationReport, String> {
+    Ok(validate_case(&payload.case, &payload.questions))
+}
+
+#[tauri::command]
+pub fn admin_validate_case(
+    state: State<DbState>,
+    case_id: String,
+) -> Result<ValidationReport, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let case = fetch_case_row(&conn, &case_id)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+        )
+        .map_err(|e| format!("admin_validate_case prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(params![case_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|e| format!("admin_validate_case query failed: {e}"))?;
+    let mut question_rows: Vec<QuestionRow> = Vec::new();
+    for r in rows {
+        let (id, case_id, order_index, qtype, prompt, data_json) =
+            r.map_err(|e| format!("admin_validate_case row failed: {e}"))?;
+        question_rows.push(parse_question_row(
+            id,
+            case_id,
+            order_index,
+            qtype,
+            prompt,
+            data_json,
+        )?);
+    }
+
+    let case_input = case_row_to_import_input(&case);
+    let question_inputs: Vec<ImportQuestionInput> = question_rows
+        .iter()
+        .map(question_row_to_import_input)
+        .collect();
+    let mut report = validate_case(&case_input, &question_inputs);
+
+    // Tag question-level issues with the actual question ids so the frontend can highlight rows.
+    for issue in report.errors.iter_mut().chain(report.warnings.iter_mut()) {
+        if let Some(idx) = parse_question_index(&issue.field) {
+            if let Some(q) = question_rows.get(idx) {
+                issue.question_id = Some(q.id.clone());
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn parse_question_index(field: &str) -> Option<usize> {
+    // Matches "questions[N]..." patterns.
+    let rest = field.strip_prefix("questions[")?;
+    let end = rest.find(']')?;
+    rest[..end].parse::<usize>().ok()
+}
+
+#[tauri::command]
+pub fn admin_export_case(state: State<DbState>, case_id: String) -> Result<CaseExport, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let case = fetch_case_row(&conn, &case_id)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+        )
+        .map_err(|e| format!("admin_export_case prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(params![case_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|e| format!("admin_export_case query failed: {e}"))?;
+
+    let mut questions: Vec<CaseExportQuestion> = Vec::new();
+    for r in rows {
+        let (_id, _cid, order_index, qtype, prompt, data_json) =
+            r.map_err(|e| format!("admin_export_case row failed: {e}"))?;
+        let data: Value = serde_json::from_str(&data_json).unwrap_or(Value::Null);
+        questions.push(CaseExportQuestion {
+            r#type: qtype,
+            prompt,
+            order_index,
+            data,
+        });
+    }
+
+    Ok(CaseExport {
+        version: CASE_EXPORT_VERSION.to_string(),
+        exported_at: now_iso(),
+        case: case_row_to_import_input(&case),
+        questions,
+    })
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOptions {
+    /// When the slug already exists in SQLite: "error" (default) or "rename" (auto-suffix).
+    #[serde(default)]
+    pub slug_strategy: Option<String>,
+}
+
+#[tauri::command]
+pub fn admin_import_case(
+    state: State<DbState>,
+    payload: CaseImportPayload,
+    options: Option<ImportOptions>,
+) -> Result<CaseRow, String> {
+    let mut conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+
+    let report = validate_case(&payload.case, &payload.questions);
+    if !report.ok {
+        let summary: Vec<String> = report
+            .errors
+            .iter()
+            .take(5)
+            .map(|i| format!("{}: {}", i.field, i.message))
+            .collect();
+        return Err(format!("Import rejected: {}", summary.join("; ")));
+    }
+
+    // Detect slug collision per the chosen strategy.
+    let slug_strategy = options
+        .as_ref()
+        .and_then(|o| o.slug_strategy.as_deref())
+        .unwrap_or("error")
+        .to_string();
+    let mut slug = payload.case.slug.trim().to_string();
+    let collision: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cases WHERE slug = ?1",
+            params![slug],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("admin_import_case slug check failed: {e}"))?;
+    if collision > 0 {
+        match slug_strategy.as_str() {
+            "rename" => {
+                // Suffix -imported, -imported-2, -imported-3, ...
+                let mut attempt = 1;
+                loop {
+                    let candidate = if attempt == 1 {
+                        format!("{slug}-imported")
+                    } else {
+                        format!("{slug}-imported-{attempt}")
+                    };
+                    let exists: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM cases WHERE slug = ?1",
+                            params![candidate],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| format!("admin_import_case rename check failed: {e}"))?;
+                    if exists == 0 {
+                        slug = candidate;
+                        break;
+                    }
+                    attempt += 1;
+                    if attempt > 200 {
+                        return Err("admin_import_case rename: too many collisions".into());
+                    }
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Slug '{slug}' already exists. Edit the slug or import with rename."
+                ))
+            }
+        }
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let merged_data = merge_case_data(
+        payload.case.data.unwrap_or_else(|| serde_json::json!({})),
+        &payload.case.volume_path,
+        &payload.case.category,
+    );
+    let data_json = merged_data.to_string();
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("admin_import_case begin failed: {e}"))?;
+
+    tx.execute(
+        "INSERT INTO cases (id, slug, title, summary, category, volume_path, data_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            slug,
+            payload.case.title.trim(),
+            payload.case.summary.trim(),
+            payload.case.category.trim(),
+            payload.case.volume_path,
+            data_json,
+        ],
+    )
+    .map_err(|e| format!("admin_import_case case insert failed: {e}"))?;
+
+    for (idx, q) in payload.questions.iter().enumerate() {
+        let qid = Uuid::new_v4().to_string();
+        let order_index = q.order_index.unwrap_or(idx as i64);
+        let q_data_json = q.data.to_string();
+        tx.execute(
+            "INSERT INTO questions (id, case_id, order_index, type, prompt, data_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![qid, id, order_index, q.r#type, q.prompt.trim(), q_data_json],
+        )
+        .map_err(|e| format!("admin_import_case question insert failed: {e}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("admin_import_case commit failed: {e}"))?;
+
+    fetch_case_row(&conn, &id)
+}

@@ -236,6 +236,23 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .admin-question-row-actions .secondary-button.small { padding: 4px 8px; font-size: 0.84rem; min-width: 32px; }
 .admin-question-editor-wrap { min-width: 0; }
 
+/* Content health (admin) */
+.content-health h4 { margin: 4px 0 8px; font-size: 0.94rem; }
+.health-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 0.74rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+.health-pill.ok { color: #cdebd9; background: rgba(100,217,148,0.14); border: 1px solid rgba(100,217,148,0.28); }
+.health-pill.warning { color: #ffe6a3; background: rgba(255,209,102,0.14); border: 1px solid rgba(255,209,102,0.28); }
+.health-pill.error { color: #ffd6da; background: rgba(255,109,122,0.14); border: 1px solid rgba(255,109,122,0.32); }
+.health-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; }
+.health-list li { padding: 8px 10px; border-radius: 12px; border: 1px solid var(--border); font-size: 0.88rem; line-height: 1.4; }
+.health-list-error li { background: rgba(255,109,122,0.08); border-color: rgba(255,109,122,0.32); color: #ffd6da; }
+.health-list-warning li { background: rgba(255,209,102,0.06); border-color: rgba(255,209,102,0.28); color: #ffe6a3; }
+.health-list strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.84rem; color: inherit; }
+.link-button { background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
+.link-button:hover { color: #cfe0ff; }
+
+.case-meta-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.import-textarea { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
+
 /* Progress + attempt review */
 .progress-grid { gap: 18px; }
 .progress-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }

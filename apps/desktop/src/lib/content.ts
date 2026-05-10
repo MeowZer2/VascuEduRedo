@@ -45,6 +45,11 @@ function rowToVascCase(row: CaseRow, questions: Question[]): VascCase {
       history: [],
     },
     learningObjectives: (extra.learningObjectives as string[] | undefined) ?? [],
+    teachingPoints: (extra.teachingPoints as string[] | undefined) ?? undefined,
+    references: (extra.references as string[] | undefined) ?? undefined,
+    author: (extra.author as string | undefined) ?? undefined,
+    reviewer: (extra.reviewer as string | undefined) ?? undefined,
+    lastReviewedAt: (extra.lastReviewedAt as string | undefined) ?? undefined,
     volume: volume ?? {
       type: 'nrrd',
       path: row.volumePath ?? undefined,

@@ -3,8 +3,9 @@ mod volume;
 
 use db::{
     admin_create_case, admin_create_question, admin_delete_case, admin_delete_question,
-    admin_get_case_with_questions, admin_list_cases, admin_reorder_questions, admin_update_case,
-    admin_update_question, complete_attempt, create_attempt, get_attempt_details, get_case,
+    admin_export_case, admin_get_case_with_questions, admin_import_case, admin_list_cases,
+    admin_reorder_questions, admin_update_case, admin_update_question, admin_validate_case,
+    admin_validate_case_payload, complete_attempt, create_attempt, get_attempt_details, get_case,
     get_case_questions, get_recent_activity, list_attempts, list_cases, open_and_initialize,
     progress_by_case, progress_summary, submit_question_response, DbState,
 };
@@ -73,7 +74,11 @@ fn main() {
             progress_summary,
             progress_by_case,
             get_recent_activity,
-            get_attempt_details
+            get_attempt_details,
+            admin_validate_case,
+            admin_validate_case_payload,
+            admin_export_case,
+            admin_import_case
         ])
         .run(tauri::generate_context!())
         .expect("error while running VascEdu desktop app");

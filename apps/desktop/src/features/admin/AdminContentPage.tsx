@@ -4,25 +4,30 @@ import {
   adminCreateQuestion,
   adminDeleteCase,
   adminDeleteQuestion,
+  adminExportCase,
   adminGetCaseWithQuestions,
   adminListCases,
   adminReorderQuestions,
   adminUpdateCase,
   adminUpdateQuestion,
+  adminValidateCase,
   isAdminAvailable,
   type AdminCaseInput,
   type AdminCaseRow,
   type AdminQuestionInput,
   type AdminQuestionRow,
+  type ValidationReport,
 } from '../../lib/admin';
+import { CaseImportDialog } from './CaseImportDialog';
+import { ListEditor } from './ListEditor';
 import { QuestionEditor, draftToQuestionInput, questionRowToDraft, type QuestionDraft } from './QuestionEditor';
 
 export interface AdminContentPageProps {
-  /** Notify the host app that the case set changed so it can refresh its store. */
   onCasesChanged: () => void;
-  /** Open the given case in the training workspace. */
   onOpenInTraining: (caseId: string) => void;
 }
+
+type Difficulty = 'beginner' | 'intermediate' | 'advanced';
 
 interface CaseDraft {
   slug: string;
@@ -30,6 +35,18 @@ interface CaseDraft {
   summary: string;
   category: string;
   volumePath: string;
+  diagnosis: string;
+  difficulty: Difficulty;
+  /** Stored as string while editing so an empty input doesn't coerce to 0. */
+  estimatedMinutes: number | string;
+  learningObjectives: string[];
+  teachingPoints: string[];
+  references: string[];
+  tags: string[];
+  author: string;
+  reviewer: string;
+  /** ISO date string (YYYY-MM-DD) — what `<input type="date">` produces. */
+  lastReviewedAt: string;
 }
 
 const EMPTY_CASE_DRAFT: CaseDraft = {
@@ -38,34 +55,137 @@ const EMPTY_CASE_DRAFT: CaseDraft = {
   summary: '',
   category: '',
   volumePath: '',
+  diagnosis: '',
+  difficulty: 'intermediate',
+  estimatedMinutes: '',
+  learningObjectives: [],
+  teachingPoints: [],
+  references: [],
+  tags: [],
+  author: '',
+  reviewer: '',
+  lastReviewedAt: '',
 };
 
 function caseRowToDraft(row: AdminCaseRow): CaseDraft {
+  const data = (row.data ?? {}) as Record<string, unknown>;
   return {
     slug: row.slug,
     title: row.title,
     summary: row.summary,
     category: row.category,
     volumePath: row.volumePath ?? '',
+    diagnosis: (data.diagnosis as string | undefined) ?? '',
+    difficulty: ((data.difficulty as Difficulty | undefined) ?? 'intermediate'),
+    estimatedMinutes: (data.estimatedMinutes as number | undefined) ?? '',
+    learningObjectives: ((data.learningObjectives as string[] | undefined) ?? []).slice(),
+    teachingPoints: ((data.teachingPoints as string[] | undefined) ?? []).slice(),
+    references: ((data.references as string[] | undefined) ?? []).slice(),
+    tags: ((data.tags as string[] | undefined) ?? []).slice(),
+    author: (data.author as string | undefined) ?? '',
+    reviewer: (data.reviewer as string | undefined) ?? '',
+    lastReviewedAt: normalizeDate((data.lastReviewedAt as string | undefined) ?? ''),
   };
 }
 
-function validateCaseDraft(draft: CaseDraft): string[] {
+function normalizeDate(input: string): string {
+  if (!input) return '';
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return '';
+  // Always render as YYYY-MM-DD so the date input controls correctly.
+  return d.toISOString().slice(0, 10);
+}
+
+function toFiniteNumber(value: number | string): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
+interface DraftConversion {
+  ok: boolean;
+  errors: string[];
+  input?: AdminCaseInput;
+}
+
+/**
+ * Convert a CaseDraft into an AdminCaseInput, validating the strict subset of fields
+ * that we always require and merging the editable extended metadata into `data`.
+ * The original `data` blob (patient, volume.description, etc.) is preserved for
+ * fields the form doesn't cover, so we don't lose data on save.
+ */
+function caseDraftToInput(draft: CaseDraft, original: AdminCaseRow | null): DraftConversion {
   const errors: string[] = [];
   if (!draft.title.trim()) errors.push('Title is required.');
-  if (!draft.slug.trim()) errors.push('Slug is required.');
-  else if (!/^[a-z0-9][a-z0-9-_]*$/i.test(draft.slug.trim())) {
+  const slug = draft.slug.trim();
+  if (!slug) errors.push('Slug is required.');
+  else if (!/^[a-z0-9][a-z0-9-_]*$/i.test(slug)) {
     errors.push('Slug must be alphanumeric (dashes/underscores allowed).');
   }
   if (!draft.summary.trim()) errors.push('Summary is required.');
   if (!draft.category.trim()) errors.push('Category is required.');
-  return errors;
+
+  let estimatedMinutes: number | undefined;
+  if (draft.estimatedMinutes !== '' && draft.estimatedMinutes !== null) {
+    const n = toFiniteNumber(draft.estimatedMinutes);
+    if (n === null || !Number.isInteger(n) || n <= 0) {
+      errors.push('Estimated minutes must be a positive integer.');
+    } else {
+      estimatedMinutes = n;
+    }
+  }
+
+  if (errors.length > 0) return { ok: false, errors };
+
+  // Preserve fields the editor doesn't touch (e.g. patient, volume.description).
+  const baseData: Record<string, unknown> = { ...(original?.data ?? {}) };
+  baseData.diagnosis = draft.diagnosis.trim();
+  baseData.difficulty = draft.difficulty;
+  if (estimatedMinutes !== undefined) baseData.estimatedMinutes = estimatedMinutes;
+  else delete baseData.estimatedMinutes;
+  baseData.learningObjectives = draft.learningObjectives.map((s) => s.trim()).filter(Boolean);
+  setOrDelete(baseData, 'teachingPoints', draft.teachingPoints.map((s) => s.trim()).filter(Boolean));
+  setOrDelete(baseData, 'references', draft.references.map((s) => s.trim()).filter(Boolean));
+  baseData.tags = draft.tags.map((s) => s.trim()).filter(Boolean);
+  setOrDelete(baseData, 'author', draft.author.trim() || undefined);
+  setOrDelete(baseData, 'reviewer', draft.reviewer.trim() || undefined);
+  setOrDelete(baseData, 'lastReviewedAt', draft.lastReviewedAt.trim() || undefined);
+
+  return {
+    ok: true,
+    errors: [],
+    input: {
+      slug,
+      title: draft.title.trim(),
+      summary: draft.summary.trim(),
+      category: draft.category.trim(),
+      volumePath: draft.volumePath.trim() ? draft.volumePath.trim() : null,
+      data: baseData,
+    },
+  };
+}
+
+function setOrDelete<T>(obj: Record<string, unknown>, key: string, value: T | undefined | null) {
+  if (value === undefined || value === null) {
+    delete obj[key];
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      delete obj[key];
+      return;
+    }
+  }
+  obj[key] = value;
 }
 
 export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminContentPageProps) {
   const available = isAdminAvailable();
   const [cases, setCases] = useState<AdminCaseRow[]>([]);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
+  const [originalCase, setOriginalCase] = useState<AdminCaseRow | null>(null);
   const [caseDraft, setCaseDraft] = useState<CaseDraft>(EMPTY_CASE_DRAFT);
   const [caseDirty, setCaseDirty] = useState(false);
   const [creatingNewCase, setCreatingNewCase] = useState(false);
@@ -75,6 +195,8 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [healthReport, setHealthReport] = useState<ValidationReport | null>(null);
 
   const flashStatus = useCallback((msg: string) => {
     setStatusMsg(msg);
@@ -98,6 +220,20 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
     }
   }, [flashError]);
 
+  const refreshHealth = useCallback(
+    async (caseId: string) => {
+      try {
+        const report = await adminValidateCase(caseId);
+        setHealthReport(report);
+      } catch (e) {
+        // Health is informational; surface but don't block the page.
+        console.warn('admin_validate_case failed:', e);
+        setHealthReport(null);
+      }
+    },
+    [],
+  );
+
   const loadCaseDetail = useCallback(
     async (caseId: string) => {
       try {
@@ -106,8 +242,11 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
           setQuestions([]);
           setSelectedQuestionId(null);
           setQuestionDraft(null);
+          setOriginalCase(null);
+          setHealthReport(null);
           return;
         }
+        setOriginalCase(detail);
         setCaseDraft(caseRowToDraft(detail));
         setCaseDirty(false);
         setQuestions(detail.questions);
@@ -118,24 +257,21 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
           setSelectedQuestionId(null);
           setQuestionDraft(null);
         }
+        await refreshHealth(caseId);
       } catch (e) {
         flashError(`Failed to load case: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
-    [flashError],
+    [flashError, refreshHealth],
   );
 
-  // Initial load.
   useEffect(() => {
     if (!available) return;
     void refreshCases().then((rows) => {
-      if (rows[0]) {
-        setSelectedCaseId(rows[0].id);
-      }
+      if (rows[0]) setSelectedCaseId(rows[0].id);
     });
   }, [available, refreshCases]);
 
-  // Whenever selection changes (and we're not in "new case" mode), reload detail.
   useEffect(() => {
     if (!available || creatingNewCase || !selectedCaseId) return;
     void loadCaseDetail(selectedCaseId);
@@ -144,11 +280,13 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
   function startNewCase() {
     setCreatingNewCase(true);
     setSelectedCaseId(null);
+    setOriginalCase(null);
     setCaseDraft(EMPTY_CASE_DRAFT);
     setCaseDirty(true);
     setQuestions([]);
     setSelectedQuestionId(null);
     setQuestionDraft(null);
+    setHealthReport(null);
   }
 
   function selectCase(id: string) {
@@ -156,28 +294,25 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
     setSelectedCaseId(id);
   }
 
+  function patchDraft<K extends keyof CaseDraft>(key: K, value: CaseDraft[K]) {
+    setCaseDraft((d) => ({ ...d, [key]: value }));
+    setCaseDirty(true);
+  }
+
   async function saveCase() {
-    const errors = validateCaseDraft(caseDraft);
-    if (errors.length > 0) {
-      flashError(errors.join(' '));
+    const conv = caseDraftToInput(caseDraft, originalCase);
+    if (!conv.ok || !conv.input) {
+      flashError(conv.errors.join(' '));
       return;
     }
-    const input: AdminCaseInput = {
-      slug: caseDraft.slug.trim(),
-      title: caseDraft.title.trim(),
-      summary: caseDraft.summary.trim(),
-      category: caseDraft.category.trim(),
-      volumePath: caseDraft.volumePath.trim() ? caseDraft.volumePath.trim() : null,
-    };
-
     setBusy(true);
     try {
       let saved: AdminCaseRow;
       if (creatingNewCase || !selectedCaseId) {
-        saved = await adminCreateCase(input);
+        saved = await adminCreateCase(conv.input);
         flashStatus(`Created "${saved.title}".`);
       } else {
-        saved = await adminUpdateCase(selectedCaseId, input);
+        saved = await adminUpdateCase(selectedCaseId, conv.input);
         flashStatus(`Saved "${saved.title}".`);
       }
       setCreatingNewCase(false);
@@ -197,8 +332,7 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
     if (!selectedCaseId) return;
     const target = cases.find((c) => c.id === selectedCaseId);
     if (!target) return;
-    const ok = window.confirm(`Delete "${target.title}" and all of its questions?`);
-    if (!ok) return;
+    if (!window.confirm(`Delete "${target.title}" and all of its questions?`)) return;
     setBusy(true);
     try {
       await adminDeleteCase(selectedCaseId);
@@ -209,13 +343,33 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
       setCreatingNewCase(false);
       if (!next) {
         setCaseDraft(EMPTY_CASE_DRAFT);
+        setOriginalCase(null);
         setQuestions([]);
         setSelectedQuestionId(null);
         setQuestionDraft(null);
+        setHealthReport(null);
       }
       onCasesChanged();
     } catch (e) {
       flashError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportSelected() {
+    if (!selectedCaseId) return;
+    setBusy(true);
+    try {
+      const payload = await adminExportCase(selectedCaseId);
+      if (!payload) {
+        flashError('Export returned no payload.');
+        return;
+      }
+      downloadJson(`${payload.case.slug || 'case'}.case.json`, payload);
+      flashStatus(`Exported "${payload.case.title}".`);
+    } catch (e) {
+      flashError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -234,7 +388,6 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
       explanation: '',
       points: 1,
       hints: [],
-      // multipleChoice defaults
       choices: [
         { id: 'a', label: '' },
         { id: 'b', label: '' },
@@ -283,8 +436,7 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
 
   async function deleteQuestion() {
     if (!questionDraft?.id || !selectedCaseId) return;
-    const ok = window.confirm('Delete this question?');
-    if (!ok) return;
+    if (!window.confirm('Delete this question?')) return;
     setBusy(true);
     try {
       await adminDeleteQuestion(questionDraft.id);
@@ -359,14 +511,24 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
         <aside className="admin-cases-panel">
           <div className="admin-panel-header">
             <h3>Cases</h3>
-            <button
-              type="button"
-              className="secondary-button small"
-              onClick={startNewCase}
-              disabled={busy}
-            >
-              + New
-            </button>
+            <div className="admin-panel-actions">
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={() => setShowImport(true)}
+                disabled={busy}
+              >
+                Import…
+              </button>
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={startNewCase}
+                disabled={busy}
+              >
+                + New
+              </button>
+            </div>
           </div>
           <ul className="admin-case-list">
             {creatingNewCase && (
@@ -409,15 +571,26 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
               <h3>{creatingNewCase ? 'New case' : selectedCase ? 'Edit case' : 'Select a case'}</h3>
               <div className="admin-panel-actions">
                 {!creatingNewCase && selectedCase && (
-                  <button
-                    type="button"
-                    className="secondary-button small"
-                    onClick={() => onOpenInTraining(selectedCase.id)}
-                    disabled={busy || caseDirty}
-                    title={caseDirty ? 'Save your changes first' : 'Open this case in the training workspace'}
-                  >
-                    Open in Training
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      className="secondary-button small"
+                      onClick={() => void exportSelected()}
+                      disabled={busy}
+                      title="Download this case (and its questions) as JSON"
+                    >
+                      Export JSON
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button small"
+                      onClick={() => onOpenInTraining(selectedCase.id)}
+                      disabled={busy || caseDirty}
+                      title={caseDirty ? 'Save your changes first' : 'Open this case in the training workspace'}
+                    >
+                      Open in Training
+                    </button>
+                  </>
                 )}
               </div>
             </header>
@@ -430,64 +603,166 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
                   void saveCase();
                 }}
               >
-                <label className="field-label">
-                  <span>Title</span>
-                  <input
-                    className="text-input"
-                    value={caseDraft.title}
-                    onChange={(e) => {
-                      setCaseDraft({ ...caseDraft, title: e.target.value });
-                      setCaseDirty(true);
-                    }}
-                  />
-                </label>
-                <label className="field-label">
-                  <span>Slug</span>
-                  <input
-                    className="text-input"
-                    value={caseDraft.slug}
-                    onChange={(e) => {
-                      setCaseDraft({ ...caseDraft, slug: e.target.value });
-                      setCaseDirty(true);
-                    }}
-                    placeholder="aaa-001"
-                  />
-                </label>
-                <label className="field-label">
-                  <span>Category</span>
-                  <input
-                    className="text-input"
-                    value={caseDraft.category}
-                    onChange={(e) => {
-                      setCaseDraft({ ...caseDraft, category: e.target.value });
-                      setCaseDirty(true);
-                    }}
-                    placeholder="aaa"
-                  />
-                </label>
+                <div className="admin-form-grid">
+                  <label className="field-label">
+                    <span>Title</span>
+                    <input
+                      className="text-input"
+                      value={caseDraft.title}
+                      onChange={(e) => patchDraft('title', e.target.value)}
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span>Slug</span>
+                    <input
+                      className="text-input"
+                      value={caseDraft.slug}
+                      onChange={(e) => patchDraft('slug', e.target.value)}
+                      placeholder="aaa-001"
+                    />
+                  </label>
+                </div>
+
+                <div className="admin-form-grid">
+                  <label className="field-label">
+                    <span>Category</span>
+                    <input
+                      className="text-input"
+                      value={caseDraft.category}
+                      onChange={(e) => patchDraft('category', e.target.value)}
+                      placeholder="aaa"
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span>Difficulty</span>
+                    <select
+                      className="text-input"
+                      value={caseDraft.difficulty}
+                      onChange={(e) => patchDraft('difficulty', e.target.value as Difficulty)}
+                    >
+                      <option value="beginner">Beginner</option>
+                      <option value="intermediate">Intermediate</option>
+                      <option value="advanced">Advanced</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="admin-form-grid">
+                  <label className="field-label">
+                    <span>Estimated minutes</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      className="text-input"
+                      value={caseDraft.estimatedMinutes}
+                      onChange={(e) =>
+                        patchDraft(
+                          'estimatedMinutes',
+                          e.target.value === '' ? '' : Number(e.target.value),
+                        )
+                      }
+                      placeholder="10"
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span>Volume path (.nrrd)</span>
+                    <input
+                      className="text-input"
+                      value={caseDraft.volumePath}
+                      onChange={(e) => patchDraft('volumePath', e.target.value)}
+                      placeholder="content/aaa/volumes/sample-aaa-001.nrrd"
+                    />
+                  </label>
+                </div>
+
                 <label className="field-label">
                   <span>Summary</span>
                   <textarea
                     className="text-input textarea"
                     value={caseDraft.summary}
-                    onChange={(e) => {
-                      setCaseDraft({ ...caseDraft, summary: e.target.value });
-                      setCaseDirty(true);
-                    }}
+                    onChange={(e) => patchDraft('summary', e.target.value)}
                   />
                 </label>
+
                 <label className="field-label">
-                  <span>Volume path (.nrrd)</span>
+                  <span>Diagnosis</span>
                   <input
                     className="text-input"
-                    value={caseDraft.volumePath}
-                    onChange={(e) => {
-                      setCaseDraft({ ...caseDraft, volumePath: e.target.value });
-                      setCaseDirty(true);
-                    }}
-                    placeholder="content/aaa/volumes/sample-aaa-001.nrrd"
+                    value={caseDraft.diagnosis}
+                    onChange={(e) => patchDraft('diagnosis', e.target.value)}
+                    placeholder="Asymptomatic infrarenal abdominal aortic aneurysm"
                   />
                 </label>
+
+                <fieldset className="admin-fieldset">
+                  <legend>Learning objectives</legend>
+                  <ListEditor
+                    values={caseDraft.learningObjectives}
+                    onChange={(v) => patchDraft('learningObjectives', v)}
+                    placeholder="Identify the key CTA measurements before EVAR…"
+                    addLabel="+ Objective"
+                  />
+                </fieldset>
+
+                <fieldset className="admin-fieldset">
+                  <legend>Teaching points</legend>
+                  <ListEditor
+                    values={caseDraft.teachingPoints}
+                    onChange={(v) => patchDraft('teachingPoints', v)}
+                    placeholder="A 6.1 cm AAA in a fit patient generally meets criteria for repair…"
+                    multiline
+                    addLabel="+ Teaching point"
+                  />
+                </fieldset>
+
+                <fieldset className="admin-fieldset">
+                  <legend>References</legend>
+                  <ListEditor
+                    values={caseDraft.references}
+                    onChange={(v) => patchDraft('references', v)}
+                    placeholder="Author et al. JVS 2023; 78(2):123–134"
+                    addLabel="+ Reference"
+                  />
+                </fieldset>
+
+                <fieldset className="admin-fieldset">
+                  <legend>Tags</legend>
+                  <ListEditor
+                    values={caseDraft.tags}
+                    onChange={(v) => patchDraft('tags', v)}
+                    placeholder="EVAR"
+                    addLabel="+ Tag"
+                  />
+                </fieldset>
+
+                <div className="admin-form-grid three">
+                  <label className="field-label">
+                    <span>Author</span>
+                    <input
+                      className="text-input"
+                      value={caseDraft.author}
+                      onChange={(e) => patchDraft('author', e.target.value)}
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span>Reviewer</span>
+                    <input
+                      className="text-input"
+                      value={caseDraft.reviewer}
+                      onChange={(e) => patchDraft('reviewer', e.target.value)}
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span>Last reviewed</span>
+                    <input
+                      type="date"
+                      className="text-input"
+                      value={caseDraft.lastReviewedAt}
+                      onChange={(e) => patchDraft('lastReviewedAt', e.target.value)}
+                    />
+                  </label>
+                </div>
 
                 <div className="admin-form-actions">
                   <button type="submit" className="primary-button" disabled={busy}>
@@ -522,6 +797,10 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
               <p className="muted">Pick a case on the left, or create a new one.</p>
             )}
           </section>
+
+          {!creatingNewCase && selectedCase && healthReport && (
+            <ContentHealthCard report={healthReport} questionRows={questions} onJumpToQuestion={selectQuestion} />
+          )}
 
           <section className="content-card admin-questions-panel">
             <header className="admin-panel-header">
@@ -636,7 +915,124 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
           </section>
         </div>
       </section>
+
+      {showImport && (
+        <CaseImportDialog
+          onClose={() => setShowImport(false)}
+          onImported={async (newCaseId) => {
+            setShowImport(false);
+            await refreshCases();
+            setCreatingNewCase(false);
+            setSelectedCaseId(newCaseId);
+            onCasesChanged();
+            flashStatus('Imported case into SQLite.');
+          }}
+        />
+      )}
     </div>
   );
 }
 
+interface ContentHealthCardProps {
+  report: ValidationReport;
+  questionRows: AdminQuestionRow[];
+  onJumpToQuestion: (id: string) => void;
+}
+
+function ContentHealthCard({ report, questionRows, onJumpToQuestion }: ContentHealthCardProps) {
+  const status: 'ok' | 'warning' | 'error' = !report.ok
+    ? 'error'
+    : report.warnings.length > 0
+      ? 'warning'
+      : 'ok';
+  const headline =
+    status === 'ok'
+      ? 'All clear'
+      : status === 'warning'
+        ? `${report.warnings.length} warning${report.warnings.length === 1 ? '' : 's'}`
+        : `${report.errors.length} error${report.errors.length === 1 ? '' : 's'}`;
+
+  return (
+    <section className="content-card content-health">
+      <header className="admin-panel-header">
+        <h3>Content health</h3>
+        <span className={`health-pill ${status}`}>{headline}</span>
+      </header>
+      {report.errors.length === 0 && report.warnings.length === 0 ? (
+        <p className="muted">No issues detected.</p>
+      ) : (
+        <>
+          {report.errors.length > 0 && (
+            <ul className="health-list health-list-error">
+              {report.errors.map((issue, idx) => (
+                <HealthRow
+                  key={`e-${idx}`}
+                  issue={issue}
+                  questionRows={questionRows}
+                  onJumpToQuestion={onJumpToQuestion}
+                />
+              ))}
+            </ul>
+          )}
+          {report.warnings.length > 0 && (
+            <ul className="health-list health-list-warning">
+              {report.warnings.map((issue, idx) => (
+                <HealthRow
+                  key={`w-${idx}`}
+                  issue={issue}
+                  questionRows={questionRows}
+                  onJumpToQuestion={onJumpToQuestion}
+                />
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function HealthRow({
+  issue,
+  questionRows,
+  onJumpToQuestion,
+}: {
+  issue: { field: string; message: string; questionId: string | null };
+  questionRows: AdminQuestionRow[];
+  onJumpToQuestion: (id: string) => void;
+}) {
+  const targetQuestion = issue.questionId
+    ? questionRows.find((q) => q.id === issue.questionId)
+    : null;
+  return (
+    <li>
+      <strong>{issue.field}</strong>: {issue.message}
+      {targetQuestion && (
+        <>
+          {' '}
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => onJumpToQuestion(targetQuestion.id)}
+          >
+            Open question →
+          </button>
+        </>
+      )}
+    </li>
+  );
+}
+
+function downloadJson(filename: string, payload: unknown) {
+  const json = JSON.stringify(payload, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  // Free the object URL on the next tick so the click finishes first.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}

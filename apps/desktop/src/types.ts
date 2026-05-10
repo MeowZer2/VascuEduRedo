@@ -28,6 +28,13 @@ export interface VascCase {
   tags: string[];
   patient: PatientInfo;
   learningObjectives: string[];
+  /** v0.9 — optional richer authoring metadata. */
+  teachingPoints?: string[];
+  references?: string[];
+  author?: string;
+  reviewer?: string;
+  /** ISO 8601 date (YYYY-MM-DD or full timestamp). */
+  lastReviewedAt?: string;
   volume: {
     type: 'mock' | 'nrrd';
     path?: string;
