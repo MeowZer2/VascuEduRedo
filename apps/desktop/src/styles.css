@@ -169,6 +169,31 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .attempt-row { grid-template-columns: 1fr auto; }
 .code-block { background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 16px; padding: 16px; overflow: auto; color: #cfe0ff; }
 
+/* Multi-viewport MPR grid */
+.layout-tabs, .sync-tabs { display: inline-flex; align-items: center; gap: 4px; padding: 4px; border-radius: 12px; background: rgba(0,0,0,0.2); border: 1px solid var(--border); }
+.viewer-grid { display: grid; gap: 12px; margin-top: 4px; }
+.viewer-grid.layout-1x1 { grid-template-columns: 1fr; }
+.viewer-grid.layout-1x2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.viewer-grid.layout-1x3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.viewer-grid.layout-2x2 { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.viewer-pane { display: grid; gap: 8px; min-width: 0; padding: 10px; border-radius: 16px; border: 1px solid var(--border); background: rgba(0,0,0,0.18); }
+.viewer-pane-active { border-color: rgba(120,166,255,0.55); box-shadow: 0 0 0 1px rgba(120,166,255,0.25) inset; }
+.viewer-pane-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.viewer-pane-plane-tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: rgba(0,0,0,0.25); border: 1px solid var(--border); }
+.viewer-pane-plane-tabs .plane-tab { padding: 5px 9px; font-size: 0.78rem; }
+.viewer-pane-readout { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.viewer-pane-footer { display: flex; gap: 10px; align-items: center; }
+.viewer-pane-footer input[type="range"] { flex: 1; }
+.viewer-pane .nrrd-canvas-wrap { height: clamp(380px, 56vh, 520px); overscroll-behavior: contain; touch-action: none; }
+.layout-1x2 .nrrd-canvas-wrap { height: clamp(320px, 46vh, 440px); }
+.layout-1x3 .nrrd-canvas-wrap { height: clamp(260px, 38vh, 360px); }
+.layout-2x2 .nrrd-canvas-wrap { height: clamp(240px, 32vh, 320px); }
+
+/* Crosshair overlay */
+.crosshair-line { stroke: rgba(120, 200, 255, 0.55); stroke-width: 1; stroke-dasharray: 4 3; fill: none; pointer-events: none; }
+.crosshair-line-active { stroke: rgba(143, 227, 255, 0.95); stroke-width: 1.25; stroke-dasharray: none; }
+.crosshair-line circle { fill: rgba(143, 227, 255, 0.9); stroke: rgba(0, 0, 0, 0.65); stroke-width: 0.75; }
+
 .measurement-question-banner { display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px; margin-bottom: 12px; border-radius: 14px; background: rgba(120,166,255,0.1); border: 1px solid rgba(120,166,255,0.25); color: #cfe0ff; font-size: 0.88rem; line-height: 1.45; }
 .measurement-question-banner-icon { flex: 0 0 auto; font-size: 1.1rem; }
 

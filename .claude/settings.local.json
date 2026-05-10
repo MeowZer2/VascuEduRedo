@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(cargo check *)",
-      "Bash(pnpm typecheck *)"
+      "Bash(pnpm typecheck *)",
+      "Bash(pnpm --dir apps/desktop typecheck)",
+      "Bash(pnpm --dir apps/desktop exec tsc -b --pretty --force)"
     ]
   }
 }
