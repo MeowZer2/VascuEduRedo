@@ -65,6 +65,11 @@ pub struct QuestionResponseRow {
     pub answer: Value,
     pub is_correct: bool,
     pub submitted_at: String,
+    pub awarded_points: f64,
+    pub max_points: f64,
+    pub hints_used: i64,
+    pub elapsed_ms: i64,
+    pub penalty_points: f64,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -125,7 +130,12 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
             question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
             answer_json TEXT NOT NULL,
             is_correct INTEGER NOT NULL,
-            submitted_at TEXT NOT NULL
+            submitted_at TEXT NOT NULL,
+            awarded_points REAL NOT NULL DEFAULT 0,
+            max_points REAL NOT NULL DEFAULT 0,
+            hints_used INTEGER NOT NULL DEFAULT 0,
+            elapsed_ms INTEGER NOT NULL DEFAULT 0,
+            penalty_points REAL NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_responses_attempt ON question_responses(attempt_id);
 
@@ -157,7 +167,42 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("Schema init failed: {e}"))?;
+    ensure_question_response_columns(conn)?;
     Ok(())
+}
+
+fn ensure_question_response_columns(conn: &Connection) -> Result<(), String> {
+    for (name, definition) in [
+        ("awarded_points", "REAL NOT NULL DEFAULT 0"),
+        ("max_points", "REAL NOT NULL DEFAULT 0"),
+        ("hints_used", "INTEGER NOT NULL DEFAULT 0"),
+        ("elapsed_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("penalty_points", "REAL NOT NULL DEFAULT 0"),
+    ] {
+        if !table_has_column(conn, "question_responses", name)? {
+            conn.execute(
+                &format!("ALTER TABLE question_responses ADD COLUMN {name} {definition}"),
+                [],
+            )
+            .map_err(|e| format!("question_responses add column {name} failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("table_info prepare failed for {table}: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("table_info query failed for {table}: {e}"))?;
+    for row in rows {
+        if row.map_err(|e| format!("table_info row failed for {table}: {e}"))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn seed_if_empty(conn: &Connection) -> Result<(), String> {
@@ -424,14 +469,42 @@ pub fn submit_question_response(
     question_id: String,
     answer_json: Value,
     is_correct: bool,
+    awarded_points: Option<f64>,
+    max_points: Option<f64>,
+    hints_used: Option<i64>,
+    elapsed_ms: Option<i64>,
+    penalty_points: Option<f64>,
 ) -> Result<QuestionResponseRow, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let id = Uuid::new_v4().to_string();
     let submitted_at = now_iso();
     let answer_str = answer_json.to_string();
+    let awarded_points = awarded_points.unwrap_or(0.0);
+    let max_points = max_points.unwrap_or(0.0);
+    let hints_used = hints_used.unwrap_or(0);
+    let elapsed_ms = elapsed_ms.unwrap_or(0);
+    let penalty_points = penalty_points.unwrap_or(0.0);
     conn.execute(
-        "INSERT INTO question_responses (id, attempt_id, question_id, answer_json, is_correct, submitted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![id, attempt_id, question_id, answer_str, is_correct as i64, submitted_at],
+        r#"
+        INSERT INTO question_responses (
+            id, attempt_id, question_id, answer_json, is_correct, submitted_at,
+            awarded_points, max_points, hints_used, elapsed_ms, penalty_points
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        "#,
+        params![
+            id,
+            attempt_id,
+            question_id,
+            answer_str,
+            is_correct as i64,
+            submitted_at,
+            awarded_points,
+            max_points,
+            hints_used,
+            elapsed_ms,
+            penalty_points
+        ],
     )
     .map_err(|e| format!("submit_question_response insert failed: {e}"))?;
     Ok(QuestionResponseRow {
@@ -441,6 +514,11 @@ pub fn submit_question_response(
         answer: answer_json,
         is_correct,
         submitted_at,
+        awarded_points,
+        max_points,
+        hints_used,
+        elapsed_ms,
+        penalty_points,
     })
 }
 
@@ -1037,6 +1115,11 @@ pub struct AttemptQuestionDetail {
     pub answer: Value,
     pub is_correct: Option<bool>,
     pub submitted_at: Option<String>,
+    pub awarded_points: Option<f64>,
+    pub max_points: f64,
+    pub penalty_points: Option<f64>,
+    pub hints_used: i64,
+    pub elapsed_ms: Option<i64>,
     /// Pre-computed comparison for measurement questions (mirrors the training feedback box).
     pub measurement: Option<MeasurementDetail>,
 }
@@ -1053,6 +1136,18 @@ struct QuestionMeta {
     qtype: String,
     points: f64,
     data: Value,
+}
+
+struct ResponseMeta {
+    id: String,
+    answer: Value,
+    is_correct: bool,
+    submitted_at: String,
+    awarded_points: f64,
+    max_points: f64,
+    hints_used: i64,
+    elapsed_ms: i64,
+    penalty_points: f64,
 }
 
 fn load_questions_meta(conn: &Connection) -> Result<HashMap<String, QuestionMeta>, String> {
@@ -1479,11 +1574,17 @@ pub fn get_attempt_details(
     };
 
     // Map question_id → response row (latest if duplicates).
-    let mut response_map: HashMap<String, (String, Value, bool, String)> = HashMap::new();
+    let mut response_map: HashMap<String, ResponseMeta> = HashMap::new();
     {
         let mut stmt = conn
             .prepare(
-                "SELECT id, question_id, answer_json, is_correct, submitted_at FROM question_responses WHERE attempt_id = ?1 ORDER BY submitted_at ASC",
+                r#"
+                SELECT id, question_id, answer_json, is_correct, submitted_at,
+                       awarded_points, max_points, hints_used, elapsed_ms, penalty_points
+                FROM question_responses
+                WHERE attempt_id = ?1
+                ORDER BY submitted_at ASC
+                "#,
             )
             .map_err(|e| format!("get_attempt_details responses prepare failed: {e}"))?;
         let rows = stmt
@@ -1494,17 +1595,43 @@ pub fn get_attempt_details(
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, f64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, f64>(9)?,
                 ))
             })
             .map_err(|e| format!("get_attempt_details responses query failed: {e}"))?;
         for r in rows {
-            let (response_id, qid, answer_json, is_correct, submitted_at) =
+            let (
+                response_id,
+                qid,
+                answer_json,
+                is_correct,
+                submitted_at,
+                awarded_points,
+                max_points,
+                hints_used,
+                elapsed_ms,
+                penalty_points,
+            ) =
                 r.map_err(|e| format!("get_attempt_details responses row failed: {e}"))?;
             let answer: Value = serde_json::from_str(&answer_json).unwrap_or(Value::Null);
             // Last write wins (rows are ordered ascending by submitted_at).
             response_map.insert(
                 qid,
-                (response_id, answer, is_correct != 0, submitted_at),
+                ResponseMeta {
+                    id: response_id,
+                    answer,
+                    is_correct: is_correct != 0,
+                    submitted_at,
+                    awarded_points,
+                    max_points,
+                    hints_used,
+                    elapsed_ms,
+                    penalty_points,
+                },
             );
         }
     }
@@ -1538,9 +1665,36 @@ pub fn get_attempt_details(
             .and_then(Value::as_f64)
             .unwrap_or(1.0);
         let response = response_map.remove(&qid);
-        let (response_id, answer, is_correct, submitted_at) = match response {
-            Some((rid, ans, ok, ts)) => (Some(rid), ans, Some(ok), Some(ts)),
-            None => (None, Value::Null, None, None),
+        let (
+            response_id,
+            answer,
+            is_correct,
+            submitted_at,
+            awarded_points,
+            response_max_points,
+            hints_used,
+            elapsed_ms,
+            penalty_points,
+        ) = match response {
+            Some(meta) => {
+                let awarded = if meta.max_points <= 0.0 && meta.is_correct {
+                    points
+                } else {
+                    meta.awarded_points
+                };
+                (
+                    Some(meta.id),
+                    meta.answer,
+                    Some(meta.is_correct),
+                    Some(meta.submitted_at),
+                    Some(awarded),
+                    if meta.max_points > 0.0 { meta.max_points } else { points },
+                    meta.hints_used,
+                    Some(meta.elapsed_ms),
+                    Some(meta.penalty_points),
+                )
+            }
+            None => (None, Value::Null, None, None, None, points, 0, None, None),
         };
         let measurement = if qtype == "measurement" {
             build_measurement_detail(&question_data, &answer)
@@ -1558,6 +1712,11 @@ pub fn get_attempt_details(
             answer,
             is_correct,
             submitted_at,
+            awarded_points,
+            max_points: response_max_points,
+            penalty_points,
+            hints_used,
+            elapsed_ms,
             measurement,
         });
     }

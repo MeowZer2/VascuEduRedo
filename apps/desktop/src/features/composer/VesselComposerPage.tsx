@@ -19,7 +19,7 @@ import {
   getVesselComposition,
   getVesselPreset,
   listVesselCompositions,
-  makeOrientedSegmentFromPreset,
+  makeSegmentFromPreset,
   makeTreatmentMarker,
   saveVesselComposition,
   treatmentMarkerLabel,
@@ -88,6 +88,7 @@ export function VesselComposerPage({
   const [segmentPresetId, setSegmentPresetId] = useState(VESSEL_PRESETS[0].id);
   const [markerType, setMarkerType] = useState<TreatmentMarkerType>('lesionStart');
   const [templateId, setTemplateId] = useState<AnatomyTemplate['id']>(ANATOMY_TEMPLATES[0].id);
+  const [pendingSegmentStart, setPendingSegmentStart] = useState<ComposerPoint | null>(null);
   const [compositionMetadata, setCompositionMetadata] = useState<Record<string, unknown>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -204,6 +205,32 @@ export function VesselComposerPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, selectedObject]);
 
+  useEffect(() => {
+    return () => setComposerDragSelectionSuppressed(false);
+  }, []);
+
+  useEffect(() => {
+    if (tool !== 'segment') setPendingSegmentStart(null);
+  }, [tool]);
+
+  function captureComposerPointer(event: ReactPointerEvent<SVGElement>) {
+    try {
+      svgRef.current?.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail if the browser has already released the pointer.
+    }
+  }
+
+  function releaseComposerPointer(event: ReactPointerEvent<SVGSVGElement>) {
+    try {
+      if (svgRef.current?.hasPointerCapture(event.pointerId)) {
+        svgRef.current.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Best-effort cleanup; selection suppression is still restored below.
+    }
+  }
+
   function applyComposition(row: VesselCompositionRow) {
     setCompositionId(row.id);
     setCompositionName(row.name);
@@ -213,6 +240,7 @@ export function VesselComposerPage({
     setDevicePlacements(row.data.devicePlacements);
     setTreatmentMarkers(row.data.treatmentMarkers);
     setCompositionMetadata(row.data.metadata ?? {});
+    setPendingSegmentStart(null);
     setSelectedId(null);
     setLoadId(row.id);
     setError(null);
@@ -227,6 +255,7 @@ export function VesselComposerPage({
     setBifurcations([]);
     setDevicePlacements([]);
     setTreatmentMarkers([]);
+    setPendingSegmentStart(null);
     setCompositionMetadata({});
     setSelectedId(null);
     setLoadId('');
@@ -296,9 +325,10 @@ export function VesselComposerPage({
   }
 
   function handleCanvasPointerDown(event: ReactPointerEvent<SVGRectElement>) {
+    event.preventDefault();
     const point = svgPoint(event);
     if (tool === 'segment') {
-      addSegmentAt(point);
+      handleSegmentCanvasClick(point);
       return;
     }
     if (tool === 'bifurcation') {
@@ -322,8 +352,14 @@ export function VesselComposerPage({
     event: ReactPointerEvent<SVGGElement>,
     segment: VesselSegment,
   ) {
+    event.preventDefault();
     event.stopPropagation();
+    captureComposerPointer(event);
     const point = svgPoint(event);
+    if (tool === 'segment') {
+      handleSegmentCanvasClick(point);
+      return;
+    }
     if (tool === 'device') {
       addDevicePlacement(segment, point);
       return;
@@ -336,19 +372,23 @@ export function VesselComposerPage({
   }
 
   function handleObjectPointerDown(event: ReactPointerEvent<SVGGElement>, id: string) {
+    event.preventDefault();
     event.stopPropagation();
+    captureComposerPointer(event);
     beginDrag(id, svgPoint(event));
   }
 
   function beginDrag(id: string, point: ComposerPoint) {
     const original = findPlanningEntity(id, segments, bifurcations, devicePlacements, treatmentMarkers);
     if (!original) return;
+    setComposerDragSelectionSuppressed(true);
     setSelectedId(id);
     setDrag({ id, startPointer: point, original });
   }
 
   function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
     if (!drag) return;
+    event.preventDefault();
     const point = svgPoint(event);
     const dx = point.x - drag.startPointer.x;
     const dy = point.y - drag.startPointer.y;
@@ -377,7 +417,12 @@ export function VesselComposerPage({
     }
   }
 
-  function handlePointerUp() {
+  function handlePointerUp(event: ReactPointerEvent<SVGSVGElement>) {
+    if (drag) {
+      event.preventDefault();
+    }
+    releaseComposerPointer(event);
+    setComposerDragSelectionSuppressed(false);
     setDrag(null);
   }
 
@@ -395,6 +440,7 @@ export function VesselComposerPage({
     setDevicePlacements(template.devicePlacements);
     setTreatmentMarkers(template.treatmentMarkers);
     setCompositionMetadata(template.metadata);
+    setPendingSegmentStart(null);
     setSelectedId(template.segments[0]?.id ?? null);
     setLoadId('');
     setTool('select');
@@ -409,18 +455,36 @@ export function VesselComposerPage({
     setError(null);
   }
 
-  function addSegmentAt(point: ComposerPoint) {
+  function handleSegmentCanvasClick(point: ComposerPoint) {
+    if (!pendingSegmentStart) {
+      setPendingSegmentStart(point);
+      setSelectedId(null);
+      setStatus('Segment start set. Click the end point to define direction and length.');
+      setError(null);
+      return;
+    }
+    addSegmentBetween(pendingSegmentStart, point);
+  }
+
+  function addSegmentBetween(start: ComposerPoint, end: ComposerPoint) {
+    if (distance(start, end) < 8) {
+      setStatus('Choose an end point farther from the start point.');
+      setError(null);
+      return;
+    }
     const preset = VESSEL_PRESETS.find((item) => item.id === segmentPresetId) ?? VESSEL_PRESETS[0];
     const id = makeId('segment');
-    const segment = makeOrientedSegmentFromPreset(
+    const segment = makeSegmentFromPreset(
       preset.id,
       id,
-      point,
+      start,
+      end,
       segments.filter((item) => item.vesselType === preset.vesselType).length + 1,
-      { width: WORKSPACE_WIDTH, height: WORKSPACE_HEIGHT, padding: 40 },
     );
+    segment.lengthMm = Number(distance(start, end).toFixed(1));
     setSegments((current) => [...current, segment]);
     setSelectedId(id);
+    setPendingSegmentStart(null);
     setTool('select');
     setStatus(`${segment.label} added.`);
     setError(null);
@@ -510,9 +574,36 @@ export function VesselComposerPage({
     setError(null);
   }
 
+  function duplicateSelectedSegment() {
+    if (!selectedObject || selectedObject.type !== 'segment') return;
+    const source = selectedObject;
+    const id = makeId('segment');
+    const duplicate: VesselSegment = {
+      ...source,
+      id,
+      label: `${source.label} copy`,
+      start: translatePoint(source.start, 28, 28),
+      end: translatePoint(source.end, 28, 28),
+      metadata: source.metadata ? { ...source.metadata } : undefined,
+    };
+    setSegments((current) => [...current, duplicate]);
+    setSelectedId(id);
+    setTool('select');
+    setPendingSegmentStart(null);
+    setStatus(`${source.label} duplicated.`);
+    setError(null);
+  }
+
   function patchSegment(id: string, patch: Partial<VesselSegment>) {
     setSegments((current) =>
-      current.map((segment) => (segment.id === id ? { ...segment, ...patch } : segment)),
+      current.map((segment) => {
+        if (segment.id !== id) return segment;
+        const next = { ...segment, ...patch };
+        if (patch.lengthMm !== undefined && patch.start === undefined && patch.end === undefined) {
+          return resizeSegmentToLength(next, patch.lengthMm);
+        }
+        return next;
+      }),
     );
   }
 
@@ -689,6 +780,14 @@ export function VesselComposerPage({
         <button
           type="button"
           className="secondary-button small"
+          onClick={duplicateSelectedSegment}
+          disabled={!selectedObject || selectedObject.type !== 'segment' || busy}
+        >
+          Duplicate Segment
+        </button>
+        <button
+          type="button"
+          className="secondary-button small"
           onClick={deleteSelected}
           disabled={!selectedId || busy}
         >
@@ -860,6 +959,14 @@ export function VesselComposerPage({
               height={WORKSPACE_HEIGHT}
               onPointerDown={handleCanvasPointerDown}
             />
+            {pendingSegmentStart && (
+              <g className="composer-pending-segment">
+                <circle cx={pendingSegmentStart.x} cy={pendingSegmentStart.y} r="7" />
+                <text x={pendingSegmentStart.x + 12} y={pendingSegmentStart.y - 12}>
+                  start
+                </text>
+              </g>
+            )}
 
             {bifurcations.map((node) => (
               <BifurcationLinks key={`links-${node.id}`} node={node} segments={segments} />
@@ -1615,6 +1722,25 @@ function moveSegment(original: VesselSegment, dx: number, dy: number): VesselSeg
   };
 }
 
+function resizeSegmentToLength(segment: VesselSegment, lengthMm: number): VesselSegment {
+  if (!Number.isFinite(lengthMm) || lengthMm <= 0) return segment;
+  const dx = segment.end.x - segment.start.x;
+  const dy = segment.end.y - segment.start.y;
+  const currentLength = Math.hypot(dx, dy);
+  const unit =
+    currentLength > 0.001
+      ? { x: dx / currentLength, y: dy / currentLength }
+      : { x: 0, y: 1 };
+  return {
+    ...segment,
+    lengthMm,
+    end: {
+      x: segment.start.x + unit.x * lengthMm,
+      y: segment.start.y + unit.y * lengthMm,
+    },
+  };
+}
+
 function moveBifurcation(original: BifurcationNode, dx: number, dy: number): BifurcationNode {
   return {
     ...original,
@@ -1809,6 +1935,11 @@ function makeId(prefix: string): string {
 
 function messageFromError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function setComposerDragSelectionSuppressed(active: boolean) {
+  if (typeof document === 'undefined') return;
+  document.body.classList.toggle('composer-dragging', active);
 }
 
 function clamp(value: number, min: number, max: number): number {

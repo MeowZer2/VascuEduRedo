@@ -10,11 +10,48 @@ export interface SliceRange {
 
 export type PlaneSliceRanges = Record<VolumePlane, SliceRange>;
 
+export interface PlaneOrientationLabels {
+  left: string;
+  right: string;
+  top: string;
+  bottom: string;
+}
+
+export interface PlaneOrientationLabelSet {
+  axial: PlaneOrientationLabels;
+  coronal: PlaneOrientationLabels;
+  sagittal: PlaneOrientationLabels;
+}
+
+export type VolumeOrientationStatus = 'trusted' | 'uncertain';
+
+export interface VolumeOrientationInfo {
+  /**
+   * `trusted` means the file's metadata produced a clean RAS canonicalisation;
+   * `uncertain` means we fell back to raw IJK (warnings explain why).
+   */
+  status: VolumeOrientationStatus;
+  canonical: 'RAS';
+  space: string | null;
+  spaceOrigin: [number, number, number] | null;
+  kinds: string[];
+  /** 4x4 row-major IJK→RAS transform (RAS millimetres). */
+  ijkToRas: [
+    [number, number, number, number],
+    [number, number, number, number],
+    [number, number, number, number],
+    [number, number, number, number],
+  ];
+  warnings: string[];
+  planeLabels: PlaneOrientationLabelSet;
+}
+
 export interface VolumeInfo {
   handleId: string;
   sourcePath: string;
   dims: [number, number, number];
   spacing: [number, number, number];
+  orientation: VolumeOrientationInfo;
   intensityMin: number;
   intensityMax: number;
   planeSliceRanges: PlaneSliceRanges;

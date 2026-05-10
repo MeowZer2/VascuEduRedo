@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose, Engine as _};
+use flate2::read::GzDecoder;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,10 +21,12 @@ pub struct VolumeCache {
 struct Volume {
     id: String,
     source_path: String,
+    raw_dims: [usize; 3],
     width: usize,
     height: usize,
     depth: usize,
     spacing: [f32; 3],
+    orientation: OrientationTransform,
     min_hu: i16,
     max_hu: i16,
     voxels: Vec<i16>,
@@ -35,6 +39,7 @@ pub struct VolumeInfo {
     source_path: String,
     dims: [usize; 3],
     spacing: [f32; 3],
+    orientation: VolumeOrientationInfo,
     intensity_min: i16,
     intensity_max: i16,
     plane_slice_ranges: PlaneSliceRanges,
@@ -78,6 +83,48 @@ pub struct VolumeSample {
     x: usize,
     y: usize,
     intensity: i16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeOrientationInfo {
+    status: String,
+    canonical: String,
+    space: Option<String>,
+    space_origin: Option<[f32; 3]>,
+    kinds: Vec<String>,
+    ijk_to_ras: [[f32; 4]; 4],
+    warnings: Vec<String>,
+    plane_labels: PlaneOrientationLabelSet,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaneOrientationLabelSet {
+    axial: PlaneOrientationLabels,
+    coronal: PlaneOrientationLabels,
+    sagittal: PlaneOrientationLabels,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaneOrientationLabels {
+    left: String,
+    right: String,
+    top: String,
+    bottom: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AxisMapping {
+    raw_axis: usize,
+    sign: i8,
+}
+
+#[derive(Debug, Clone)]
+struct OrientationTransform {
+    canonical_to_raw: [AxisMapping; 3],
+    info: VolumeOrientationInfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,10 +177,41 @@ impl Plane {
         x: usize,
         y: usize,
     ) -> Result<i16, String> {
+        let [cx, cy, cz] = self.display_to_canonical(volume, slice_index, x, y)?;
+        volume.voxel(cx, cy, cz)
+    }
+
+    fn display_to_canonical(
+        self,
+        volume: &Volume,
+        slice_index: usize,
+        x: usize,
+        y: usize,
+    ) -> Result<[usize; 3], String> {
+        let [max_x, max_y, max_z] = [
+            volume.width.saturating_sub(1),
+            volume.height.saturating_sub(1),
+            volume.depth.saturating_sub(1),
+        ];
         match self {
-            Self::Axial => volume.voxel(x, y, slice_index),
-            Self::Coronal => volume.voxel(x, slice_index, y),
-            Self::Sagittal => volume.voxel(slice_index, x, y),
+            Self::Axial => {
+                if x > max_x || y > max_y || slice_index > max_z {
+                    return Err("Axial display coordinate is out of range".to_string());
+                }
+                Ok([x, y, slice_index])
+            }
+            Self::Coronal => {
+                if x > max_x || y > max_z || slice_index > max_y {
+                    return Err("Coronal display coordinate is out of range".to_string());
+                }
+                Ok([x, slice_index, max_z - y])
+            }
+            Self::Sagittal => {
+                if x > max_y || y > max_z || slice_index > max_x {
+                    return Err("Sagittal display coordinate is out of range".to_string());
+                }
+                Ok([slice_index, x, max_z - y])
+            }
         }
     }
 }
@@ -259,6 +337,7 @@ impl Volume {
             source_path: self.source_path.clone(),
             dims: [self.width, self.height, self.depth],
             spacing: self.spacing,
+            orientation: self.orientation.info.clone(),
             intensity_min: self.min_hu,
             intensity_max: self.max_hu,
             plane_slice_ranges: PlaneSliceRanges {
@@ -276,16 +355,26 @@ impl Volume {
                 self.width, self.height, self.depth
             ));
         }
+        let raw = self.orientation.canonical_to_raw([x, y, z], self.raw_dims)?;
+        self.raw_voxel(raw[0], raw[1], raw[2])
+    }
 
+    fn raw_voxel(&self, x: usize, y: usize, z: usize) -> Result<i16, String> {
+        if x >= self.raw_dims[0] || y >= self.raw_dims[1] || z >= self.raw_dims[2] {
+            return Err(format!(
+                "Raw voxel coordinate out of range: i={x}, j={y}, k={z} for volume {} x {} x {}",
+                self.raw_dims[0], self.raw_dims[1], self.raw_dims[2]
+            ));
+        }
         let plane_size = self
-            .width
-            .checked_mul(self.height)
+            .raw_dims[0]
+            .checked_mul(self.raw_dims[1])
             .ok_or_else(|| "Volume plane dimensions are too large".to_string())?;
         let z_offset = z
             .checked_mul(plane_size)
             .ok_or_else(|| "Volume Z offset is too large".to_string())?;
         let y_offset = y
-            .checked_mul(self.width)
+            .checked_mul(self.raw_dims[0])
             .ok_or_else(|| "Volume Y offset is too large".to_string())?;
         let idx = z_offset
             .checked_add(y_offset)
@@ -335,42 +424,13 @@ fn render_slice(
         .ok_or_else(|| "MPR slice dimensions are too large".to_string())?;
     let mut pixels = Vec::with_capacity(pixel_count);
 
-    match plane {
-        Plane::Axial => {
-            let z = slice_index;
-            for y in 0..volume.height {
-                for x in 0..volume.width {
-                    pixels.push(window_voxel(
-                        volume.voxel(x, y, z)?,
-                        window_width,
-                        window_level,
-                    ));
-                }
-            }
-        }
-        Plane::Coronal => {
-            let y = slice_index;
-            for z in 0..volume.depth {
-                for x in 0..volume.width {
-                    pixels.push(window_voxel(
-                        volume.voxel(x, y, z)?,
-                        window_width,
-                        window_level,
-                    ));
-                }
-            }
-        }
-        Plane::Sagittal => {
-            let x = slice_index;
-            for z in 0..volume.depth {
-                for y in 0..volume.height {
-                    pixels.push(window_voxel(
-                        volume.voxel(x, y, z)?,
-                        window_width,
-                        window_level,
-                    ));
-                }
-            }
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(window_voxel(
+                plane.sample_voxel(volume, slice_index, x, y)?,
+                window_width,
+                window_level,
+            ));
         }
     }
 
@@ -540,26 +600,35 @@ fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
     let voxels = match encoding.as_str() {
         "raw" => parse_raw_voxels(data, &nrrd_type, &endian, voxel_count)?,
         "ascii" | "text" | "txt" => parse_ascii_voxels(data, voxel_count)?,
+        "gzip" | "gz" => {
+            let decoded = decode_gzip_payload(data)?;
+            parse_raw_voxels(&decoded, &nrrd_type, &endian, voxel_count)?
+        }
         other => {
             return Err(format!(
-                "Unsupported NRRD encoding '{other}'. This spike supports raw and ascii/text only."
+                "Unsupported NRRD encoding '{other}'. Supported encodings are raw, ascii/text, and gzip."
             ))
         }
     };
 
     let (min_hu, max_hu) = intensity_range(&voxels)?;
-    let spacing = parse_spacing(
+    let raw_spacing = parse_spacing(
         fields.get("space directions").map(String::as_str),
         fields.get("spacings").map(String::as_str),
     );
+    let orientation = build_orientation_transform(&fields, dims, raw_spacing)?;
+    let canonical_dims = orientation.canonical_dims(dims);
+    let spacing = orientation.canonical_spacing(raw_spacing);
 
     Ok(Volume {
         id: String::new(),
         source_path,
-        width: dims[0],
-        height: dims[1],
-        depth: dims[2],
+        raw_dims: dims,
+        width: canonical_dims[0],
+        height: canonical_dims[1],
+        depth: canonical_dims[2],
         spacing,
+        orientation,
         min_hu,
         max_hu,
         voxels,
@@ -721,6 +790,18 @@ fn parse_raw_voxels(
     Ok(voxels)
 }
 
+fn decode_gzip_payload(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = GzDecoder::new(data);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .map_err(|e| format!("Invalid NRRD: gzip payload could not be decompressed: {e}"))?;
+    if decoded.is_empty() {
+        return Err("Invalid NRRD: gzip payload decompressed to no data".to_string());
+    }
+    Ok(decoded)
+}
+
 fn parse_ascii_voxels(data: &[u8], voxel_count: usize) -> Result<Vec<i16>, String> {
     let text = std::str::from_utf8(data)
         .map_err(|_| "Invalid NRRD: ASCII data is not valid UTF-8".to_string())?;
@@ -798,4 +879,425 @@ fn parse_spacing(space_directions: Option<&str>, spacings: Option<&str>) -> [f32
 
 fn vector_length(vector: [f32; 3]) -> f32 {
     (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+
+    #[test]
+    fn parses_gzip_encoded_nrrd_payload() {
+        let raw_voxels = [1_i16, -2, 300, -400]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<u8>>();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&raw_voxels).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut bytes = b"NRRD0005\ntype: short\ndimension: 3\nsizes: 2 2 1\nencoding: gzip\nendian: little\n\n".to_vec();
+        bytes.extend_from_slice(&compressed);
+
+        let volume = parse_nrrd(&bytes, "fixture.nrrd".to_string()).unwrap();
+        assert_eq!((volume.width, volume.height, volume.depth), (2, 2, 1));
+        assert_eq!(volume.voxels, vec![1, -2, 300, -400]);
+        assert_eq!(volume.min_hu, -400);
+        assert_eq!(volume.max_hu, 300);
+    }
+
+    #[test]
+    fn malformed_gzip_returns_readable_error() {
+        let bytes =
+            b"NRRD0005\ntype: short\ndimension: 3\nsizes: 2 2 1\nencoding: gzip\nendian: little\n\nnot gzip";
+        let error = parse_nrrd(bytes, "bad.nrrd".to_string()).unwrap_err();
+        assert!(error.contains("gzip payload could not be decompressed"));
+    }
+
+    #[test]
+    #[ignore = "Uses optional local uploaded CTA fixture when present."]
+    fn parse_uploaded_cta_nrrd_when_available() {
+        let path = Path::new("../../../content/aaa/volumes/CTA.nrrd");
+        if !path.exists() {
+            return;
+        }
+
+        let bytes = fs::read(path).unwrap();
+        let volume = parse_nrrd(&bytes, path.display().to_string()).unwrap();
+        assert!(volume.width > 0);
+        assert!(volume.height > 0);
+        assert!(volume.depth > 0);
+        assert_eq!(volume.voxels.len(), volume.width * volume.height * volume.depth);
+        println!(
+            "loaded CTA fixture: {}x{}x{}, HU {}..{}",
+            volume.width, volume.height, volume.depth, volume.min_hu, volume.max_hu
+        );
+    }
+}
+
+impl OrientationTransform {
+    fn canonical_to_raw(
+        &self,
+        canonical: [usize; 3],
+        raw_dims: [usize; 3],
+    ) -> Result<[usize; 3], String> {
+        let mut raw = [0_usize; 3];
+        for (canonical_axis, value) in canonical.into_iter().enumerate() {
+            let mapping = self.canonical_to_raw[canonical_axis];
+            let raw_len = raw_dims
+                .get(mapping.raw_axis)
+                .copied()
+                .ok_or_else(|| "Invalid orientation mapping axis".to_string())?;
+            raw[mapping.raw_axis] = if mapping.sign >= 0 {
+                value
+            } else {
+                raw_len
+                    .checked_sub(1)
+                    .and_then(|max| max.checked_sub(value))
+                    .ok_or_else(|| "Invalid orientation flip coordinate".to_string())?
+            };
+        }
+        Ok(raw)
+    }
+
+    fn canonical_dims(&self, raw_dims: [usize; 3]) -> [usize; 3] {
+        let mut out = [0_usize; 3];
+        for canonical_axis in 0..3 {
+            let mapping = self.canonical_to_raw[canonical_axis];
+            out[canonical_axis] = raw_dims[mapping.raw_axis];
+        }
+        out
+    }
+
+    fn canonical_spacing(&self, raw_spacing: [f32; 3]) -> [f32; 3] {
+        let mut out = [1.0_f32; 3];
+        for canonical_axis in 0..3 {
+            let mapping = self.canonical_to_raw[canonical_axis];
+            out[canonical_axis] = raw_spacing[mapping.raw_axis];
+        }
+        out
+    }
+}
+
+const IDENTITY_AXIS_MAPPING: [AxisMapping; 3] = [
+    AxisMapping { raw_axis: 0, sign: 1 },
+    AxisMapping { raw_axis: 1, sign: 1 },
+    AxisMapping { raw_axis: 2, sign: 1 },
+];
+
+fn identity_matrix(spacing: [f32; 3], origin: [f32; 3]) -> [[f32; 4]; 4] {
+    [
+        [spacing[0], 0.0, 0.0, origin[0]],
+        [0.0, spacing[1], 0.0, origin[1]],
+        [0.0, 0.0, spacing[2], origin[2]],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+/// Plane labels assume canonical RAS storage and the display mapping used in
+/// `Plane::display_to_canonical` (axial: identity; coronal/sagittal flip Y so
+/// superior is at the top of the displayed image).
+fn canonical_plane_labels() -> PlaneOrientationLabelSet {
+    PlaneOrientationLabelSet {
+        axial: PlaneOrientationLabels {
+            left: "L".to_string(),
+            right: "R".to_string(),
+            top: "P".to_string(),
+            bottom: "A".to_string(),
+        },
+        coronal: PlaneOrientationLabels {
+            left: "L".to_string(),
+            right: "R".to_string(),
+            top: "S".to_string(),
+            bottom: "I".to_string(),
+        },
+        sagittal: PlaneOrientationLabels {
+            left: "P".to_string(),
+            right: "A".to_string(),
+            top: "S".to_string(),
+            bottom: "I".to_string(),
+        },
+    }
+}
+
+fn uncertain_plane_labels() -> PlaneOrientationLabelSet {
+    let unknown = PlaneOrientationLabels {
+        left: "?".to_string(),
+        right: "?".to_string(),
+        top: "?".to_string(),
+        bottom: "?".to_string(),
+    };
+    PlaneOrientationLabelSet {
+        axial: unknown.clone(),
+        coronal: unknown.clone(),
+        sagittal: unknown,
+    }
+}
+
+fn build_orientation_transform(
+    fields: &HashMap<String, String>,
+    _raw_dims: [usize; 3],
+    raw_spacing: [f32; 3],
+) -> Result<OrientationTransform, String> {
+    let space_field = fields.get("space").map(String::as_str);
+    let space_directions_field = fields.get("space directions").map(String::as_str);
+    let space_origin_field = fields.get("space origin").map(String::as_str);
+    let kinds_field = fields.get("kinds").map(String::as_str);
+
+    let kinds: Vec<String> = kinds_field
+        .map(|raw| {
+            raw.split_whitespace()
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let raw_origin = parse_space_origin_vec(space_origin_field);
+    let raw_directions = space_directions_field.and_then(parse_space_directions);
+    let space_kind = space_field.and_then(parse_space_kind);
+
+    let mut warnings: Vec<String> = Vec::new();
+
+    if let Some(raw) = space_field {
+        if space_kind.is_none() {
+            warnings.push(format!(
+                "Unrecognised NRRD 'space' value '{raw}'; orientation may be approximate."
+            ));
+        }
+    }
+
+    let space_signs = space_kind.map(ras_signs_for_space).unwrap_or([1.0, 1.0, 1.0]);
+
+    // Convert each raw IJK direction vector into RAS coordinates so we can
+    // compare against canonical axes regardless of whether the file is stored
+    // in LPS, RAS, scanner-XYZ, etc.
+    let ras_directions = raw_directions.map(|dirs| {
+        let mut converted = [[0.0_f32; 3]; 3];
+        for axis in 0..3 {
+            for component in 0..3 {
+                converted[axis][component] = dirs[axis][component] * space_signs[component];
+            }
+        }
+        converted
+    });
+
+    let ras_origin = raw_origin.map(|origin| {
+        [
+            origin[0] * space_signs[0],
+            origin[1] * space_signs[1],
+            origin[2] * space_signs[2],
+        ]
+    });
+
+    let mut status = "trusted".to_string();
+    let canonical_to_raw_mapping = match ras_directions.as_ref() {
+        Some(dirs) => match derive_axis_mapping(dirs, &mut warnings) {
+            Some(mapping) => mapping,
+            None => {
+                status = "uncertain".to_string();
+                warnings.push(
+                    "NRRD orientation is not orthogonal enough to canonicalize; falling back to raw IJK axes.".to_string(),
+                );
+                IDENTITY_AXIS_MAPPING
+            }
+        },
+        None => {
+            if space_directions_field.is_some() {
+                warnings.push(
+                    "NRRD 'space directions' field could not be parsed as 3D vectors; assuming raw IJK matches RAS.".to_string(),
+                );
+            } else {
+                warnings.push(
+                    "NRRD orientation metadata is missing; assuming raw IJK matches canonical RAS.".to_string(),
+                );
+            }
+            status = "uncertain".to_string();
+            IDENTITY_AXIS_MAPPING
+        }
+    };
+
+    let plane_labels = if status == "uncertain" {
+        uncertain_plane_labels()
+    } else {
+        canonical_plane_labels()
+    };
+
+    let ijk_to_ras = build_ijk_to_ras_matrix(
+        ras_directions.as_ref(),
+        ras_origin,
+        raw_spacing,
+    );
+
+    let info = VolumeOrientationInfo {
+        status,
+        canonical: "RAS".to_string(),
+        space: space_field.map(|raw| raw.to_string()),
+        space_origin: ras_origin,
+        kinds,
+        ijk_to_ras,
+        warnings,
+        plane_labels,
+    };
+
+    Ok(OrientationTransform {
+        canonical_to_raw: canonical_to_raw_mapping,
+        info,
+    })
+}
+
+fn parse_space_directions(raw: &str) -> Option<[[f32; 3]; 3]> {
+    let mut vectors: Vec<[f32; 3]> = Vec::new();
+    for part in raw.split(')') {
+        let Some(start) = part.find('(') else {
+            continue;
+        };
+        let nums: Vec<f32> = part[start + 1..]
+            .split(',')
+            .filter_map(|value| value.trim().parse::<f32>().ok())
+            .collect();
+        if nums.len() == 3 {
+            vectors.push([nums[0], nums[1], nums[2]]);
+        }
+    }
+    if vectors.len() == 3 {
+        Some([vectors[0], vectors[1], vectors[2]])
+    } else {
+        None
+    }
+}
+
+fn parse_space_origin_vec(raw: Option<&str>) -> Option<[f32; 3]> {
+    let raw = raw?;
+    let trimmed = raw.trim();
+    let inside = trimmed.trim_start_matches('(').trim_end_matches(')');
+    let nums: Vec<f32> = inside
+        .split(',')
+        .filter_map(|value| value.trim().parse::<f32>().ok())
+        .collect();
+    if nums.len() == 3 {
+        Some([nums[0], nums[1], nums[2]])
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SpaceKind {
+    Ras,
+    Lps,
+    Las,
+    Rps,
+    Lai,
+    Rai,
+    Lpi,
+    Rpi,
+    ScannerXyz,
+}
+
+fn parse_space_kind(raw: &str) -> Option<SpaceKind> {
+    let normalised = raw.trim().to_ascii_lowercase();
+    match normalised.as_str() {
+        "right-anterior-superior" | "ras" => Some(SpaceKind::Ras),
+        "left-posterior-superior" | "lps" => Some(SpaceKind::Lps),
+        "left-anterior-superior" | "las" => Some(SpaceKind::Las),
+        "right-posterior-superior" | "rps" => Some(SpaceKind::Rps),
+        "left-anterior-inferior" | "lai" => Some(SpaceKind::Lai),
+        "right-anterior-inferior" | "rai" => Some(SpaceKind::Rai),
+        "left-posterior-inferior" | "lpi" => Some(SpaceKind::Lpi),
+        "right-posterior-inferior" | "rpi" => Some(SpaceKind::Rpi),
+        "scanner-xyz" | "scanner-xyz-time" | "3d-right-handed" | "3d-left-handed" => {
+            Some(SpaceKind::ScannerXyz)
+        }
+        _ => None,
+    }
+}
+
+/// Returns per-component sign multipliers that convert a vector expressed in
+/// the given space frame to the canonical RAS frame.
+fn ras_signs_for_space(kind: SpaceKind) -> [f32; 3] {
+    match kind {
+        SpaceKind::Ras | SpaceKind::ScannerXyz => [1.0, 1.0, 1.0],
+        SpaceKind::Lps => [-1.0, -1.0, 1.0],
+        SpaceKind::Las => [-1.0, 1.0, 1.0],
+        SpaceKind::Rps => [1.0, -1.0, 1.0],
+        SpaceKind::Lai => [-1.0, 1.0, -1.0],
+        SpaceKind::Rai => [1.0, 1.0, -1.0],
+        SpaceKind::Lpi => [-1.0, -1.0, -1.0],
+        SpaceKind::Rpi => [1.0, -1.0, -1.0],
+    }
+}
+
+/// Choose, for each raw IJK axis, the canonical RAS axis it best aligns with
+/// and the sign of the alignment. Returns `None` when the raw axes are not
+/// orthogonal enough to be canonicalized via a permutation+flip alone.
+fn derive_axis_mapping(
+    ras_directions: &[[f32; 3]; 3],
+    warnings: &mut Vec<String>,
+) -> Option<[AxisMapping; 3]> {
+    const DOMINANCE_THRESHOLD: f32 = 0.85;
+
+    let mut raw_to_canonical: [(usize, i8); 3] = [(0, 1); 3];
+    for raw_axis in 0..3 {
+        let v = ras_directions[raw_axis];
+        let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if !length.is_finite() || length <= 0.0 {
+            return None;
+        }
+        let normalised = [v[0] / length, v[1] / length, v[2] / length];
+
+        let mut best = 0usize;
+        let mut best_abs = normalised[0].abs();
+        for k in 1..3 {
+            let component = normalised[k].abs();
+            if component > best_abs {
+                best = k;
+                best_abs = component;
+            }
+        }
+
+        if best_abs < DOMINANCE_THRESHOLD {
+            warnings.push(format!(
+                "Raw axis {raw_axis} aligns weakly with canonical axis {best} (cosine {best_abs:.2}); orientation may be approximate."
+            ));
+        }
+
+        let sign: i8 = if normalised[best] >= 0.0 { 1 } else { -1 };
+        raw_to_canonical[raw_axis] = (best, sign);
+    }
+
+    let mut used = [false; 3];
+    for (canonical_axis, _) in raw_to_canonical.iter().copied() {
+        if used[canonical_axis] {
+            return None;
+        }
+        used[canonical_axis] = true;
+    }
+
+    let mut canonical_to_raw_arr = IDENTITY_AXIS_MAPPING;
+    for (raw_axis, (canonical_axis, sign)) in raw_to_canonical.iter().copied().enumerate() {
+        canonical_to_raw_arr[canonical_axis] = AxisMapping {
+            raw_axis,
+            sign,
+        };
+    }
+
+    Some(canonical_to_raw_arr)
+}
+
+fn build_ijk_to_ras_matrix(
+    ras_directions: Option<&[[f32; 3]; 3]>,
+    ras_origin: Option<[f32; 3]>,
+    raw_spacing: [f32; 3],
+) -> [[f32; 4]; 4] {
+    let origin = ras_origin.unwrap_or([0.0, 0.0, 0.0]);
+    match ras_directions {
+        Some(dirs) => [
+            [dirs[0][0], dirs[1][0], dirs[2][0], origin[0]],
+            [dirs[0][1], dirs[1][1], dirs[2][1], origin[1]],
+            [dirs[0][2], dirs[1][2], dirs[2][2], origin[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        None => identity_matrix(raw_spacing, origin),
+    }
 }

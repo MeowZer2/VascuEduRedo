@@ -133,13 +133,17 @@ export type UserAnswer = string | string[] | boolean | number | null;
 export interface QuestionResult {
   questionId: string;
   prompt: string;
+  type: QuestionType;
   correct: boolean;
   awardedPoints: number;
   maxPoints: number;
+  penaltyPoints: number;
+  hintPenaltyPercent: number;
   answer: UserAnswer;
   expected: string;
   explanation: string;
   hintsUsed: number;
+  elapsedMs: number;
 }
 
 export interface AttemptResult {
@@ -150,5 +154,8 @@ export interface AttemptResult {
   score: number;
   maxScore: number;
   percent: number;
+  correctCount: number;
+  totalHintsUsed: number;
+  totalElapsedMs: number;
   questionResults: QuestionResult[];
 }

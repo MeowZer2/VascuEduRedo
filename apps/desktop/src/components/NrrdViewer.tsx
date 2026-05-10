@@ -29,6 +29,7 @@ import {
   voxelFromPane,
   voxelWithSlice,
   type CrosshairVoxel,
+  type DisplayConvention,
   type DisplayPoint,
   type ImagePoint,
   type Measurement,
@@ -127,6 +128,7 @@ export function NrrdViewer({
   const [activePane, setActivePane] = useState(0);
   const [toolMode, setToolMode] = useState<ViewerToolMode>('scroll');
   const [sync, setSync] = useState<SyncFlags>({ slice: true, wl: true, zoom: true });
+  const [displayConvention, setDisplayConvention] = useState<DisplayConvention>('pacs');
   const [crosshair, setCrosshair] = useState<CrosshairVoxel | null>(null);
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
   const layoutRef = useRef<ViewerLayout>(layout);
@@ -317,7 +319,7 @@ export function NrrdViewer({
           return { ...p, slice: safeSlice, selectedMeasurementId: null };
         }
         if (!sync.slice) return p;
-        const projected = paneFromVoxel(nextCross, p.plane).slice;
+        const projected = paneFromVoxel(nextCross, p.plane, volume.dims).slice;
         return {
           ...p,
           slice: sanitizeSliceIndex(projected, volume.planeSliceRanges[p.plane].count),
@@ -378,13 +380,20 @@ export function NrrdViewer({
         z: midpoint(volume.dims[2]),
       };
     // voxelFromPane rounds the inputs internally so the voxel stays integer-valued.
-    const nextCross = voxelFromPane(previous, pane.plane, imagePoint.x, imagePoint.y, pane.slice);
+    const nextCross = voxelFromPane(
+      previous,
+      pane.plane,
+      imagePoint.x,
+      imagePoint.y,
+      pane.slice,
+      volume.dims,
+    );
     setCrosshair(nextCross);
     if (sync.slice) {
       setPanes((current) =>
         current.map((p, i) => {
           if (i === paneIndex) return p;
-          const projected = paneFromVoxel(nextCross, p.plane).slice;
+          const projected = paneFromVoxel(nextCross, p.plane, volume.dims).slice;
           return {
             ...p,
             slice: sanitizeSliceIndex(projected, volume.planeSliceRanges[p.plane].count),
@@ -487,10 +496,16 @@ export function NrrdViewer({
     if (!volume) return null;
     const [width, height, depth] = volume.dims;
     const [sx, sy, sz] = volume.spacing;
+    const orientationTag =
+      volume.orientation?.status === 'trusted'
+        ? `RAS canonical (${volume.orientation.space ?? 'inferred'})`
+        : 'orientation uncertain';
     return `${width} x ${height} x ${depth} voxels | ${sx.toFixed(2)} / ${sy.toFixed(2)} / ${sz.toFixed(
       2,
-    )} mm | intensity ${volume.intensityMin} to ${volume.intensityMax}`;
+    )} mm | intensity ${volume.intensityMin} to ${volume.intensityMax} | ${orientationTag}`;
   }, [volume]);
+
+  const orientationWarnings = volume?.orientation?.warnings ?? [];
 
   const activeWindow = panes[activePane] ?? null;
   const controlsDisabled = !volume || status !== 'ready' || panes.length === 0;
@@ -502,6 +517,13 @@ export function NrrdViewer({
           <h3>NRRD MPR Viewer</h3>
           <p>{description}</p>
           {metadata ? <p className="viewer-metadata">{metadata}</p> : null}
+          {orientationWarnings.length > 0 ? (
+            <ul className="viewer-orientation-warnings" aria-label="Orientation warnings">
+              {orientationWarnings.map((warning, idx) => (
+                <li key={idx}>{warning}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
         <span className="pill">{layout.toUpperCase()} · MPR</span>
       </div>
@@ -553,6 +575,26 @@ export function NrrdViewer({
             onClick={() => setToolMode('angle')}
           >
             Angle
+          </button>
+        </div>
+        <div className="sync-tabs" role="group" aria-label="Display convention">
+          <button
+            type="button"
+            className={displayConvention === 'pacs' ? 'tool-tab active' : 'tool-tab'}
+            disabled={controlsDisabled}
+            onClick={() => setDisplayConvention('pacs')}
+            title="PACS / radiology display convention (R on viewer's left)"
+          >
+            PACS
+          </button>
+          <button
+            type="button"
+            className={displayConvention === 'canonical' ? 'tool-tab active' : 'tool-tab'}
+            disabled={controlsDisabled}
+            onClick={() => setDisplayConvention('canonical')}
+            title="Canonical RAS display (no viewer-side flips)"
+          >
+            Canonical
           </button>
         </div>
         <div className="sync-tabs" role="group" aria-label="Sync toggles">
@@ -650,6 +692,7 @@ export function NrrdViewer({
               pane={pane}
               index={idx}
               toolMode={toolMode}
+              displayConvention={displayConvention}
               crosshairVoxel={crosshair}
               showCrosshair
               active={idx === activePane}

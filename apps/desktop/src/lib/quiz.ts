@@ -1,7 +1,12 @@
 import type { Question, QuestionResult, UserAnswer } from '../types';
 
 function normalize(value: string): string {
-  return value.trim().toLowerCase();
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function arraysEqualAsSets(a: string[], b: string[]): boolean {
@@ -34,7 +39,12 @@ export function expectedAnswerLabel(question: Question): string {
   }
 }
 
-export function evaluateAnswer(question: Question, answer: UserAnswer, hintsUsed = 0): QuestionResult {
+export function evaluateAnswer(
+  question: Question,
+  answer: UserAnswer,
+  hintsUsed = 0,
+  elapsedMs = 0,
+): QuestionResult {
   let correct = false;
 
   switch (question.type) {
@@ -67,17 +77,22 @@ export function evaluateAnswer(question: Question, answer: UserAnswer, hintsUsed
 
   const hintPenalty = Math.min(hintsUsed * 0.15, 0.45);
   const awardedPoints = correct ? Math.max(0, question.points * (1 - hintPenalty)) : 0;
+  const penaltyPoints = correct ? question.points - awardedPoints : 0;
 
   return {
     questionId: question.id,
     prompt: question.prompt,
+    type: question.type,
     correct,
     awardedPoints: Number(awardedPoints.toFixed(2)),
     maxPoints: question.points,
+    penaltyPoints: Number(penaltyPoints.toFixed(2)),
+    hintPenaltyPercent: Number((hintPenalty * 100).toFixed(0)),
     answer,
     expected: expectedAnswerLabel(question),
     explanation: question.explanation,
     hintsUsed,
+    elapsedMs,
   };
 }
 

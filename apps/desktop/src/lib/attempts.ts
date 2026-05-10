@@ -1,4 +1,4 @@
-import type { UserAnswer } from '../types';
+import type { QuestionResult, UserAnswer } from '../types';
 import { isTauriDesktop, safeInvoke } from './tauri';
 
 export interface AttemptRow {
@@ -27,7 +27,7 @@ export async function submitQuestionResponse(
   attemptId: string,
   questionId: string,
   answer: UserAnswer,
-  isCorrect: boolean,
+  result: QuestionResult,
 ): Promise<void> {
   if (!isTauriDesktop()) return;
   try {
@@ -35,7 +35,12 @@ export async function submitQuestionResponse(
       attemptId,
       questionId,
       answerJson: answer,
-      isCorrect,
+      isCorrect: result.correct,
+      awardedPoints: result.awardedPoints,
+      maxPoints: result.maxPoints,
+      hintsUsed: result.hintsUsed,
+      elapsedMs: result.elapsedMs,
+      penaltyPoints: result.penaltyPoints,
     });
   } catch (error) {
     console.error('submitQuestionResponse failed:', error);

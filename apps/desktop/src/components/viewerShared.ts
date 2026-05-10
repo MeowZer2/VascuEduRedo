@@ -1,4 +1,8 @@
-import type { VolumeInfo, VolumePlane } from '../lib/volume';
+import type {
+  PlaneOrientationLabels,
+  VolumeInfo,
+  VolumePlane,
+} from '../lib/volume';
 
 // ---------------------------------------------------------------------------
 // Types shared by NrrdViewer (multi-viewport parent) and ViewportPane (single
@@ -169,6 +173,84 @@ export function getPlaneSpacing(
   }
 }
 
+const FALLBACK_PLANE_LABELS: Record<VolumePlane, PlaneOrientationLabels> = {
+  axial: { left: 'L', right: 'R', top: 'P', bottom: 'A' },
+  coronal: { left: 'L', right: 'R', top: 'S', bottom: 'I' },
+  sagittal: { left: 'P', right: 'A', top: 'S', bottom: 'I' },
+};
+
+export function getPlaneOrientationLabels(
+  volume: VolumeInfo | null | undefined,
+  plane: VolumePlane,
+): PlaneOrientationLabels {
+  const labels = volume?.orientation?.planeLabels?.[plane];
+  return labels ?? FALLBACK_PLANE_LABELS[plane];
+}
+
+// ---------------------------------------------------------------------------
+// Display convention layer
+//
+// The orientation engine maps the volume into a canonical RAS-aligned image
+// stream. PACS/radiology readers expect specific viewer-side flips on top of
+// that (e.g. patient right on the viewer's left for axial). The convention
+// flips below are applied ONLY at render time — voxel state, measurement
+// coordinates, crosshair voxels, and orientation metadata stay in canonical
+// image space.
+// ---------------------------------------------------------------------------
+
+export type DisplayConvention = 'pacs' | 'canonical';
+
+export interface DisplayFlips {
+  flipX: boolean;
+  flipY: boolean;
+}
+
+const NO_FLIPS: DisplayFlips = { flipX: false, flipY: false };
+
+const PACS_FLIPS: Record<VolumePlane, DisplayFlips> = {
+  // Axial: flip both so R is on the viewer's left and A is at the top
+  // (looking from the foot up at a supine patient).
+  axial: { flipX: true, flipY: true },
+  // Coronal: codex's slicer already puts S at the top; just flip X so R
+  // is on the viewer's left (looking at the patient's front).
+  coronal: { flipX: true, flipY: false },
+  // Sagittal: present as if looking from the patient's left side, so the
+  // anterior side of the body is on the viewer's left.
+  sagittal: { flipX: true, flipY: false },
+};
+
+export function getDisplayFlips(
+  plane: VolumePlane,
+  convention: DisplayConvention,
+): DisplayFlips {
+  return convention === 'pacs' ? PACS_FLIPS[plane] : NO_FLIPS;
+}
+
+/** Involutive image-space ⇄ viewer-space flip. */
+export function applyDisplayFlips(
+  point: ImagePoint,
+  imageSize: ImageSize,
+  flips: DisplayFlips,
+): ImagePoint {
+  return {
+    x: flips.flipX ? Math.max(0, imageSize.width - 1 - point.x) : point.x,
+    y: flips.flipY ? Math.max(0, imageSize.height - 1 - point.y) : point.y,
+  };
+}
+
+/** Swap label corners to reflect the actual displayed orientation. */
+export function getDisplayedOrientationLabels(
+  canonical: PlaneOrientationLabels,
+  flips: DisplayFlips,
+): PlaneOrientationLabels {
+  return {
+    left: flips.flipX ? canonical.right : canonical.left,
+    right: flips.flipX ? canonical.left : canonical.right,
+    top: flips.flipY ? canonical.bottom : canonical.top,
+    bottom: flips.flipY ? canonical.top : canonical.bottom,
+  };
+}
+
 export function distanceMm(
   start: ImagePoint,
   end: ImagePoint,
@@ -229,9 +311,13 @@ export function distanceToSegment(
 
 // ---------------------------------------------------------------------------
 // Crosshair / voxel mapping (matches the Rust slicing convention in volume.rs)
-// axial slice (s=z): image (x, y) → voxel (px, py, s)
-// coronal slice (s=y): image (x, z) → voxel (px, s, py)
-// sagittal slice (s=x): image (y, z) → voxel (s, px, py)
+// Voxel coordinates are in canonical RAS index space, where +x = R, +y = A,
+// +z = S. Coronal and sagittal display rows run top→bottom from S→I, so the
+// display Y axis is flipped relative to canonical Z (Rust does the matching
+// flip when sampling pixels).
+//   axial    (slice=z): image (x, y)              → voxel (x, y, z)
+//   coronal  (slice=y): image (x, depth-1-z)      → voxel (x, y, z)
+//   sagittal (slice=x): image (y, depth-1-z)      → voxel (x, y, z)
 // ---------------------------------------------------------------------------
 
 export interface PaneProjection {
@@ -240,14 +326,23 @@ export interface PaneProjection {
   slice: number;
 }
 
-export function paneFromVoxel(voxel: CrosshairVoxel, plane: VolumePlane): PaneProjection {
+function flipY(value: number, depth: number): number {
+  return Math.max(0, depth - 1 - value);
+}
+
+export function paneFromVoxel(
+  voxel: CrosshairVoxel,
+  plane: VolumePlane,
+  dims: [number, number, number],
+): PaneProjection {
+  const depth = dims[2];
   switch (plane) {
     case 'axial':
       return { px: voxel.x, py: voxel.y, slice: voxel.z };
     case 'coronal':
-      return { px: voxel.x, py: voxel.z, slice: voxel.y };
+      return { px: voxel.x, py: flipY(voxel.z, depth), slice: voxel.y };
     case 'sagittal':
-      return { px: voxel.y, py: voxel.z, slice: voxel.x };
+      return { px: voxel.y, py: flipY(voxel.z, depth), slice: voxel.x };
   }
 }
 
@@ -262,17 +357,19 @@ export function voxelFromPane(
   px: number,
   py: number,
   slice: number,
+  dims: [number, number, number],
 ): CrosshairVoxel {
   const ipx = Math.round(px);
   const ipy = Math.round(py);
   const isl = Math.round(slice);
+  const depth = dims[2];
   switch (plane) {
     case 'axial':
       return { x: ipx, y: ipy, z: isl };
     case 'coronal':
-      return { x: ipx, y: isl, z: ipy };
+      return { x: ipx, y: isl, z: flipY(ipy, depth) };
     case 'sagittal':
-      return { x: isl, y: ipx, z: ipy };
+      return { x: isl, y: ipx, z: flipY(ipy, depth) };
   }
 }
 
@@ -306,14 +403,27 @@ export interface FittedImageRect {
   top: number;
   width: number;
   height: number;
-  scale: number;
+  /** Display pixels per image pixel along the X axis. */
+  scaleX: number;
+  /** Display pixels per image pixel along the Y axis. */
+  scaleY: number;
 }
+
+/**
+ * Pixel pitch (in mm per image pixel) for a plane's two image axes. Used to
+ * weight the on-screen scaling so coronal/sagittal views stay physically
+ * proportional even when slice spacing differs from in-plane spacing.
+ *
+ * Pass `[1, 1]` to revert to raw-pixel-isotropic fitting.
+ */
+export type PlanePixelSpacing = [number, number];
 
 export function fitImageToPanel(
   imageSize: ImageSize | null,
   panelSize: ImageSize,
   zoom: number,
   panOffset: DisplayPoint,
+  pixelSpacing: PlanePixelSpacing = [1, 1],
 ): FittedImageRect | null {
   if (
     !imageSize ||
@@ -324,23 +434,40 @@ export function fitImageToPanel(
   ) {
     return null;
   }
-  const scale =
-    Math.min(panelSize.width / imageSize.width, panelSize.height / imageSize.height) * zoom;
-  const width = imageSize.width * scale;
-  const height = imageSize.height * scale;
+  const sx = pixelSpacing[0] > 0 && Number.isFinite(pixelSpacing[0]) ? pixelSpacing[0] : 1;
+  const sy = pixelSpacing[1] > 0 && Number.isFinite(pixelSpacing[1]) ? pixelSpacing[1] : 1;
+  const physicalWidth = imageSize.width * sx;
+  const physicalHeight = imageSize.height * sy;
+  const baseScale =
+    Math.min(panelSize.width / physicalWidth, panelSize.height / physicalHeight) * zoom;
+  const width = physicalWidth * baseScale;
+  const height = physicalHeight * baseScale;
   return {
     left: (panelSize.width - width) / 2 + panOffset.x,
     top: (panelSize.height - height) / 2 + panOffset.y,
     width,
     height,
-    scale,
+    scaleX: baseScale * sx,
+    scaleY: baseScale * sy,
   };
 }
 
-export function imageToDisplayPoint(point: ImagePoint, fitRect: FittedImageRect): DisplayPoint {
+export interface DisplayConventionContext {
+  imageSize: ImageSize;
+  flips: DisplayFlips;
+}
+
+export function imageToDisplayPoint(
+  point: ImagePoint,
+  fitRect: FittedImageRect,
+  convention?: DisplayConventionContext,
+): DisplayPoint {
+  const view = convention
+    ? applyDisplayFlips(point, convention.imageSize, convention.flips)
+    : point;
   return {
-    x: fitRect.left + point.x * fitRect.scale,
-    y: fitRect.top + point.y * fitRect.scale,
+    x: fitRect.left + view.x * fitRect.scaleX,
+    y: fitRect.top + view.y * fitRect.scaleY,
   };
 }
 
@@ -348,16 +475,20 @@ export function displayToImagePoint(
   point: DisplayPoint,
   imageSize: ImageSize,
   fitRect: FittedImageRect,
+  flips?: DisplayFlips,
 ): ImagePoint | null {
   const localX = point.x - fitRect.left;
   const localY = point.y - fitRect.top;
   if (localX < 0 || localY < 0 || localX > fitRect.width || localY > fitRect.height) {
     return null;
   }
-  return {
-    x: clamp(localX / fitRect.scale, 0, imageSize.width),
-    y: clamp(localY / fitRect.scale, 0, imageSize.height),
+  const sx = fitRect.scaleX || 1;
+  const sy = fitRect.scaleY || 1;
+  const view: ImagePoint = {
+    x: clamp(localX / sx, 0, imageSize.width),
+    y: clamp(localY / sy, 0, imageSize.height),
   };
+  return flips ? applyDisplayFlips(view, imageSize, flips) : view;
 }
 
 export function clearCanvas(canvas: HTMLCanvasElement | null): void {

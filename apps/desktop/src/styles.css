@@ -112,11 +112,19 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .canvas-wrap { position: relative; overflow: hidden; border-radius: 18px; background: #05070b; border: 1px solid var(--border); display: grid; place-items: center; }
 .canvas-wrap canvas { image-rendering: pixelated; display: block; }
 .measurement-overlay { position: absolute; left: 18px; bottom: 18px; padding: 8px 10px; border-radius: 999px; background: rgba(0,0,0,0.65); border: 1px solid rgba(255,255,255,0.16); font-size: 0.82rem; }
+.orientation-overlay { position: absolute; inset: 0; pointer-events: none; }
+.orientation-overlay .orientation-label { position: absolute; padding: 2px 7px; border-radius: 999px; background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.16); color: #eff4ff; font-size: 0.78rem; font-weight: 800; letter-spacing: 0.04em; text-shadow: 0 1px 2px rgba(0,0,0,0.7); }
+.orientation-overlay .orientation-top { top: 8px; left: 50%; transform: translateX(-50%); }
+.orientation-overlay .orientation-bottom { bottom: 8px; left: 50%; transform: translateX(-50%); }
+.orientation-overlay .orientation-left { left: 8px; top: 50%; transform: translateY(-50%); }
+.orientation-overlay .orientation-right { right: 8px; top: 50%; transform: translateY(-50%); }
+.orientation-overlay[data-uncertain="true"] .orientation-label { color: #ffd166; border-color: rgba(255,209,102,0.45); }
 .viewer-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; }
 .viewer-controls label { display: grid; gap: 8px; color: var(--muted); font-size: 0.86rem; }
 .viewer-controls input { width: 100%; }
 
 .viewer-metadata { margin-top: 6px !important; font-size: 0.78rem; color: #c3d4ee !important; }
+.viewer-orientation-warnings { margin: 6px 0 0; padding: 8px 12px; list-style: disc inside; border-radius: 12px; border: 1px solid rgba(255,209,102,0.32); background: rgba(255,209,102,0.08); color: #ffe6a3; font-size: 0.78rem; display: grid; gap: 2px; }
 .nrrd-canvas-wrap { height: clamp(420px, 56vh, 520px); min-height: 420px; padding: 0; display: block; }
 .nrrd-canvas-wrap.measuring { cursor: crosshair; }
 .nrrd-canvas-wrap.panning { cursor: grab; }
@@ -193,6 +201,16 @@ select.text-input.small { padding: 6px 28px 6px 10px; background-position: right
 .result-box.correct { background: rgba(100,217,148,0.1); border-color: rgba(100,217,148,0.26); }
 .result-box.incorrect { background: rgba(255,109,122,0.1); border-color: rgba(255,109,122,0.28); }
 .result-box p { color: #dbe4f2; }
+.result-score-details { display: grid; gap: 3px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.result-score-details p { margin: 0; }
+.completion-summary { display: grid; gap: 14px; }
+.completion-score { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: rgba(0,0,0,0.16); }
+.completion-score strong { font-size: 1.45rem; }
+.completion-score span { color: var(--accent); font-weight: 900; }
+.completion-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0; }
+.completion-detail-grid div { padding: 10px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,0.04); }
+.completion-detail-grid dt { color: var(--muted); font-size: 0.78rem; }
+.completion-detail-grid dd { margin: 2px 0 0; font-weight: 850; }
 
 .progress-list, .attempt-list { display: grid; gap: 12px; }
 .progress-row, .attempt-row { display: grid; grid-template-columns: 1fr 180px 50px; gap: 12px; align-items: center; padding: 12px; border-radius: 16px; background: rgba(0,0,0,0.14); }
@@ -358,15 +376,17 @@ select.text-input.small { padding: 6px 28px 6px 10px; background-position: right
 .composer-side-panel h3 { margin: 0; font-size: 0.98rem; }
 .composer-side-panel .field-label { margin-top: 0; }
 .composer-selection-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: rgba(0,0,0,0.16); }
-.composer-canvas-panel { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 20px; background: rgba(0,0,0,0.18); }
+.composer-canvas-panel { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 20px; background: rgba(0,0,0,0.18); user-select: none; -webkit-user-select: none; }
 .composer-canvas-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
 .composer-canvas-header > div { display: grid; gap: 2px; min-width: 0; }
 .composer-canvas-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-canvas-header span:not(.pill) { color: var(--muted); font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vessel-composer-svg { display: block; width: 100%; min-height: 520px; aspect-ratio: 1000 / 620; background: #05070b; touch-action: none; }
+.vessel-composer-svg { display: block; width: 100%; min-height: 520px; aspect-ratio: 1000 / 620; background: #05070b; touch-action: none; user-select: none; -webkit-user-select: none; }
 .composer-bg { fill: url(#composer-grid); cursor: crosshair; }
 .composer-grid-line { fill: none; stroke: rgba(255,255,255,0.055); stroke-width: 1; }
 .composer-object, .composer-marker { cursor: move; }
+.composer-pending-segment circle { fill: #ffd166; stroke: #fff0bf; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.composer-pending-segment text { fill: #ffe6a3; stroke: rgba(0,0,0,0.82); stroke-width: 4px; paint-order: stroke; font-size: 11px; font-weight: 850; pointer-events: none; user-select: none; -webkit-user-select: none; }
 .composer-hit-line { stroke: rgba(0,0,0,0); stroke-width: 26; stroke-linecap: round; fill: none; pointer-events: stroke; }
 .composer-vessel-line { stroke: #84d7ff; stroke-linecap: round; fill: none; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.72)); vector-effect: non-scaling-stroke; }
 .composer-vessel-line.vessel-aorta { stroke: #8fe3ff; }
@@ -389,16 +409,16 @@ select.text-input.small { padding: 6px 28px 6px 10px; background-position: right
 .composer-node-hit { fill: rgba(0,0,0,0); pointer-events: all; }
 .composer-node { fill: #10131a; stroke: #8ee6c9; stroke-width: 3; filter: drop-shadow(0 2px 5px rgba(0,0,0,0.75)); vector-effect: non-scaling-stroke; }
 .composer-object.selected .composer-node { stroke: #ffd166; }
-.composer-label { fill: #eff4ff; stroke: rgba(0,0,0,0.8); stroke-width: 4px; paint-order: stroke; font-size: 14px; font-weight: 850; pointer-events: none; }
-.composer-sub-label { fill: #c7d4e8; stroke: rgba(0,0,0,0.76); stroke-width: 3px; paint-order: stroke; font-size: 11px; font-weight: 750; pointer-events: none; }
+.composer-label { fill: #eff4ff; stroke: rgba(0,0,0,0.8); stroke-width: 4px; paint-order: stroke; font-size: 14px; font-weight: 850; pointer-events: none; user-select: none; -webkit-user-select: none; }
+.composer-sub-label { fill: #c7d4e8; stroke: rgba(0,0,0,0.76); stroke-width: 3px; paint-order: stroke; font-size: 11px; font-weight: 750; pointer-events: none; user-select: none; -webkit-user-select: none; }
 .composer-marker circle { fill: #ff8fb8; stroke: #ffd9e7; stroke-width: 2; filter: drop-shadow(0 2px 5px rgba(0,0,0,0.72)); vector-effect: non-scaling-stroke; }
 .composer-marker path { fill: #10131a; pointer-events: none; }
-.composer-marker text { fill: #eff4ff; stroke: rgba(0,0,0,0.82); stroke-width: 4px; paint-order: stroke; font-size: 13px; font-weight: 850; pointer-events: none; }
+.composer-marker text { fill: #eff4ff; stroke: rgba(0,0,0,0.82); stroke-width: 4px; paint-order: stroke; font-size: 13px; font-weight: 850; pointer-events: none; user-select: none; -webkit-user-select: none; }
 .composer-marker.selected circle { fill: #ffd166; stroke: #fff0bf; }
 .composer-treatment-marker { cursor: move; }
 .composer-treatment-marker line { stroke: #ffd166; stroke-width: 3; vector-effect: non-scaling-stroke; }
 .composer-treatment-marker circle { fill: #10131a; stroke: #ffd166; stroke-width: 2; vector-effect: non-scaling-stroke; }
-.composer-treatment-marker text { fill: #ffe6a3; stroke: rgba(0,0,0,0.82); stroke-width: 4px; paint-order: stroke; font-size: 11px; font-weight: 850; pointer-events: none; }
+.composer-treatment-marker text { fill: #ffe6a3; stroke: rgba(0,0,0,0.82); stroke-width: 4px; paint-order: stroke; font-size: 11px; font-weight: 850; pointer-events: none; user-select: none; -webkit-user-select: none; }
 .composer-treatment-marker.selected circle, .composer-treatment-marker.selected line { stroke: #ff8fb8; }
 .composer-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .composer-checkbox-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -422,6 +442,7 @@ select.text-input.small { padding: 6px 28px 6px 10px; background-position: right
 .composer-fit-list li { padding: 8px 10px; border-radius: 12px; border: 1px solid var(--border); font-size: 0.82rem; line-height: 1.35; }
 .composer-fit-list li.info { color: #d8e6ff; background: rgba(120,166,255,0.08); border-color: rgba(120,166,255,0.22); }
 .composer-fit-list li.warning { color: #ffe6a3; background: rgba(255,209,102,0.08); border-color: rgba(255,209,102,0.28); }
+body.composer-dragging, body.composer-dragging * { user-select: none !important; -webkit-user-select: none !important; }
 
 /* Content health (admin) */
 .content-health h4 { margin: 4px 0 8px; font-size: 0.94rem; }

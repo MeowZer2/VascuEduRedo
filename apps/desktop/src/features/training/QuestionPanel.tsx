@@ -36,12 +36,17 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
   const [hintsUsed, setHintsUsed] = useState<Record<string, number>>({});
   const [results, setResults] = useState<QuestionResult[]>([]);
   const [submittedResult, setSubmittedResult] = useState<QuestionResult | null>(null);
+  const [questionStartedAt, setQuestionStartedAt] = useState(() => Date.now());
 
   const question = vascCase.questions[index];
   const shownHints = hintsUsed[question.id] ?? 0;
   const isLast = index === vascCase.questions.length - 1;
 
   const totalPossible = useMemo(() => vascCase.questions.reduce((sum, item) => sum + item.points, 0), [vascCase.questions]);
+
+  useEffect(() => {
+    setQuestionStartedAt(Date.now());
+  }, [question.id]);
 
   // Device-selection question state: load the (filtered) catalog when the
   // current question is a deviceSelection. Cached in this component so each
@@ -98,11 +103,12 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
 
   function submit() {
     const effectiveAnswer = measurementQuestion ? selectedMeasurementValue : answer;
-    const result = evaluateAnswer(question, effectiveAnswer, shownHints);
+    const elapsedMs = Math.max(0, Date.now() - questionStartedAt);
+    const result = evaluateAnswer(question, effectiveAnswer, shownHints, elapsedMs);
     setSubmittedResult(result);
     // Persist the response in SQLite (no-op in browser mode).
     if (attemptId) {
-      void submitQuestionResponse(attemptId, question.id, effectiveAnswer, result.correct);
+      void submitQuestionResponse(attemptId, question.id, effectiveAnswer, result);
     }
   }
 
@@ -114,6 +120,8 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
 
     if (isLast) {
       const score = updatedResults.reduce((sum, item) => sum + item.awardedPoints, 0);
+      const totalHintsUsed = updatedResults.reduce((sum, item) => sum + item.hintsUsed, 0);
+      const totalElapsedMs = updatedResults.reduce((sum, item) => sum + item.elapsedMs, 0);
       const attempt: AttemptResult = {
         id: attemptId ?? newAttemptId(),
         caseId: vascCase.id,
@@ -122,6 +130,9 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
         score: Number(score.toFixed(2)),
         maxScore: totalPossible,
         percent: Number(((score / totalPossible) * 100).toFixed(1)),
+        correctCount: updatedResults.filter((item) => item.correct).length,
+        totalHintsUsed,
+        totalElapsedMs,
         questionResults: updatedResults,
       };
       // Mark the SQLite attempt complete with the final score (no-op in browser mode).
@@ -137,6 +148,7 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
     const nextQuestion = vascCase.questions[nextIndex];
     setIndex(nextIndex);
     setAnswer(defaultAnswer(nextQuestion));
+    setQuestionStartedAt(Date.now());
     onQuestionChange(nextIndex);
   }
 
@@ -335,7 +347,7 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
         <p>Expected: {expected} {measurementQuestion.unit} ± {measurementQuestion.tolerance} {measurementQuestion.unit}</p>
         <p>Difference: {diff.toFixed(2)} {measurementQuestion.unit}</p>
         <p>{submittedResult.explanation}</p>
-        <p>Score: {submittedResult.awardedPoints} / {submittedResult.maxPoints}</p>
+        <ScoreDetails result={submittedResult} />
       </div>
     );
   }
@@ -373,9 +385,10 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
         ) : (
           <div className={submittedResult.correct ? 'result-box correct' : 'result-box incorrect'}>
             <strong>{submittedResult.correct ? 'Correct' : 'Not correct'}</strong>
+            <p>Your answer: {formatSubmittedAnswer(question, submittedResult.answer, deviceOptions)}</p>
             <p>Expected: {submittedResult.expected}</p>
             <p>{submittedResult.explanation}</p>
-            <p>Score: {submittedResult.awardedPoints} / {submittedResult.maxPoints}</p>
+            <ScoreDetails result={submittedResult} />
           </div>
         )
       ) : null}
@@ -414,9 +427,64 @@ function renderDeviceFeedback(
         {correct ? `${correct.name} (${correct.manufacturer})` : correctDeviceId}
       </p>
       <p>{result.explanation}</p>
+      <ScoreDetails result={result} />
+    </div>
+  );
+}
+
+function ScoreDetails({ result }: { result: QuestionResult }) {
+  const penalty =
+    result.hintsUsed > 0
+      ? `${result.penaltyPoints.toFixed(2)} pt penalty (${result.hintsUsed} hint${result.hintsUsed === 1 ? '' : 's'}, ${result.hintPenaltyPercent}%)`
+      : 'No hint penalty';
+  return (
+    <div className="result-score-details">
       <p>
-        Score: {result.awardedPoints} / {result.maxPoints}
+        <strong>Score:</strong> {result.awardedPoints} / {result.maxPoints}
+      </p>
+      <p>
+        <strong>Penalty:</strong> {penalty}
+      </p>
+      <p>
+        <strong>Time:</strong> {formatDuration(result.elapsedMs)}
       </p>
     </div>
   );
+}
+
+function formatSubmittedAnswer(question: Question, answer: UserAnswer, devices: Device[]): string {
+  if (answer === null || answer === undefined) return 'No answer';
+  switch (question.type) {
+    case 'multipleChoice':
+      return typeof answer === 'string'
+        ? question.choices.find((choice) => choice.id === answer)?.label ?? answer
+        : String(answer);
+    case 'multiSelect':
+      if (!Array.isArray(answer)) return String(answer);
+      return question.choices
+        .filter((choice) => answer.includes(choice.id))
+        .map((choice) => choice.label)
+        .join(', ') || '(none)';
+    case 'trueFalse':
+      return answer === true ? 'True' : answer === false ? 'False' : String(answer);
+    case 'numeric':
+      return typeof answer === 'number' ? `${answer} ${question.unit ?? ''}`.trim() : String(answer);
+    case 'measurement':
+      return typeof answer === 'number' ? `${answer.toFixed(2)} ${question.unit}` : String(answer);
+    case 'shortText':
+      return typeof answer === 'string' ? answer.trim() || '(empty)' : String(answer);
+    case 'deviceSelection': {
+      if (typeof answer !== 'string') return String(answer);
+      const device = devices.find((item) => item.id === answer);
+      return device ? `${device.name} (${device.manufacturer})` : answer || 'No device selected';
+    }
+  }
+}
+
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s';
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }

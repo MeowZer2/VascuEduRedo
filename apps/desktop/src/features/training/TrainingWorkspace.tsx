@@ -3,7 +3,7 @@ import { NrrdViewer, type ViewerMeasurement } from '../../components/NrrdViewer'
 import { createAttempt } from '../../lib/attempts';
 import { saveAttempt } from '../../lib/progress';
 import type { AttemptResult, MeasurementQuestion, VascCase } from '../../types';
-import { QuestionPanel } from './QuestionPanel';
+import { QuestionPanel, formatDuration } from './QuestionPanel';
 
 interface TrainingWorkspaceProps {
   vascCase: VascCase;
@@ -15,6 +15,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const [attemptId, setAttemptId] = useState<string | null>(null);
+  const [completedAttempt, setCompletedAttempt] = useState<AttemptResult | null>(null);
 
   // Create an attempt row in SQLite when the workspace opens. In browser mode this returns
   // null and we just track the attempt locally without persistent ids.
@@ -36,7 +37,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
 
   function handleComplete(attempt: AttemptResult) {
     saveAttempt(attempt);
-    onFinish();
+    setCompletedAttempt(attempt);
   }
 
   return (
@@ -66,14 +67,73 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
         />
       </section>
       <aside className="training-aside">
-        <QuestionPanel
-          vascCase={vascCase}
-          attemptId={attemptId}
-          latestMeasurement={latestMeasurement}
-          onComplete={handleComplete}
-          onQuestionChange={setActiveQuestionIndex}
-        />
+        {completedAttempt ? (
+          <CaseCompletionSummary attempt={completedAttempt} onFinish={onFinish} />
+        ) : (
+          <QuestionPanel
+            vascCase={vascCase}
+            attemptId={attemptId}
+            latestMeasurement={latestMeasurement}
+            onComplete={handleComplete}
+            onQuestionChange={setActiveQuestionIndex}
+          />
+        )}
       </aside>
     </div>
+  );
+}
+
+function CaseCompletionSummary({
+  attempt,
+  onFinish,
+}: {
+  attempt: AttemptResult;
+  onFinish: () => void;
+}) {
+  const hintsUsed = attempt.totalHintsUsed ?? attempt.questionResults.reduce((sum, item) => sum + item.hintsUsed, 0);
+  const totalElapsedMs =
+    attempt.totalElapsedMs ?? attempt.questionResults.reduce((sum, item) => sum + (item.elapsedMs ?? 0), 0);
+  const averageElapsedMs = attempt.questionResults.length > 0 ? totalElapsedMs / attempt.questionResults.length : 0;
+  const measurementResults = attempt.questionResults.filter((result) => result.type === 'measurement');
+  const deviceResults = attempt.questionResults.filter((result) => result.type === 'deviceSelection');
+
+  return (
+    <section className="question-card completion-summary">
+      <p className="eyebrow">Case complete</p>
+      <h3>{attempt.caseTitle}</h3>
+      <div className="completion-score">
+        <strong>{attempt.score.toFixed(2)} / {attempt.maxScore}</strong>
+        <span>{Math.round(attempt.percent)}%</span>
+      </div>
+      <dl className="completion-detail-grid">
+        <div>
+          <dt>Correct</dt>
+          <dd>{attempt.correctCount ?? attempt.questionResults.filter((result) => result.correct).length} / {attempt.questionResults.length}</dd>
+        </div>
+        <div>
+          <dt>Hints used</dt>
+          <dd>{hintsUsed}</dd>
+        </div>
+        <div>
+          <dt>Total time</dt>
+          <dd>{formatDuration(totalElapsedMs)}</dd>
+        </div>
+        <div>
+          <dt>Avg / question</dt>
+          <dd>{formatDuration(averageElapsedMs)}</dd>
+        </div>
+        <div>
+          <dt>Measurements</dt>
+          <dd>{measurementResults.filter((result) => result.correct).length} / {measurementResults.length}</dd>
+        </div>
+        <div>
+          <dt>Device picks</dt>
+          <dd>{deviceResults.filter((result) => result.correct).length} / {deviceResults.length}</dd>
+        </div>
+      </dl>
+      <button type="button" className="primary-button" onClick={onFinish}>
+        View progress
+      </button>
+    </section>
   );
 }

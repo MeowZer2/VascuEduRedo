@@ -15,13 +15,18 @@ import {
   displayToImagePoint,
   distanceMm,
   fitImageToPanel,
+  getDisplayFlips,
+  getDisplayedOrientationLabels,
   getPlaneLabel,
+  getPlaneOrientationLabels,
   getPlaneSpacing,
   imageToDisplayPoint,
   paneFromVoxel,
   sanitizeSliceIndex,
   type AngleMeasurement,
   type CrosshairVoxel,
+  type DisplayConvention,
+  type DisplayConventionContext,
   type DisplayPoint,
   type DistanceMeasurement,
   type ImagePoint,
@@ -66,6 +71,8 @@ export interface ViewportPaneProps {
   pane: PaneSnapshot;
   index: number;
   toolMode: ViewerToolMode;
+  /** Display-only viewer convention (PACS vs canonical RAS). */
+  displayConvention: DisplayConvention;
   /** Crosshair in volume voxel coordinates (or null when not yet set). */
   crosshairVoxel: CrosshairVoxel | null;
   /** Whether this pane is the "primary" — driven by the parent toolbar's WL slider. */
@@ -96,6 +103,7 @@ export function ViewportPane({
   pane,
   index,
   toolMode,
+  displayConvention,
   crosshairVoxel,
   active,
   showCrosshair,
@@ -130,9 +138,25 @@ export function ViewportPane({
   const sliceIndex = sanitizeSliceIndex(pane.slice, range.count);
   const planeLabel = getPlaneLabel(pane.plane);
 
+  const planeSpacing = useMemo(
+    () => getPlaneSpacing(volume.spacing, pane.plane),
+    [volume.spacing, pane.plane],
+  );
   const fitRect = useMemo(
-    () => fitImageToPanel(imageSize, panelSize, pane.zoom, pane.pan),
-    [imageSize, panelSize, pane.zoom, pane.pan],
+    () => fitImageToPanel(imageSize, panelSize, pane.zoom, pane.pan, planeSpacing),
+    [imageSize, panelSize, pane.zoom, pane.pan, planeSpacing],
+  );
+  const flips = useMemo(
+    () => getDisplayFlips(pane.plane, displayConvention),
+    [pane.plane, displayConvention],
+  );
+  const conventionContext = useMemo<DisplayConventionContext | null>(
+    () => (imageSize ? { imageSize, flips } : null),
+    [imageSize, flips],
+  );
+  const orientationLabels = useMemo(
+    () => getDisplayedOrientationLabels(getPlaneOrientationLabels(volume, pane.plane), flips),
+    [volume, pane.plane, flips],
   );
 
   // Track pane size with ResizeObserver so the canvas refits on layout changes.
@@ -218,6 +242,14 @@ export function ViewportPane({
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, fitRect.width, fitRect.height);
+    if (flips.flipX) {
+      ctx.translate(fitRect.width, 0);
+      ctx.scale(-1, 1);
+    }
+    if (flips.flipY) {
+      ctx.translate(0, fitRect.height);
+      ctx.scale(1, -1);
+    }
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(
       rawCanvas,
@@ -230,7 +262,7 @@ export function ViewportPane({
       fitRect.width,
       fitRect.height,
     );
-  }, [fitRect, slicePixels]);
+  }, [fitRect, slicePixels, flips]);
 
   // HU sample (debounced) when the user hovers a pixel.
   useEffect(() => {
@@ -267,19 +299,29 @@ export function ViewportPane({
   // Crosshair overlay: project the current voxel into this pane's plane.
   const crosshairOverlay = useMemo(() => {
     if (!showCrosshair || !crosshairVoxel || !imageSize || !fitRect) return null;
-    const projection = paneFromVoxel(crosshairVoxel, pane.plane);
+    const projection = paneFromVoxel(crosshairVoxel, pane.plane, volume.dims);
     const display = imageToDisplayPoint(
       {
         x: clamp(projection.px, 0, imageSize.width),
         y: clamp(projection.py, 0, imageSize.height),
       },
       fitRect,
+      conventionContext ?? undefined,
     );
     return {
       display,
       onSlice: Math.round(projection.slice) === sliceIndex,
     };
-  }, [showCrosshair, crosshairVoxel, imageSize, fitRect, pane.plane, sliceIndex]);
+  }, [
+    showCrosshair,
+    crosshairVoxel,
+    imageSize,
+    fitRect,
+    pane.plane,
+    sliceIndex,
+    volume.dims,
+    conventionContext,
+  ]);
 
   // ---- pointer / wheel handling ----------------------------------------------------
 
@@ -296,7 +338,7 @@ export function ViewportPane({
   function imagePointFromPointer(event: PointerEvent<HTMLDivElement>): ImagePoint | null {
     const display = displayPointFromPointer(event);
     if (!display || !imageSize || !fitRect) return null;
-    return displayToImagePoint(display, imageSize, fitRect);
+    return displayToImagePoint(display, imageSize, fitRect, flips);
   }
 
   function newMeasurementId(prefix: string): string {
@@ -515,6 +557,7 @@ export function ViewportPane({
                     measurement={measurement}
                     fitRect={fitRect}
                     panelSize={panelSize}
+                    convention={conventionContext ?? undefined}
                     isSelected={isSelected}
                     isLatest={isLatest}
                     onSelect={(e) => handleSelectMeasurement(e, measurement.id)}
@@ -527,6 +570,7 @@ export function ViewportPane({
                   measurement={measurement}
                   fitRect={fitRect}
                   panelSize={panelSize}
+                  convention={conventionContext ?? undefined}
                   isSelected={isSelected}
                   onSelect={(e) => handleSelectMeasurement(e, measurement.id)}
                 />
@@ -534,7 +578,7 @@ export function ViewportPane({
             })}
             {/* Pending points for the in-progress tool. */}
             {pane.pendingPoints.map((point, idx) => {
-              const display = imageToDisplayPoint(point, fitRect);
+              const display = imageToDisplayPoint(point, fitRect, conventionContext ?? undefined);
               return (
                 <circle
                   key={`pending-${idx}`}
@@ -548,8 +592,16 @@ export function ViewportPane({
             {/* Pending segment lines for the angle tool (a→vertex visible after vertex click). */}
             {toolMode === 'angle' && pane.pendingPoints.length === 2 ? (
               (() => {
-                const a = imageToDisplayPoint(pane.pendingPoints[0], fitRect);
-                const v = imageToDisplayPoint(pane.pendingPoints[1], fitRect);
+                const a = imageToDisplayPoint(
+                  pane.pendingPoints[0],
+                  fitRect,
+                  conventionContext ?? undefined,
+                );
+                const v = imageToDisplayPoint(
+                  pane.pendingPoints[1],
+                  fitRect,
+                  conventionContext ?? undefined,
+                );
                 return (
                   <line
                     x1={a.x}
@@ -575,6 +627,16 @@ export function ViewportPane({
               · pixel {huReadout.x},{huReadout.y} · HU {huReadout.intensity}
             </>
           ) : null}
+        </div>
+        <div
+          className="orientation-overlay"
+          aria-hidden="true"
+          data-uncertain={volume.orientation?.status === 'uncertain' ? 'true' : undefined}
+        >
+          <span className="orientation-label orientation-top">{orientationLabels.top}</span>
+          <span className="orientation-label orientation-bottom">{orientationLabels.bottom}</span>
+          <span className="orientation-label orientation-left">{orientationLabels.left}</span>
+          <span className="orientation-label orientation-right">{orientationLabels.right}</span>
         </div>
       </div>
 
@@ -604,6 +666,7 @@ interface DistanceOverlayProps {
   measurement: DistanceMeasurement;
   fitRect: NonNullable<ReturnType<typeof fitImageToPanel>>;
   panelSize: ImageSize;
+  convention?: DisplayConventionContext;
   isSelected: boolean;
   isLatest: boolean;
   onSelect: (event: PointerEvent) => void;
@@ -613,12 +676,13 @@ function DistanceOverlay({
   measurement,
   fitRect,
   panelSize,
+  convention,
   isSelected,
   isLatest,
   onSelect,
 }: DistanceOverlayProps) {
-  const start = imageToDisplayPoint(measurement.start, fitRect);
-  const end = imageToDisplayPoint(measurement.end, fitRect);
+  const start = imageToDisplayPoint(measurement.start, fitRect, convention);
+  const end = imageToDisplayPoint(measurement.end, fitRect, convention);
   const labelX = clamp((start.x + end.x) / 2, 18, panelSize.width - 18);
   const labelY = clamp((start.y + end.y) / 2 - 10, 18, panelSize.height - 18);
   const lineClass = isSelected
@@ -661,6 +725,7 @@ interface AngleOverlayProps {
   measurement: AngleMeasurement;
   fitRect: NonNullable<ReturnType<typeof fitImageToPanel>>;
   panelSize: ImageSize;
+  convention?: DisplayConventionContext;
   isSelected: boolean;
   onSelect: (event: PointerEvent) => void;
 }
@@ -669,12 +734,13 @@ function AngleOverlay({
   measurement,
   fitRect,
   panelSize,
+  convention,
   isSelected,
   onSelect,
 }: AngleOverlayProps) {
-  const a = imageToDisplayPoint(measurement.a, fitRect);
-  const v = imageToDisplayPoint(measurement.vertex, fitRect);
-  const c = imageToDisplayPoint(measurement.c, fitRect);
+  const a = imageToDisplayPoint(measurement.a, fitRect, convention);
+  const v = imageToDisplayPoint(measurement.vertex, fitRect, convention);
+  const c = imageToDisplayPoint(measurement.c, fitRect, convention);
   const labelX = clamp(v.x + 12, 18, panelSize.width - 18);
   const labelY = clamp(v.y - 12, 18, panelSize.height - 18);
   const lineClass = isSelected

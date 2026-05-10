@@ -3,6 +3,7 @@ import { listDevices, type Device } from '../../lib/devices';
 import {
   fetchAttemptDetails,
   formatAnswer,
+  formatDuration,
   formatExpected,
   type AttemptDetails,
   type AttemptQuestionDetail,
@@ -115,9 +116,9 @@ export function AttemptReview({ attemptId, onClose }: AttemptReviewProps) {
                 <strong>{details.attempt.completedAt ? 'Completed' : 'Incomplete'}</strong>
               </article>
               <article className="stat-card">
-                <span>Started</span>
-                <strong>{new Date(details.attempt.startedAt).toLocaleDateString()}</strong>
-                <small>{new Date(details.attempt.startedAt).toLocaleTimeString()}</small>
+                <span>Hints / time</span>
+                <strong>{details.questions.reduce((sum, q) => sum + q.hintsUsed, 0)} hints</strong>
+                <small>{formatDuration(details.questions.reduce((sum, q) => sum + (q.elapsedMs ?? 0), 0))}</small>
               </article>
             </section>
 
@@ -155,6 +156,10 @@ function ReviewQuestion({
   const status =
     question.isCorrect === null ? 'skipped' : question.isCorrect ? 'correct' : 'incorrect';
   const explanation = (question.questionData.explanation as string | undefined) ?? '';
+  const penalty =
+    question.penaltyPoints !== null && question.hintsUsed > 0
+      ? `${question.penaltyPoints.toFixed(2)} pt`
+      : 'None';
 
   return (
     <li className={`review-question review-question-${status}`}>
@@ -179,6 +184,22 @@ function ReviewQuestion({
         <div>
           <dt>{question.type === 'shortText' ? 'Accepted' : 'Expected'}</dt>
           <dd>{formatExpected(question.type, question.questionData, deviceNameLookup)}</dd>
+        </div>
+        <div>
+          <dt>Score</dt>
+          <dd>
+            {question.awardedPoints !== null ? question.awardedPoints.toFixed(2) : '—'} / {question.maxPoints}
+          </dd>
+        </div>
+        <div>
+          <dt>Penalty</dt>
+          <dd>
+            {penalty} ({question.hintsUsed} hint{question.hintsUsed === 1 ? '' : 's'})
+          </dd>
+        </div>
+        <div>
+          <dt>Time spent</dt>
+          <dd>{formatDuration(question.elapsedMs)}</dd>
         </div>
       </dl>
 

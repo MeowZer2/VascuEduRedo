@@ -64,6 +64,11 @@ export interface AttemptQuestionDetail {
   answer: unknown;
   isCorrect: boolean | null;
   submittedAt: string | null;
+  awardedPoints: number | null;
+  maxPoints: number;
+  penaltyPoints: number | null;
+  hintsUsed: number;
+  elapsedMs: number | null;
   measurement: MeasurementDetail | null;
 }
 
@@ -129,6 +134,14 @@ export async function fetchAttemptDetails(attemptId: string): Promise<AttemptDet
     console.error('get_attempt_details failed:', error);
     return null;
   }
+}
+
+export function formatDuration(ms: number | null | undefined): string {
+  if (!ms || !Number.isFinite(ms) || ms <= 0) return '0s';
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 interface Choice {
