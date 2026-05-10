@@ -4,6 +4,7 @@ import { cases as sampleCases } from './data/sampleContent';
 import { AdminContentPage } from './features/admin/AdminContentPage';
 import { CaseDetailPage } from './features/cases/CaseDetailPage';
 import { CaseLibraryPage } from './features/cases/CaseLibraryPage';
+import { VesselComposerPage } from './features/composer/VesselComposerPage';
 import { DevicesCatalogPage } from './features/devices/DevicesCatalogPage';
 import { HomePage } from './features/home/HomePage';
 import { ProgressPage } from './features/progress/ProgressPage';
@@ -17,6 +18,7 @@ export type Screen =
   | 'cases'
   | 'case-detail'
   | 'training'
+  | 'vessel-composer'
   | 'devices'
   | 'progress'
   | 'admin'
@@ -28,6 +30,7 @@ export default function App() {
   // once the backend responds. Browser mode keeps the sample data.
   const [cases, setCases] = useState<VascCase[]>(sampleCases);
   const [selectedCaseId, setSelectedCaseId] = useState<string>(sampleCases[0]?.id ?? '');
+  const [composerCaseId, setComposerCaseId] = useState<string | null>(null);
   // Bumped each time an attempt completes so the Progress page refetches its SQLite stats.
   const [progressRefreshKey, setProgressRefreshKey] = useState(0);
   const selectedCase = useMemo<VascCase | undefined>(
@@ -63,6 +66,17 @@ export default function App() {
     setScreen('training');
   }
 
+  function openVesselComposer(caseId?: string | null) {
+    setComposerCaseId(caseId ?? null);
+    if (caseId) setSelectedCaseId(caseId);
+    setScreen('vessel-composer');
+  }
+
+  function handleNavigate(nextScreen: Screen) {
+    if (nextScreen === 'vessel-composer') setComposerCaseId(null);
+    setScreen(nextScreen);
+  }
+
   async function openCaseInTraining(caseId: string) {
     // Pull the latest cases so freshly-edited content shows up in training.
     const loaded = await refreshCases();
@@ -73,13 +87,18 @@ export default function App() {
   }
 
   return (
-    <AppShell activeScreen={screen} onNavigate={setScreen}>
+    <AppShell activeScreen={screen} onNavigate={handleNavigate}>
       {screen === 'home' && (
         <HomePage cases={cases} onStart={() => cases[0] && startCase(cases[0].id)} onOpenCases={() => setScreen('cases')} />
       )}
       {screen === 'cases' && <CaseLibraryPage cases={cases} onOpenCase={openCase} onStartCase={startCase} />}
       {screen === 'case-detail' && selectedCase && (
-        <CaseDetailPage vascCase={selectedCase} onBack={() => setScreen('cases')} onStart={() => startCase(selectedCase.id)} />
+        <CaseDetailPage
+          vascCase={selectedCase}
+          onBack={() => setScreen('cases')}
+          onStart={() => startCase(selectedCase.id)}
+          onOpenComposer={() => openVesselComposer(selectedCase.id)}
+        />
       )}
       {screen === 'training' && selectedCase && (
         <TrainingWorkspace
@@ -92,6 +111,16 @@ export default function App() {
         />
       )}
       {screen === 'devices' && <DevicesCatalogPage />}
+      {screen === 'vessel-composer' && (
+        <VesselComposerPage
+          cases={cases}
+          initialCaseId={composerCaseId}
+          onOpenCase={(caseId) => {
+            setSelectedCaseId(caseId);
+            setScreen('case-detail');
+          }}
+        />
+      )}
       {screen === 'progress' && <ProgressPage refreshKey={progressRefreshKey} />}
       {screen === 'admin' && (
         <AdminContentPage
@@ -101,6 +130,7 @@ export default function App() {
           onOpenInTraining={(caseId) => {
             void openCaseInTraining(caseId);
           }}
+          onOpenVesselComposer={(caseId) => openVesselComposer(caseId)}
         />
       )}
       {screen === 'settings' && <SettingsPage />}

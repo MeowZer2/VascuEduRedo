@@ -144,6 +144,16 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_devices_category ON devices(category);
         CREATE INDEX IF NOT EXISTS idx_devices_manufacturer ON devices(manufacturer);
+
+        -- v0.13 vessel composer / procedural planning canvas.
+        CREATE TABLE IF NOT EXISTS vessel_compositions (
+            id TEXT PRIMARY KEY,
+            case_id TEXT REFERENCES cases(id) ON DELETE SET NULL,
+            name TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vessel_compositions_case ON vessel_compositions(case_id);
         "#,
     )
     .map_err(|e| format!("Schema init failed: {e}"))?;
@@ -824,6 +834,11 @@ pub fn admin_delete_case(state: State<DbState>, case_id: String) -> Result<(), S
         .map_err(|e| format!("admin_delete_case attempts failed: {e}"))?;
     conn.execute("DELETE FROM questions WHERE case_id = ?1", params![case_id])
         .map_err(|e| format!("admin_delete_case questions failed: {e}"))?;
+    conn.execute(
+        "UPDATE vessel_compositions SET case_id = NULL WHERE case_id = ?1",
+        params![case_id],
+    )
+    .map_err(|e| format!("admin_delete_case vessel compositions failed: {e}"))?;
     let removed = conn
         .execute("DELETE FROM cases WHERE id = ?1", params![case_id])
         .map_err(|e| format!("admin_delete_case case failed: {e}"))?;
@@ -2254,6 +2269,210 @@ pub fn admin_import_case(
         .map_err(|e| format!("admin_import_case commit failed: {e}"))?;
 
     fetch_case_row(&conn, &id)
+}
+
+// ---------------------------------------------------------------------------
+// Vessel composer (v0.13)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VesselCompositionRow {
+    pub id: String,
+    pub case_id: Option<String>,
+    pub name: String,
+    pub data: Value,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VesselCompositionInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub case_id: Option<String>,
+    pub name: String,
+    #[serde(default = "empty_object")]
+    pub data: Value,
+}
+
+fn parse_vessel_composition_row(
+    id: String,
+    case_id: Option<String>,
+    name: String,
+    data_json: String,
+    updated_at: String,
+) -> Result<VesselCompositionRow, String> {
+    let data: Value = serde_json::from_str(&data_json)
+        .map_err(|e| format!("Cannot parse vessel composition data_json: {e}"))?;
+    Ok(VesselCompositionRow {
+        id,
+        case_id,
+        name,
+        data,
+        updated_at,
+    })
+}
+
+fn fetch_vessel_composition_row(
+    conn: &Connection,
+    composition_id: &str,
+) -> Result<Option<VesselCompositionRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions WHERE id = ?1 LIMIT 1",
+        )
+        .map_err(|e| format!("fetch_vessel_composition_row prepare failed: {e}"))?;
+    let mut rows = stmt
+        .query(params![composition_id])
+        .map_err(|e| format!("fetch_vessel_composition_row query failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("fetch_vessel_composition_row next failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(parse_vessel_composition_row(
+        row.get(0).map_err(|e| e.to_string())?,
+        row.get(1).map_err(|e| e.to_string())?,
+        row.get(2).map_err(|e| e.to_string())?,
+        row.get(3).map_err(|e| e.to_string())?,
+        row.get(4).map_err(|e| e.to_string())?,
+    )?))
+}
+
+#[tauri::command]
+pub fn list_vessel_compositions(
+    state: State<DbState>,
+    case_id: Option<String>,
+) -> Result<Vec<VesselCompositionRow>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let case_filter = case_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut out = Vec::new();
+    if let Some(case_id) = case_filter {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions WHERE case_id = ?1 ORDER BY updated_at DESC, name ASC",
+            )
+            .map_err(|e| format!("list_vessel_compositions prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map(params![case_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| format!("list_vessel_compositions query failed: {e}"))?;
+        for row in rows {
+            let (id, case_id, name, data_json, updated_at) =
+                row.map_err(|e| format!("list_vessel_compositions row failed: {e}"))?;
+            out.push(parse_vessel_composition_row(
+                id, case_id, name, data_json, updated_at,
+            )?);
+        }
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions ORDER BY updated_at DESC, name ASC",
+            )
+            .map_err(|e| format!("list_vessel_compositions prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| format!("list_vessel_compositions query failed: {e}"))?;
+        for row in rows {
+            let (id, case_id, name, data_json, updated_at) =
+                row.map_err(|e| format!("list_vessel_compositions row failed: {e}"))?;
+            out.push(parse_vessel_composition_row(
+                id, case_id, name, data_json, updated_at,
+            )?);
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn get_vessel_composition(
+    state: State<DbState>,
+    composition_id: String,
+) -> Result<Option<VesselCompositionRow>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    fetch_vessel_composition_row(&conn, &composition_id)
+}
+
+#[tauri::command]
+pub fn save_vessel_composition(
+    state: State<DbState>,
+    input: VesselCompositionInput,
+) -> Result<VesselCompositionRow, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("Composition name is required.".into());
+    }
+    if !input.data.is_object() {
+        return Err("Composition data must be a JSON object.".into());
+    }
+
+    let case_id = input
+        .case_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(cid) = &case_id {
+        let exists: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cases WHERE id = ?1", params![cid], |r| {
+                r.get(0)
+            })
+            .map_err(|e| format!("save_vessel_composition case check failed: {e}"))?;
+        if exists == 0 {
+            return Err(format!("No case found with id {cid}"));
+        }
+    }
+
+    let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let updated_at = now_iso();
+    let data_json = input.data.to_string();
+    let existing: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM vessel_compositions WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("save_vessel_composition exists check failed: {e}"))?;
+
+    if existing > 0 {
+        conn.execute(
+            "UPDATE vessel_compositions SET case_id = ?1, name = ?2, data_json = ?3, updated_at = ?4 WHERE id = ?5",
+            params![case_id, name, data_json, updated_at, id],
+        )
+        .map_err(|e| format!("save_vessel_composition update failed: {e}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO vessel_compositions (id, case_id, name, data_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, case_id, name, data_json, updated_at],
+        )
+        .map_err(|e| format!("save_vessel_composition insert failed: {e}"))?;
+    }
+
+    fetch_vessel_composition_row(&conn, &id)?
+        .ok_or_else(|| "save_vessel_composition: saved row not found".to_string())
 }
 
 // ---------------------------------------------------------------------------

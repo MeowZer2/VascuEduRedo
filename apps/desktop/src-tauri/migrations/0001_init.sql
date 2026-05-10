@@ -65,3 +65,12 @@ CREATE TABLE IF NOT EXISTS question_responses (
   FOREIGN KEY (attempt_id) REFERENCES attempts(id) ON DELETE CASCADE,
   FOREIGN KEY (question_id) REFERENCES questions(id)
 );
+
+CREATE TABLE IF NOT EXISTS vessel_compositions (
+  id TEXT PRIMARY KEY,
+  case_id TEXT,
+  name TEXT NOT NULL,
+  data_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE SET NULL
+);

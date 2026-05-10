@@ -18,6 +18,7 @@ import {
   type AdminQuestionRow,
   type ValidationReport,
 } from '../../lib/admin';
+import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
 import { AdminDevicesTab } from './AdminDevicesTab';
 import { CaseImportDialog } from './CaseImportDialog';
 import { ListEditor } from './ListEditor';
@@ -26,6 +27,7 @@ import { QuestionEditor, draftToQuestionInput, questionRowToDraft, type Question
 export interface AdminContentPageProps {
   onCasesChanged: () => void;
   onOpenInTraining: (caseId: string) => void;
+  onOpenVesselComposer: (caseId: string) => void;
 }
 
 type AdminSection = 'cases' | 'devices';
@@ -184,7 +186,11 @@ function setOrDelete<T>(obj: Record<string, unknown>, key: string, value: T | un
   obj[key] = value;
 }
 
-export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminContentPageProps) {
+export function AdminContentPage({
+  onCasesChanged,
+  onOpenInTraining,
+  onOpenVesselComposer,
+}: AdminContentPageProps) {
   const available = isAdminAvailable();
   const [cases, setCases] = useState<AdminCaseRow[]>([]);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
@@ -201,6 +207,7 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
   const [showImport, setShowImport] = useState(false);
   const [healthReport, setHealthReport] = useState<ValidationReport | null>(null);
   const [section, setSection] = useState<AdminSection>('cases');
+  const [selectedCasePlans, setSelectedCasePlans] = useState<VesselCompositionRow[]>([]);
 
   const flashStatus = useCallback((msg: string) => {
     setStatusMsg(msg);
@@ -280,6 +287,24 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
     if (!available || creatingNewCase || !selectedCaseId) return;
     void loadCaseDetail(selectedCaseId);
   }, [available, creatingNewCase, selectedCaseId, loadCaseDetail]);
+
+  useEffect(() => {
+    if (!available || !selectedCaseId || creatingNewCase) {
+      setSelectedCasePlans([]);
+      return;
+    }
+    let cancelled = false;
+    void listVesselCompositions(selectedCaseId)
+      .then((rows) => {
+        if (!cancelled) setSelectedCasePlans(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedCasePlans([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [available, creatingNewCase, selectedCaseId]);
 
   function startNewCase() {
     setCreatingNewCase(true);
@@ -598,7 +623,14 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
         <div className="admin-main">
           <section className="content-card admin-case-editor">
             <header className="admin-panel-header">
-              <h3>{creatingNewCase ? 'New case' : selectedCase ? 'Edit case' : 'Select a case'}</h3>
+              <div className="admin-panel-title">
+                <h3>{creatingNewCase ? 'New case' : selectedCase ? 'Edit case' : 'Select a case'}</h3>
+                {!creatingNewCase && selectedCase && (
+                  <span className={`health-pill ${selectedCasePlans.length > 0 ? 'ok' : 'warning'}`}>
+                    {selectedCasePlans.length > 0 ? 'Vessel plan linked' : 'No vessel plan'}
+                  </span>
+                )}
+              </div>
               <div className="admin-panel-actions">
                 {!creatingNewCase && selectedCase && (
                   <>
@@ -619,6 +651,15 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
                       title={caseDirty ? 'Save your changes first' : 'Open this case in the training workspace'}
                     >
                       Open in Training
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button small"
+                      onClick={() => onOpenVesselComposer(selectedCase.id)}
+                      disabled={busy}
+                      title="Open this case in the vessel composer"
+                    >
+                      {selectedCasePlans.length > 0 ? 'Open Plan' : 'Create Plan'}
                     </button>
                   </>
                 )}

@@ -1,10 +1,13 @@
+import { useEffect, useState } from 'react';
 import { Tag } from '../../components/Tag';
+import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
 import type { VascCase } from '../../types';
 
 interface CaseDetailPageProps {
   vascCase: VascCase;
   onBack: () => void;
   onStart: () => void;
+  onOpenComposer: () => void;
 }
 
 function formatReviewedAt(iso?: string): string | null {
@@ -15,10 +18,25 @@ function formatReviewedAt(iso?: string): string | null {
   return d.toLocaleDateString();
 }
 
-export function CaseDetailPage({ vascCase, onBack, onStart }: CaseDetailPageProps) {
+export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: CaseDetailPageProps) {
   const teachingPoints = vascCase.teachingPoints ?? [];
   const references = vascCase.references ?? [];
   const reviewedAt = formatReviewedAt(vascCase.lastReviewedAt);
+  const [linkedPlan, setLinkedPlan] = useState<VesselCompositionRow | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listVesselCompositions(vascCase.id)
+      .then((rows) => {
+        if (!cancelled) setLinkedPlan(rows[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setLinkedPlan(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [vascCase.id]);
 
   return (
     <div className="page-stack">
@@ -33,10 +51,14 @@ export function CaseDetailPage({ vascCase, onBack, onStart }: CaseDetailPageProp
             {vascCase.author && <span className="pill">Author: {vascCase.author}</span>}
             {vascCase.reviewer && <span className="pill">Reviewed by: {vascCase.reviewer}</span>}
             {reviewedAt && <span className="pill">Reviewed {reviewedAt}</span>}
+            <span className="pill">{linkedPlan ? 'Vessel plan linked' : 'No vessel plan'}</span>
           </div>
         </div>
         <div className="row-actions">
           <button className="secondary-button" onClick={onBack}>Back</button>
+          <button className="secondary-button" onClick={onOpenComposer}>
+            {linkedPlan ? 'Open vessel plan' : 'Create vessel plan'}
+          </button>
           <button className="primary-button" onClick={onStart}>Start training</button>
         </div>
       </header>
@@ -117,6 +139,16 @@ export function CaseDetailPage({ vascCase, onBack, onStart }: CaseDetailPageProp
         </section>
       )}
 
+      {linkedPlan && (
+        <section className="content-card">
+          <div className="section-title-row">
+            <h3>Vessel plan summary</h3>
+            <button className="secondary-button small" onClick={onOpenComposer}>Open plan</button>
+          </div>
+          <PlanSummary linkedPlan={linkedPlan} />
+        </section>
+      )}
+
       <section className="content-card">
         <h3>Imaging</h3>
         <p>{vascCase.volume.description || 'No imaging description provided.'}</p>
@@ -126,6 +158,37 @@ export function CaseDetailPage({ vascCase, onBack, onStart }: CaseDetailPageProp
           </p>
         )}
       </section>
+    </div>
+  );
+}
+
+function PlanSummary({ linkedPlan }: { linkedPlan: VesselCompositionRow }) {
+  const data = linkedPlan.data;
+  const pathologicSegments = data.segments.filter(
+    (segment) => segment.pathologyType !== 'normal' || segment.targetForIntervention,
+  );
+  const notes = typeof data.metadata.notes === 'string' ? data.metadata.notes : '';
+
+  return (
+    <div className="case-plan-summary">
+      <div>
+        <strong>{pathologicSegments.length}</strong>
+        <span>pathology/target segment{pathologicSegments.length === 1 ? '' : 's'}</span>
+      </div>
+      <div>
+        <strong>{data.devicePlacements.length}</strong>
+        <span>device placement{data.devicePlacements.length === 1 ? '' : 's'}</span>
+      </div>
+      <div>
+        <strong>{data.treatmentMarkers.length}</strong>
+        <span>planning marker{data.treatmentMarkers.length === 1 ? '' : 's'}</span>
+      </div>
+      {pathologicSegments.length > 0 && (
+        <p>
+          {pathologicSegments.slice(0, 3).map((segment) => `${segment.label}: ${segment.pathologyType}`).join('; ')}
+        </p>
+      )}
+      {notes && <p className="muted small">{notes}</p>}
     </div>
   );
 }

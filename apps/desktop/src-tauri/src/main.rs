@@ -7,9 +7,10 @@ use db::{
     admin_import_case, admin_list_cases, admin_reorder_questions, admin_update_case,
     admin_update_device, admin_update_question, admin_validate_case, admin_validate_case_payload,
     complete_attempt, create_attempt, get_attempt_details, get_case, get_case_questions,
-    get_device, get_recent_activity, list_attempts, list_cases, list_device_categories,
-    list_devices, open_and_initialize, progress_by_case, progress_summary,
-    submit_question_response, DbState,
+    get_device, get_recent_activity, get_vessel_composition, list_attempts, list_cases,
+    list_device_categories, list_devices, list_vessel_compositions, open_and_initialize,
+    progress_by_case, progress_summary, save_vessel_composition, submit_question_response,
+    DbState,
 };
 use serde::Serialize;
 use tauri::Manager;
@@ -86,7 +87,10 @@ fn main() {
             list_device_categories,
             admin_create_device,
             admin_update_device,
-            admin_delete_device
+            admin_delete_device,
+            list_vessel_compositions,
+            get_vessel_composition,
+            save_vessel_composition
         ])
         .run(tauri::generate_context!())
         .expect("error while running VascEdu desktop app");
