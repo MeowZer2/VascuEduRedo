@@ -1,5 +1,6 @@
-import type { CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { type AdminQuestionInput, type AdminQuestionRow } from '../../lib/admin';
+import { listDeviceCategories, listDevices, type Device } from '../../lib/devices';
 import type { QuestionType } from '../../types';
 
 const QUESTION_TYPES: { value: QuestionType; label: string }[] = [
@@ -9,6 +10,7 @@ const QUESTION_TYPES: { value: QuestionType; label: string }[] = [
   { value: 'numeric', label: 'Numeric' },
   { value: 'shortText', label: 'Short text' },
   { value: 'measurement', label: 'Measurement' },
+  { value: 'deviceSelection', label: 'Device selection' },
 ];
 
 const PLANES: Array<'axial' | 'coronal' | 'sagittal'> = ['axial', 'coronal', 'sagittal'];
@@ -37,6 +39,9 @@ export interface QuestionDraft {
   // measurement
   plane: 'axial' | 'coronal' | 'sagittal';
   target: string;
+  // deviceSelection
+  allowedCategory: string;
+  correctDeviceId: string;
 }
 
 function emptyDraft(type: QuestionType = 'multipleChoice'): QuestionDraft {
@@ -60,6 +65,8 @@ function emptyDraft(type: QuestionType = 'multipleChoice'): QuestionDraft {
     requiredKeywords: [],
     plane: 'axial',
     target: '',
+    allowedCategory: '',
+    correctDeviceId: '',
   };
 }
 
@@ -93,6 +100,8 @@ export function questionRowToDraft(row: AdminQuestionRow): QuestionDraft {
       | 'coronal'
       | 'sagittal',
     target: (get<string>('target') ?? '') as string,
+    allowedCategory: (get<string>('allowedCategory') ?? '') as string,
+    correctDeviceId: (get<string>('correctDeviceId') ?? '') as string,
   };
 }
 
@@ -189,6 +198,15 @@ export function draftToQuestionInput(draft: QuestionDraft): DraftConversion {
       data.tolerance = tol ?? 0;
       data.unit = draft.unit.trim() || 'mm';
       if (draft.target.trim()) data.target = draft.target.trim();
+      break;
+    }
+    case 'deviceSelection': {
+      const deviceId = draft.correctDeviceId.trim();
+      if (!deviceId) errors.push('Pick a correct device.');
+      data.correctDeviceId = deviceId;
+      if (draft.allowedCategory.trim()) {
+        data.allowedCategory = draft.allowedCategory.trim();
+      }
       break;
     }
     default:
@@ -547,6 +565,15 @@ function renderTypeFields(
           </p>
         </fieldset>
       );
+    case 'deviceSelection':
+      return (
+        <DeviceSelectionFieldset
+          allowedCategory={draft.allowedCategory}
+          correctDeviceId={draft.correctDeviceId}
+          onAllowedCategoryChange={(v) => patch('allowedCategory', v)}
+          onCorrectDeviceIdChange={(v) => patch('correctDeviceId', v)}
+        />
+      );
     case 'measurement':
       return (
         <fieldset className="admin-fieldset">
@@ -674,3 +701,99 @@ const activeStyle: CSSProperties = {
   background: 'rgba(120,166,255,0.2)',
   borderColor: 'rgba(120,166,255,0.5)',
 };
+
+interface DeviceSelectionFieldsetProps {
+  allowedCategory: string;
+  correctDeviceId: string;
+  onAllowedCategoryChange: (next: string) => void;
+  onCorrectDeviceIdChange: (next: string) => void;
+}
+
+/**
+ * Authoring fieldset for `deviceSelection` questions. Loads the device catalog
+ * lazily, lets the author pick an optional category filter, and shows the
+ * matching devices as a selectable list. Persists the chosen device id and
+ * (optional) allowed category into the question draft.
+ */
+function DeviceSelectionFieldset({
+  allowedCategory,
+  correctDeviceId,
+  onAllowedCategoryChange,
+  onCorrectDeviceIdChange,
+}: DeviceSelectionFieldsetProps) {
+  const [categories, setCategories] = useState<string[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      listDevices(allowedCategory ? { category: allowedCategory } : undefined),
+      listDeviceCategories(),
+    ])
+      .then(([devs, cats]) => {
+        if (cancelled) return;
+        setDevices(devs);
+        setCategories(cats);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [allowedCategory]);
+
+  const correctExists = devices.some((d) => d.id === correctDeviceId);
+
+  return (
+    <fieldset className="admin-fieldset">
+      <legend>Device selection</legend>
+      <div className="admin-form-grid">
+        <label className="field-label">
+          <span>Allowed category (optional)</span>
+          <select
+            className="text-input"
+            value={allowedCategory}
+            onChange={(e) => onAllowedCategoryChange(e.target.value)}
+          >
+            <option value="">Any category</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          <span>Correct device</span>
+          <select
+            className="text-input"
+            value={correctDeviceId}
+            onChange={(e) => onCorrectDeviceIdChange(e.target.value)}
+          >
+            <option value="">{loading ? 'Loading devices…' : 'Pick a device'}</option>
+            {devices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} — {d.manufacturer}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {!loading && correctDeviceId && !correctExists ? (
+        <p className="admin-banner error">
+          The chosen device id is not in the current catalog
+          {allowedCategory ? ' for this category' : ''}. Either change the category, pick a
+          different device, or recreate the missing device.
+        </p>
+      ) : null}
+      {!loading && devices.length === 0 ? (
+        <p className="muted small">
+          No devices match the selected category. Add devices in the Devices admin tab first.
+        </p>
+      ) : null}
+    </fieldset>
+  );
+}

@@ -11,6 +11,7 @@ const navItems: Array<{ id: Screen; label: string }> = [
   { id: 'home', label: 'Home' },
   { id: 'cases', label: 'Cases' },
   { id: 'training', label: 'Training' },
+  { id: 'devices', label: 'Devices' },
   { id: 'progress', label: 'Progress' },
   { id: 'admin', label: 'Admin Preview' },
   { id: 'settings', label: 'Settings' },

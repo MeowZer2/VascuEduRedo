@@ -18,6 +18,7 @@ import {
   type AdminQuestionRow,
   type ValidationReport,
 } from '../../lib/admin';
+import { AdminDevicesTab } from './AdminDevicesTab';
 import { CaseImportDialog } from './CaseImportDialog';
 import { ListEditor } from './ListEditor';
 import { QuestionEditor, draftToQuestionInput, questionRowToDraft, type QuestionDraft } from './QuestionEditor';
@@ -26,6 +27,8 @@ export interface AdminContentPageProps {
   onCasesChanged: () => void;
   onOpenInTraining: (caseId: string) => void;
 }
+
+type AdminSection = 'cases' | 'devices';
 
 type Difficulty = 'beginner' | 'intermediate' | 'advanced';
 
@@ -197,6 +200,7 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
   const [busy, setBusy] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [healthReport, setHealthReport] = useState<ValidationReport | null>(null);
+  const [section, setSection] = useState<AdminSection>('cases');
 
   const flashStatus = useCallback((msg: string) => {
     setStatusMsg(msg);
@@ -401,6 +405,8 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
       requiredKeywords: [],
       plane: 'axial',
       target: '',
+      allowedCategory: '',
+      correctDeviceId: '',
     });
   }
 
@@ -497,16 +503,40 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
     <div className="page-stack admin-page">
       <header className="page-header">
         <p className="eyebrow">Admin authoring</p>
-        <h2>Cases & questions</h2>
-        <p>Create, edit, and reorder content. Changes save directly to the local SQLite database.</p>
+        <h2>{section === 'devices' ? 'Devices' : 'Cases & questions'}</h2>
+        <p>
+          {section === 'devices'
+            ? 'Create, edit, and delete vascular devices stored in the local SQLite catalog.'
+            : 'Create, edit, and reorder content. Changes save directly to the local SQLite database.'}
+        </p>
       </header>
 
-      {(statusMsg || errorMsg) && (
+      <div className="admin-section-tabs" role="tablist" aria-label="Admin section">
+        <button
+          type="button"
+          className={section === 'cases' ? 'plane-tab active' : 'plane-tab'}
+          onClick={() => setSection('cases')}
+        >
+          Cases & questions
+        </button>
+        <button
+          type="button"
+          className={section === 'devices' ? 'plane-tab active' : 'plane-tab'}
+          onClick={() => setSection('devices')}
+        >
+          Devices
+        </button>
+      </div>
+
+      {section === 'devices' ? <AdminDevicesTab /> : null}
+
+      {section === 'cases' && (statusMsg || errorMsg) && (
         <div className={errorMsg ? 'admin-banner error' : 'admin-banner success'} role="status">
           {errorMsg ?? statusMsg}
         </div>
       )}
 
+      {section === 'cases' && (
       <section className="admin-layout">
         <aside className="admin-cases-panel">
           <div className="admin-panel-header">
@@ -915,8 +945,9 @@ export function AdminContentPage({ onCasesChanged, onOpenInTraining }: AdminCont
           </section>
         </div>
       </section>
+      )}
 
-      {showImport && (
+      {section === 'cases' && showImport && (
         <CaseImportDialog
           onClose={() => setShowImport(false)}
           onImported={async (newCaseId) => {

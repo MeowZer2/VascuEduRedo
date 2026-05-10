@@ -1,0 +1,260 @@
+{
+  "devices": [
+    {
+      "id": "dev-eg-gore-excluder",
+      "name": "GORE EXCLUDER AAA Endoprosthesis",
+      "manufacturer": "W. L. Gore & Associates",
+      "category": "aortic endograft",
+      "subtype": "bifurcated infrarenal",
+      "description": "Modular bifurcated infrarenal AAA endograft with PTFE/FEP cover and nitinol skeleton. C3 delivery system allows reposition.",
+      "sizes": ["23–31 mm × 12 mm × 140 mm", "23–31 mm × 16 mm × 140 mm", "Iliac legs 12–27 mm"],
+      "properties": {
+        "platform": "self-expanding",
+        "fenestrated": "no",
+        "branched": "no",
+        "delivery_french": "16–18 F"
+      },
+      "tags": ["AAA", "EVAR", "infrarenal", "modular"]
+    },
+    {
+      "id": "dev-eg-cook-zenith-flex",
+      "name": "Cook Zenith Flex AAA",
+      "manufacturer": "Cook Medical",
+      "category": "aortic endograft",
+      "subtype": "bifurcated infrarenal",
+      "description": "Trimodular bifurcated AAA endograft with woven polyester fabric, stainless-steel Z-stents, and active suprarenal fixation barbs.",
+      "sizes": ["22–36 mm proximal", "iliac 8–24 mm"],
+      "properties": {
+        "platform": "balloon-assisted self-expanding",
+        "fixation": "active suprarenal",
+        "fenestrated": "no",
+        "delivery_french": "18–22 F"
+      },
+      "tags": ["AAA", "EVAR", "suprarenal fixation"]
+    },
+    {
+      "id": "dev-eg-medtronic-endurant-ii",
+      "name": "Medtronic Endurant II / IIs",
+      "manufacturer": "Medtronic",
+      "category": "aortic endograft",
+      "subtype": "bifurcated infrarenal",
+      "description": "Bifurcated infrarenal AAA endograft with low-profile delivery and active suprarenal fixation.",
+      "sizes": ["23–36 mm proximal", "iliac 10–28 mm"],
+      "properties": {
+        "platform": "self-expanding",
+        "fixation": "active suprarenal",
+        "delivery_french": "14–18 F"
+      },
+      "tags": ["AAA", "EVAR", "low-profile"]
+    },
+    {
+      "id": "dev-eg-gore-tag-tbe",
+      "name": "GORE TAG Thoracic Branch Endoprosthesis (TBE)",
+      "manufacturer": "W. L. Gore & Associates",
+      "category": "aortic endograft",
+      "subtype": "thoracic branched",
+      "description": "Single-side branched thoracic endograft for left subclavian preservation in TEVAR.",
+      "sizes": ["21–53 mm aortic", "branch 8–16 mm"],
+      "properties": {
+        "platform": "self-expanding",
+        "branched": "yes (single side)"
+      },
+      "tags": ["TEVAR", "thoracic", "subclavian", "branched"]
+    },
+    {
+      "id": "dev-cs-gore-viabahn",
+      "name": "GORE VIABAHN Endoprosthesis",
+      "manufacturer": "W. L. Gore & Associates",
+      "category": "covered stent",
+      "subtype": "self-expanding peripheral",
+      "description": "Self-expanding nitinol-supported ePTFE-lined covered stent for peripheral arterial use.",
+      "sizes": ["5–13 mm × 25–250 mm"],
+      "properties": {
+        "platform": "self-expanding",
+        "covering": "ePTFE",
+        "drug_eluting": "no"
+      },
+      "tags": ["SFA", "popliteal", "covered", "PAD"]
+    },
+    {
+      "id": "dev-cs-bd-covera",
+      "name": "BD Covera Vascular Covered Stent",
+      "manufacturer": "BD (Bard)",
+      "category": "covered stent",
+      "subtype": "AV access",
+      "description": "Self-expanding nitinol covered stent designed for the venous outflow of dialysis access (AV graft and AVF).",
+      "sizes": ["6–10 mm × 40–80 mm"],
+      "properties": {
+        "platform": "self-expanding",
+        "covering": "ePTFE"
+      },
+      "tags": ["dialysis", "AVF", "AVG", "venous outflow"]
+    },
+    {
+      "id": "dev-cs-atrium-icast",
+      "name": "Atrium iCast (BeGraft / iCAST)",
+      "manufacturer": "Getinge / Atrium",
+      "category": "covered stent",
+      "subtype": "balloon-expandable",
+      "description": "Balloon-expandable PTFE-encapsulated stainless-steel covered stent for visceral and iliac use.",
+      "sizes": ["5–10 mm × 16–59 mm"],
+      "properties": {
+        "platform": "balloon-expandable",
+        "covering": "ePTFE"
+      },
+      "tags": ["renal", "mesenteric", "iliac", "covered"]
+    },
+    {
+      "id": "dev-bms-boston-wallstent",
+      "name": "Boston Scientific Wallstent",
+      "manufacturer": "Boston Scientific",
+      "category": "bare metal stent",
+      "subtype": "self-expanding braided",
+      "description": "Cobalt-alloy braided self-expanding bare-metal stent. Common venous and iliac applications.",
+      "sizes": ["6–24 mm × 20–94 mm"],
+      "properties": {
+        "platform": "self-expanding (braided)",
+        "drug_eluting": "no"
+      },
+      "tags": ["iliac", "venous", "MTS", "bare-metal"]
+    },
+    {
+      "id": "dev-bms-cordis-smart",
+      "name": "Cordis S.M.A.R.T. Control / Flex",
+      "manufacturer": "Cordis",
+      "category": "bare metal stent",
+      "subtype": "self-expanding nitinol",
+      "description": "Self-expanding laser-cut nitinol bare-metal stent for peripheral arteries.",
+      "sizes": ["6–14 mm × 20–150 mm"],
+      "properties": {
+        "platform": "self-expanding (nitinol)",
+        "drug_eluting": "no"
+      },
+      "tags": ["SFA", "iliac", "peripheral", "bare-metal"]
+    },
+    {
+      "id": "dev-bms-cook-zilver-ptx",
+      "name": "Cook Zilver PTX",
+      "manufacturer": "Cook Medical",
+      "category": "bare metal stent",
+      "subtype": "drug-eluting self-expanding",
+      "description": "Self-expanding nitinol stent with paclitaxel polymer-free coating for SFA/popliteal disease.",
+      "sizes": ["6–8 mm × 40–140 mm"],
+      "properties": {
+        "platform": "self-expanding (nitinol)",
+        "drug_eluting": "paclitaxel"
+      },
+      "tags": ["SFA", "DES", "drug-eluting", "PAD"]
+    },
+    {
+      "id": "dev-bal-bard-mustang",
+      "name": "Bard Mustang PTA Balloon",
+      "manufacturer": "BD (Bard)",
+      "category": "balloon",
+      "subtype": "high-pressure PTA",
+      "description": "Non-compliant high-pressure peripheral PTA balloon for stenosis dilation and stent post-dilation.",
+      "sizes": ["3–12 mm × 15–200 mm"],
+      "properties": {
+        "compliance": "non-compliant",
+        "rated_burst": "up to 24 atm",
+        "drug_coated": "no"
+      },
+      "tags": ["PTA", "high-pressure", "non-compliant"]
+    },
+    {
+      "id": "dev-bal-boston-conquest",
+      "name": "Boston Scientific Conquest 40",
+      "manufacturer": "Boston Scientific",
+      "category": "balloon",
+      "subtype": "ultra-high-pressure PTA",
+      "description": "Ultra-high-pressure non-compliant balloon for resistant stenoses (e.g. fibrotic dialysis access).",
+      "sizes": ["5–12 mm × 20–80 mm"],
+      "properties": {
+        "compliance": "non-compliant",
+        "rated_burst": "up to 30 atm"
+      },
+      "tags": ["PTA", "ultra-high-pressure", "dialysis"]
+    },
+    {
+      "id": "dev-bal-medtronic-inpact",
+      "name": "Medtronic IN.PACT Admiral DCB",
+      "manufacturer": "Medtronic",
+      "category": "balloon",
+      "subtype": "drug-coated PTA",
+      "description": "Paclitaxel-coated PTA balloon for SFA/popliteal disease — drug-coated balloon (DCB).",
+      "sizes": ["4–7 mm × 40–250 mm"],
+      "properties": {
+        "compliance": "semi-compliant",
+        "drug_coated": "paclitaxel"
+      },
+      "tags": ["DCB", "drug-coated", "SFA"]
+    },
+    {
+      "id": "dev-emb-amplatzer-vplug-ii",
+      "name": "Abbott AMPLATZER Vascular Plug II",
+      "manufacturer": "Abbott",
+      "category": "embolization device",
+      "subtype": "occlusion plug",
+      "description": "Self-expanding nitinol multi-segment plug for medium-to-large vessel occlusion through 4–6 F catheters.",
+      "sizes": ["3–22 mm"],
+      "properties": {
+        "platform": "self-expanding nitinol",
+        "delivery_french": "4–7 F"
+      },
+      "tags": ["embolization", "plug", "vessel occlusion"]
+    },
+    {
+      "id": "dev-emb-penumbra-ruby-coil",
+      "name": "Penumbra Ruby Coil",
+      "manufacturer": "Penumbra",
+      "category": "embolization device",
+      "subtype": "embolization coil",
+      "description": "Detachable platinum coils for peripheral embolization through standard microcatheters.",
+      "sizes": ["3–24 mm × variable length"],
+      "properties": {
+        "delivery_microcatheter": "0.021 in",
+        "detachable": "yes"
+      },
+      "tags": ["embolization", "coil", "microcatheter"]
+    },
+    {
+      "id": "dev-thr-penumbra-indigo",
+      "name": "Penumbra Indigo Aspiration System",
+      "manufacturer": "Penumbra",
+      "category": "thrombectomy/aspiration device",
+      "subtype": "continuous aspiration",
+      "description": "Continuous-aspiration mechanical thrombectomy system with separator wires for arterial and venous use.",
+      "sizes": ["CAT3 / CAT5 / CAT6 / CAT8 / CAT12"],
+      "properties": {
+        "mechanism": "continuous aspiration"
+      },
+      "tags": ["thrombectomy", "aspiration", "PE", "ALI"]
+    },
+    {
+      "id": "dev-thr-boston-angiojet",
+      "name": "Boston Scientific AngioJet",
+      "manufacturer": "Boston Scientific",
+      "category": "thrombectomy/aspiration device",
+      "subtype": "rheolytic thrombectomy",
+      "description": "Rheolytic thrombectomy device using high-velocity saline jets to fragment and aspirate thrombus.",
+      "sizes": ["Solent Proxi/Omni/Dista catheters"],
+      "properties": {
+        "mechanism": "rheolytic"
+      },
+      "tags": ["thrombectomy", "rheolytic", "DVT", "PAD"]
+    },
+    {
+      "id": "dev-thr-inari-clottriever",
+      "name": "Inari ClotTriever",
+      "manufacturer": "Inari Medical",
+      "category": "thrombectomy/aspiration device",
+      "subtype": "mechanical core / coring",
+      "description": "Mechanical thrombectomy system with a self-expanding coring element and collection bag for large-vessel DVT.",
+      "sizes": ["13F sheath, vessels 6–16 mm"],
+      "properties": {
+        "mechanism": "mechanical (coring + retrieval bag)"
+      },
+      "tags": ["thrombectomy", "DVT", "iliofemoral"]
+    }
+  ]
+}

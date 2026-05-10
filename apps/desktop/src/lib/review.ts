@@ -148,6 +148,9 @@ function asChoices(value: unknown): Choice[] {
   });
 }
 
+/** Optional device-name lookup for `deviceSelection` formatting. Keeps review.ts decoupled from the catalog. */
+export type DeviceNameLookup = (id: string) => string | null;
+
 /**
  * Format the submitted answer for display in the review UI. Mirrors the live training
  * feedback formatting so the review screen reads the same way.
@@ -156,6 +159,7 @@ export function formatAnswer(
   type: string,
   questionData: Record<string, unknown>,
   answer: unknown,
+  deviceNameLookup?: DeviceNameLookup,
 ): string {
   if (answer === null || answer === undefined) return '— (no answer recorded)';
   switch (type) {
@@ -183,6 +187,11 @@ export function formatAnswer(
     }
     case 'shortText':
       return typeof answer === 'string' ? (answer.trim() || '(empty)') : String(answer);
+    case 'deviceSelection': {
+      if (typeof answer !== 'string' || !answer) return '—';
+      const name = deviceNameLookup?.(answer);
+      return name ?? answer;
+    }
     default:
       return JSON.stringify(answer);
   }
@@ -191,6 +200,7 @@ export function formatAnswer(
 export function formatExpected(
   type: string,
   questionData: Record<string, unknown>,
+  deviceNameLookup?: DeviceNameLookup,
 ): string {
   switch (type) {
     case 'multipleChoice': {
@@ -225,6 +235,12 @@ export function formatExpected(
     case 'shortText': {
       const keywords = (questionData.requiredKeywords as string[] | undefined) ?? [];
       return keywords.length > 0 ? `Any of: ${keywords.join(', ')}` : '—';
+    }
+    case 'deviceSelection': {
+      const id = questionData.correctDeviceId as string | undefined;
+      if (!id) return '—';
+      const name = deviceNameLookup?.(id);
+      return name ?? id;
     }
     default:
       return '—';

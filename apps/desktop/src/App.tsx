@@ -4,6 +4,7 @@ import { cases as sampleCases } from './data/sampleContent';
 import { AdminContentPage } from './features/admin/AdminContentPage';
 import { CaseDetailPage } from './features/cases/CaseDetailPage';
 import { CaseLibraryPage } from './features/cases/CaseLibraryPage';
+import { DevicesCatalogPage } from './features/devices/DevicesCatalogPage';
 import { HomePage } from './features/home/HomePage';
 import { ProgressPage } from './features/progress/ProgressPage';
 import { SettingsPage } from './features/settings/SettingsPage';
@@ -11,7 +12,15 @@ import { TrainingWorkspace } from './features/training/TrainingWorkspace';
 import { loadCases } from './lib/content';
 import type { VascCase } from './types';
 
-export type Screen = 'home' | 'cases' | 'case-detail' | 'training' | 'progress' | 'admin' | 'settings';
+export type Screen =
+  | 'home'
+  | 'cases'
+  | 'case-detail'
+  | 'training'
+  | 'devices'
+  | 'progress'
+  | 'admin'
+  | 'settings';
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
@@ -82,6 +91,7 @@ export default function App() {
           onChooseCase={() => setScreen('cases')}
         />
       )}
+      {screen === 'devices' && <DevicesCatalogPage />}
       {screen === 'progress' && <ProgressPage refreshKey={progressRefreshKey} />}
       {screen === 'admin' && (
         <AdminContentPage

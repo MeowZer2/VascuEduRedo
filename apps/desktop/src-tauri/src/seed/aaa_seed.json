@@ -107,6 +107,16 @@
             "Place the two endpoints at the outer walls of the aortic lumen at its widest point."
           ],
           "explanation": "The maximal transverse diameter on axial CTA is a key EVAR planning measurement. The synthetic NRRD volume in this case represents an approximately 61 mm AAA. Measurements within ±8 mm are accepted to account for section choice and caliper placement variation."
+        },
+        {
+          "id": "q7",
+          "type": "deviceSelection",
+          "prompt": "Given suitable infrarenal anatomy and standard EVAR planning, which device class is the most appropriate first-line choice for this AAA?",
+          "allowedCategory": "aortic endograft",
+          "correctDeviceId": "dev-eg-gore-excluder",
+          "points": 2,
+          "hints": ["Think first-line endovascular AAA repair.", "Bifurcated infrarenal endograft."],
+          "explanation": "Standard infrarenal AAAs with adequate proximal neck and iliac access are typically treated with a bifurcated infrarenal aortic endograft. The GORE EXCLUDER is one of several appropriate first-line options. (The other listed endografts in the catalog are also clinically reasonable choices in real practice — the seeded answer reflects this case's planning preference.)"
         }
       ]
     }

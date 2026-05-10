@@ -49,7 +49,8 @@ export type QuestionType =
   | 'trueFalse'
   | 'numeric'
   | 'shortText'
-  | 'measurement';
+  | 'measurement'
+  | 'deviceSelection';
 
 export interface QuestionBase {
   id: string;
@@ -104,13 +105,28 @@ export interface MeasurementQuestion extends QuestionBase {
   unit: string;
 }
 
+/**
+ * v0.12 device-selection question. The learner picks one device from the
+ * catalog (optionally filtered by category) and is correct if the chosen
+ * device id matches `correctDeviceId`.
+ */
+export interface DeviceSelectionQuestion extends QuestionBase {
+  type: 'deviceSelection';
+  correctDeviceId: string;
+  /** Optional category filter — when set, only devices in this category are shown. */
+  allowedCategory?: string;
+  /** Optional explicit whitelist of device ids to choose from. */
+  allowedDeviceIds?: string[];
+}
+
 export type Question =
   | MultipleChoiceQuestion
   | MultiSelectQuestion
   | TrueFalseQuestion
   | NumericQuestion
   | ShortTextQuestion
-  | MeasurementQuestion;
+  | MeasurementQuestion
+  | DeviceSelectionQuestion;
 
 export type UserAnswer = string | string[] | boolean | number | null;
 

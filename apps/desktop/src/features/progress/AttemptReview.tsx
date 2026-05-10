@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { listDevices, type Device } from '../../lib/devices';
 import {
   fetchAttemptDetails,
   formatAnswer,
@@ -16,6 +17,26 @@ export function AttemptReview({ attemptId, onClose }: AttemptReviewProps) {
   const [details, setDetails] = useState<AttemptDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [devices, setDevices] = useState<Device[]>([]);
+
+  // Pre-fetch devices once so deviceSelection rows can render names cheaply.
+  useEffect(() => {
+    let cancelled = false;
+    void listDevices().then((rows) => {
+      if (!cancelled) setDevices(rows);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const deviceNameLookup = useMemo(() => {
+    const byId = new Map(devices.map((d) => [d.id, d]));
+    return (id: string) => {
+      const dev = byId.get(id);
+      return dev ? `${dev.name} (${dev.manufacturer})` : null;
+    };
+  }, [devices]);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,7 +123,12 @@ export function AttemptReview({ attemptId, onClose }: AttemptReviewProps) {
 
             <ol className="review-question-list">
               {details.questions.map((q, idx) => (
-                <ReviewQuestion key={q.questionId} question={q} index={idx} />
+                <ReviewQuestion
+                  key={q.questionId}
+                  question={q}
+                  index={idx}
+                  deviceNameLookup={deviceNameLookup}
+                />
               ))}
               {details.questions.length === 0 && (
                 <li>
@@ -117,7 +143,15 @@ export function AttemptReview({ attemptId, onClose }: AttemptReviewProps) {
   );
 }
 
-function ReviewQuestion({ question, index }: { question: AttemptQuestionDetail; index: number }) {
+function ReviewQuestion({
+  question,
+  index,
+  deviceNameLookup,
+}: {
+  question: AttemptQuestionDetail;
+  index: number;
+  deviceNameLookup: (id: string) => string | null;
+}) {
   const status =
     question.isCorrect === null ? 'skipped' : question.isCorrect ? 'correct' : 'incorrect';
   const explanation = (question.questionData.explanation as string | undefined) ?? '';
@@ -140,11 +174,11 @@ function ReviewQuestion({ question, index }: { question: AttemptQuestionDetail; 
       <dl className="review-detail-list">
         <div>
           <dt>Your answer</dt>
-          <dd>{formatAnswer(question.type, question.questionData, question.answer)}</dd>
+          <dd>{formatAnswer(question.type, question.questionData, question.answer, deviceNameLookup)}</dd>
         </div>
         <div>
           <dt>{question.type === 'shortText' ? 'Accepted' : 'Expected'}</dt>
-          <dd>{formatExpected(question.type, question.questionData)}</dd>
+          <dd>{formatExpected(question.type, question.questionData, deviceNameLookup)}</dd>
         </div>
       </dl>
 

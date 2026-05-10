@@ -160,6 +160,32 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .binary-row { display: flex; gap: 10px; margin-top: 14px; }
 .field-label { display: grid; gap: 8px; margin-top: 14px; color: var(--muted); }
 .text-input { width: 100%; border: 1px solid var(--border); border-radius: 14px; padding: 12px; color: var(--text); background: rgba(0,0,0,0.24); }
+.text-input:focus, select.text-input:focus { outline: none; border-color: rgba(120,166,255,0.5); box-shadow: 0 0 0 2px rgba(120,166,255,0.18); }
+
+/* Themed <select> — kill the OS-default look and apply a custom chevron + dark
+   panel + matching focus ring so dropdowns blend in with the rest of the UI. */
+select.text-input {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  cursor: pointer;
+  padding-right: 36px;
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%239aa8bd' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.75 6,6.25 10.5,1.75'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 8px;
+}
+select.text-input:hover:not(:disabled) { border-color: rgba(120,166,255,0.32); }
+select.text-input:disabled { opacity: 0.55; cursor: not-allowed; }
+/* Style the dropdown popup itself so it doesn't render a white system menu in WebView2/Edge. */
+select.text-input option,
+select.text-input optgroup {
+  background-color: var(--panel);
+  color: var(--text);
+}
+select.text-input option:disabled { color: var(--muted); }
+select.text-input.small { padding: 6px 28px 6px 10px; background-position: right 8px center; }
 .textarea { min-height: 120px; resize: vertical; }
 .hint-box { margin-top: 18px; padding: 12px; border-radius: 16px; background: rgba(255,209,102,0.08); border: 1px solid rgba(255,209,102,0.16); }
 .hint-box p { color: #ffe6a3; margin: 8px 0 0; }
@@ -284,6 +310,38 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .admin-question-row-actions { display: flex; gap: 4px; }
 .admin-question-row-actions .secondary-button.small { padding: 4px 8px; font-size: 0.84rem; min-width: 32px; }
 .admin-question-editor-wrap { min-width: 0; }
+
+/* Device catalog (v0.12) */
+.devices-page { gap: 16px; }
+.devices-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 200px 220px auto; gap: 10px; align-items: center; }
+.devices-toolbar .text-input { padding: 9px 12px; }
+.devices-layout { display: grid; grid-template-columns: 320px 1fr; gap: 18px; align-items: start; }
+.devices-list-panel { display: grid; gap: 8px; max-height: calc(100vh - 240px); overflow: auto; padding-right: 4px; }
+.devices-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.devices-list-item { border: 1px solid var(--border); border-radius: 14px; background: rgba(0,0,0,0.16); }
+.devices-list-item.active { border-color: rgba(120,166,255,0.55); background: rgba(120,166,255,0.12); }
+.devices-list-button { width: 100%; text-align: left; background: transparent; border: 0; color: var(--text); padding: 10px 12px; display: grid; gap: 4px; border-radius: 14px; }
+.devices-list-button:hover { background: rgba(255,255,255,0.04); }
+.devices-list-button strong { font-size: 0.95rem; line-height: 1.2; }
+.devices-list-button > span:not(.device-category-pill) { color: var(--muted); font-size: 0.82rem; }
+.device-category-pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; background: rgba(120,166,255,0.14); color: #cfe0ff; border: 1px solid rgba(120,166,255,0.32); width: fit-content; margin-top: 4px; }
+.devices-detail { padding: 22px; display: grid; gap: 14px; }
+.device-detail-header h3 { margin: 4px 0 4px; }
+.device-properties { display: grid; gap: 6px 14px; grid-template-columns: 180px 1fr; margin: 0; }
+.device-properties dt { color: var(--muted); font-size: 0.84rem; }
+.device-properties dd { margin: 0; }
+
+.admin-section-tabs { display: inline-flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgba(0,0,0,0.2); border: 1px solid var(--border); width: fit-content; }
+.admin-section-tabs .plane-tab { padding: 6px 12px; font-size: 0.86rem; }
+
+/* deviceSelection — training picker */
+.device-pick-list { display: grid; gap: 10px; margin-top: 14px; }
+.device-pick-row { display: grid; grid-template-columns: 22px 1fr; gap: 10px; align-items: start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 14px; background: rgba(255,255,255,0.04); cursor: pointer; }
+.device-pick-row.selected { border-color: rgba(120,166,255,0.55); background: rgba(120,166,255,0.12); }
+.device-pick-row input[type="radio"] { margin-top: 4px; }
+.device-pick-body { display: grid; gap: 2px; min-width: 0; }
+.device-pick-body strong { font-size: 0.94rem; line-height: 1.25; }
+.device-pick-description { line-height: 1.35; }
 
 /* Content health (admin) */
 .content-health h4 { margin: 4px 0 8px; font-size: 0.94rem; }

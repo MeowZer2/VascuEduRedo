@@ -27,6 +27,10 @@ export function expectedAnswerLabel(question: Question): string {
       return `${question.correctValue} ${question.unit}`;
     case 'shortText':
       return `Any of: ${question.requiredKeywords.join(', ')}`;
+    case 'deviceSelection':
+      // We only have the id at this layer; the QuestionPanel / AttemptReview
+      // resolves it to a human name via the device catalog.
+      return question.correctDeviceId;
   }
 }
 
@@ -56,6 +60,9 @@ export function evaluateAnswer(question: Question, answer: UserAnswer, hintsUsed
       }
       break;
     }
+    case 'deviceSelection':
+      correct = typeof answer === 'string' && answer === question.correctDeviceId;
+      break;
   }
 
   const hintPenalty = Math.min(hintsUsed * 0.15, 0.45);

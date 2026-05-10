@@ -83,6 +83,7 @@ pub fn open_and_initialize(app: &AppHandle) -> Result<Connection, String> {
         .map_err(|e| format!("Cannot enable foreign keys: {e}"))?;
     initialize_schema(&conn)?;
     seed_if_empty(&conn)?;
+    seed_devices_if_empty(&conn)?;
     Ok(conn)
 }
 
@@ -127,6 +128,22 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
             submitted_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_responses_attempt ON question_responses(attempt_id);
+
+        -- v0.12 device catalog. Sizes/properties/tags are stored as JSON to keep
+        -- the schema small while supporting heterogeneous device metadata.
+        CREATE TABLE IF NOT EXISTS devices (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            manufacturer TEXT NOT NULL,
+            category TEXT NOT NULL,
+            subtype TEXT,
+            description TEXT NOT NULL,
+            sizes_json TEXT NOT NULL DEFAULT '[]',
+            properties_json TEXT NOT NULL DEFAULT '{}',
+            tags_json TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS idx_devices_category ON devices(category);
+        CREATE INDEX IF NOT EXISTS idx_devices_manufacturer ON devices(manufacturer);
         "#,
     )
     .map_err(|e| format!("Schema init failed: {e}"))?;
@@ -504,6 +521,79 @@ pub fn list_attempts(
 }
 
 const SEED_JSON: &str = include_str!("seed/aaa_seed.json");
+const DEVICES_SEED_JSON: &str = include_str!("seed/devices_seed.json");
+
+fn seed_devices_if_empty(conn: &Connection) -> Result<(), String> {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0))
+        .map_err(|e| format!("Cannot count devices: {e}"))?;
+    if count > 0 {
+        return Ok(());
+    }
+    let parsed: Value = serde_json::from_str(DEVICES_SEED_JSON)
+        .map_err(|e| format!("Devices seed JSON is malformed: {e}"))?;
+    let devices = parsed
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Devices seed JSON missing 'devices' array".to_string())?;
+
+    for device in devices {
+        let id = device
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Seed device missing id".to_string())?
+            .to_string();
+        let name = device.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let manufacturer = device
+            .get("manufacturer")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let category = device
+            .get("category")
+            .and_then(Value::as_str)
+            .unwrap_or("uncategorized")
+            .to_string();
+        let subtype = device
+            .get("subtype")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        let description = device
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let sizes_json = device
+            .get("sizes")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "[]".to_string());
+        let properties_json = device
+            .get("properties")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+        let tags_json = device
+            .get("tags")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "[]".to_string());
+
+        conn.execute(
+            "INSERT INTO devices (id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                name,
+                manufacturer,
+                category,
+                subtype,
+                description,
+                sizes_json,
+                properties_json,
+                tags_json
+            ],
+        )
+        .map_err(|e| format!("Failed to insert seed device {id}: {e}"))?;
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Admin authoring commands (v0.7)
@@ -1848,6 +1938,45 @@ fn validate_case(
                     ));
                 }
             }
+            "deviceSelection" => {
+                let correct = q
+                    .data
+                    .get("correctDeviceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if correct.trim().is_empty() {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.correctDeviceId"),
+                        "deviceSelection needs a correctDeviceId pointing at a device in the catalog.",
+                    ));
+                }
+                if let Some(cat) = q.data.get("allowedCategory") {
+                    if !cat.is_string() {
+                        errors.push(ValidationIssue::err(
+                            format!("{qid_label}.allowedCategory"),
+                            "allowedCategory must be a string when present.",
+                        ));
+                    }
+                }
+                if let Some(ids) = q.data.get("allowedDeviceIds") {
+                    let arr = ids.as_array();
+                    if arr.is_none() {
+                        errors.push(ValidationIssue::err(
+                            format!("{qid_label}.allowedDeviceIds"),
+                            "allowedDeviceIds must be an array of strings when present.",
+                        ));
+                    } else if let Some(arr) = arr {
+                        for (idx, item) in arr.iter().enumerate() {
+                            if !item.is_string() {
+                                errors.push(ValidationIssue::err(
+                                    format!("{qid_label}.allowedDeviceIds[{idx}]"),
+                                    "allowedDeviceIds entries must be strings.",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             other => {
                 errors.push(ValidationIssue::err(
                     format!("{qid_label}.type"),
@@ -2125,4 +2254,304 @@ pub fn admin_import_case(
         .map_err(|e| format!("admin_import_case commit failed: {e}"))?;
 
     fetch_case_row(&conn, &id)
+}
+
+// ---------------------------------------------------------------------------
+// Device catalog (v0.12)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRow {
+    pub id: String,
+    pub name: String,
+    pub manufacturer: String,
+    pub category: String,
+    pub subtype: Option<String>,
+    pub description: String,
+    pub sizes: Value,
+    pub properties: Value,
+    pub tags: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInput {
+    pub name: String,
+    pub manufacturer: String,
+    pub category: String,
+    #[serde(default)]
+    pub subtype: Option<String>,
+    pub description: String,
+    #[serde(default = "empty_array")]
+    pub sizes: Value,
+    #[serde(default = "empty_object")]
+    pub properties: Value,
+    #[serde(default = "empty_array")]
+    pub tags: Value,
+}
+
+fn empty_array() -> Value {
+    Value::Array(Vec::new())
+}
+fn empty_object() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceFilter {
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub manufacturer: Option<String>,
+    #[serde(default)]
+    pub search: Option<String>,
+}
+
+fn parse_device_row(
+    id: String,
+    name: String,
+    manufacturer: String,
+    category: String,
+    subtype: Option<String>,
+    description: String,
+    sizes_json: String,
+    properties_json: String,
+    tags_json: String,
+) -> Result<DeviceRow, String> {
+    let sizes: Value = serde_json::from_str(&sizes_json).unwrap_or_else(|_| empty_array());
+    let properties: Value =
+        serde_json::from_str(&properties_json).unwrap_or_else(|_| empty_object());
+    let tags: Value = serde_json::from_str(&tags_json).unwrap_or_else(|_| empty_array());
+    Ok(DeviceRow {
+        id,
+        name,
+        manufacturer,
+        category,
+        subtype,
+        description,
+        sizes,
+        properties,
+        tags,
+    })
+}
+
+#[tauri::command]
+pub fn list_devices(
+    state: State<DbState>,
+    filter: Option<DeviceFilter>,
+) -> Result<Vec<DeviceRow>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let filter = filter.unwrap_or_default();
+
+    let mut sql = String::from(
+        "SELECT id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json FROM devices WHERE 1=1",
+    );
+    let mut params_vec: Vec<String> = Vec::new();
+    if let Some(cat) = filter.category.as_deref().filter(|s| !s.trim().is_empty()) {
+        sql.push_str(" AND category = ?");
+        params_vec.push(cat.to_string());
+    }
+    if let Some(man) = filter.manufacturer.as_deref().filter(|s| !s.trim().is_empty()) {
+        sql.push_str(" AND manufacturer = ?");
+        params_vec.push(man.to_string());
+    }
+    if let Some(search) = filter.search.as_deref().filter(|s| !s.trim().is_empty()) {
+        sql.push_str(
+            " AND (LOWER(name) LIKE ? OR LOWER(manufacturer) LIKE ? OR LOWER(description) LIKE ? OR LOWER(tags_json) LIKE ?)",
+        );
+        let needle = format!("%{}%", search.to_lowercase());
+        params_vec.push(needle.clone());
+        params_vec.push(needle.clone());
+        params_vec.push(needle.clone());
+        params_vec.push(needle);
+    }
+    sql.push_str(" ORDER BY category ASC, name ASC");
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("list_devices prepare failed: {e}"))?;
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params_refs.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })
+        .map_err(|e| format!("list_devices query failed: {e}"))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        let (id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json) =
+            r.map_err(|e| format!("list_devices row failed: {e}"))?;
+        out.push(parse_device_row(
+            id,
+            name,
+            manufacturer,
+            category,
+            subtype,
+            description,
+            sizes_json,
+            properties_json,
+            tags_json,
+        )?);
+    }
+    Ok(out)
+}
+
+fn fetch_device_row(conn: &Connection, device_id: &str) -> Result<Option<DeviceRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json FROM devices WHERE id = ?1 LIMIT 1",
+        )
+        .map_err(|e| format!("fetch_device_row prepare failed: {e}"))?;
+    let mut rows = stmt
+        .query(params![device_id])
+        .map_err(|e| format!("fetch_device_row query failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("fetch_device_row next failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(parse_device_row(
+        row.get(0).map_err(|e| e.to_string())?,
+        row.get(1).map_err(|e| e.to_string())?,
+        row.get(2).map_err(|e| e.to_string())?,
+        row.get(3).map_err(|e| e.to_string())?,
+        row.get(4).map_err(|e| e.to_string())?,
+        row.get(5).map_err(|e| e.to_string())?,
+        row.get(6).map_err(|e| e.to_string())?,
+        row.get(7).map_err(|e| e.to_string())?,
+        row.get(8).map_err(|e| e.to_string())?,
+    )?))
+}
+
+#[tauri::command]
+pub fn get_device(state: State<DbState>, device_id: String) -> Result<Option<DeviceRow>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    fetch_device_row(&conn, &device_id)
+}
+
+#[tauri::command]
+pub fn list_device_categories(state: State<DbState>) -> Result<Vec<String>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT category FROM devices ORDER BY category ASC")
+        .map_err(|e| format!("list_device_categories prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("list_device_categories query failed: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("list_device_categories row failed: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn validate_device_input(input: &DeviceInput) -> Result<(), String> {
+    if input.name.trim().is_empty() {
+        return Err("Device name is required.".into());
+    }
+    if input.manufacturer.trim().is_empty() {
+        return Err("Manufacturer is required.".into());
+    }
+    if input.category.trim().is_empty() {
+        return Err("Category is required.".into());
+    }
+    if input.description.trim().is_empty() {
+        return Err("Description is required.".into());
+    }
+    if !input.sizes.is_array() {
+        return Err("`sizes` must be a JSON array.".into());
+    }
+    if !input.properties.is_object() {
+        return Err("`properties` must be a JSON object.".into());
+    }
+    if !input.tags.is_array() {
+        return Err("`tags` must be a JSON array.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn admin_create_device(
+    state: State<DbState>,
+    input: DeviceInput,
+) -> Result<DeviceRow, String> {
+    validate_device_input(&input)?;
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let id = format!("dev-{}", Uuid::new_v4());
+    conn.execute(
+        "INSERT INTO devices (id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            input.name.trim(),
+            input.manufacturer.trim(),
+            input.category.trim(),
+            input.subtype.as_ref().map(|s| s.trim().to_string()),
+            input.description.trim(),
+            input.sizes.to_string(),
+            input.properties.to_string(),
+            input.tags.to_string(),
+        ],
+    )
+    .map_err(|e| format!("admin_create_device insert failed: {e}"))?;
+    fetch_device_row(&conn, &id)?
+        .ok_or_else(|| "admin_create_device: inserted row not found".to_string())
+}
+
+#[tauri::command]
+pub fn admin_update_device(
+    state: State<DbState>,
+    device_id: String,
+    input: DeviceInput,
+) -> Result<DeviceRow, String> {
+    validate_device_input(&input)?;
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let updated = conn
+        .execute(
+            "UPDATE devices SET name = ?1, manufacturer = ?2, category = ?3, subtype = ?4, description = ?5, sizes_json = ?6, properties_json = ?7, tags_json = ?8 WHERE id = ?9",
+            params![
+                input.name.trim(),
+                input.manufacturer.trim(),
+                input.category.trim(),
+                input.subtype.as_ref().map(|s| s.trim().to_string()),
+                input.description.trim(),
+                input.sizes.to_string(),
+                input.properties.to_string(),
+                input.tags.to_string(),
+                device_id,
+            ],
+        )
+        .map_err(|e| format!("admin_update_device update failed: {e}"))?;
+    if updated == 0 {
+        return Err(format!("No device found with id {device_id}"));
+    }
+    fetch_device_row(&conn, &device_id)?
+        .ok_or_else(|| "admin_update_device: updated row not found".to_string())
+}
+
+#[tauri::command]
+pub fn admin_delete_device(state: State<DbState>, device_id: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let removed = conn
+        .execute("DELETE FROM devices WHERE id = ?1", params![device_id])
+        .map_err(|e| format!("admin_delete_device failed: {e}"))?;
+    if removed == 0 {
+        return Err(format!("No device found with id {device_id}"));
+    }
+    Ok(())
 }

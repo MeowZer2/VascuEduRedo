@@ -2,12 +2,14 @@ mod db;
 mod volume;
 
 use db::{
-    admin_create_case, admin_create_question, admin_delete_case, admin_delete_question,
-    admin_export_case, admin_get_case_with_questions, admin_import_case, admin_list_cases,
-    admin_reorder_questions, admin_update_case, admin_update_question, admin_validate_case,
-    admin_validate_case_payload, complete_attempt, create_attempt, get_attempt_details, get_case,
-    get_case_questions, get_recent_activity, list_attempts, list_cases, open_and_initialize,
-    progress_by_case, progress_summary, submit_question_response, DbState,
+    admin_create_case, admin_create_device, admin_create_question, admin_delete_case,
+    admin_delete_device, admin_delete_question, admin_export_case, admin_get_case_with_questions,
+    admin_import_case, admin_list_cases, admin_reorder_questions, admin_update_case,
+    admin_update_device, admin_update_question, admin_validate_case, admin_validate_case_payload,
+    complete_attempt, create_attempt, get_attempt_details, get_case, get_case_questions,
+    get_device, get_recent_activity, list_attempts, list_cases, list_device_categories,
+    list_devices, open_and_initialize, progress_by_case, progress_summary,
+    submit_question_response, DbState,
 };
 use serde::Serialize;
 use tauri::Manager;
@@ -78,7 +80,13 @@ fn main() {
             admin_validate_case,
             admin_validate_case_payload,
             admin_export_case,
-            admin_import_case
+            admin_import_case,
+            list_devices,
+            get_device,
+            list_device_categories,
+            admin_create_device,
+            admin_update_device,
+            admin_delete_device
         ])
         .run(tauri::generate_context!())
         .expect("error while running VascEdu desktop app");

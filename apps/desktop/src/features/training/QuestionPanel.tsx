@@ -1,8 +1,17 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ViewerMeasurement } from '../../components/NrrdViewer';
 import { completeAttempt, submitQuestionResponse } from '../../lib/attempts';
+import { listDevices, type Device } from '../../lib/devices';
 import { evaluateAnswer, newAttemptId } from '../../lib/quiz';
-import type { AttemptResult, MeasurementQuestion, Question, QuestionResult, UserAnswer, VascCase } from '../../types';
+import type {
+  AttemptResult,
+  DeviceSelectionQuestion,
+  MeasurementQuestion,
+  Question,
+  QuestionResult,
+  UserAnswer,
+  VascCase,
+} from '../../types';
 
 interface QuestionPanelProps {
   vascCase: VascCase;
@@ -17,6 +26,7 @@ function defaultAnswer(question: Question): UserAnswer {
   if (question.type === 'multiSelect') return [];
   if (question.type === 'trueFalse') return null;
   if (question.type === 'numeric' || question.type === 'measurement') return null;
+  if (question.type === 'deviceSelection') return '';
   return '';
 }
 
@@ -32,6 +42,41 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
   const isLast = index === vascCase.questions.length - 1;
 
   const totalPossible = useMemo(() => vascCase.questions.reduce((sum, item) => sum + item.points, 0), [vascCase.questions]);
+
+  // Device-selection question state: load the (filtered) catalog when the
+  // current question is a deviceSelection. Cached in this component so each
+  // device-selection question fetches only what it needs.
+  const deviceQuestion =
+    question.type === 'deviceSelection' ? (question as DeviceSelectionQuestion) : null;
+  const [deviceOptions, setDeviceOptions] = useState<Device[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  useEffect(() => {
+    if (!deviceQuestion) {
+      setDeviceOptions([]);
+      return;
+    }
+    let cancelled = false;
+    setDevicesLoading(true);
+    listDevices(
+      deviceQuestion.allowedCategory ? { category: deviceQuestion.allowedCategory } : undefined,
+    )
+      .then((devs) => {
+        if (cancelled) return;
+        // If a whitelist is specified, intersect.
+        if (deviceQuestion.allowedDeviceIds && deviceQuestion.allowedDeviceIds.length > 0) {
+          const allowed = new Set(deviceQuestion.allowedDeviceIds);
+          setDeviceOptions(devs.filter((d) => allowed.has(d.id)));
+        } else {
+          setDeviceOptions(devs);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDevicesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceQuestion?.id, deviceQuestion?.allowedCategory]);
 
   // For measurement questions, determine if the latest viewer measurement is on the right plane.
   const measurementQuestion = question.type === 'measurement' ? (question as MeasurementQuestion) : null;
@@ -221,6 +266,51 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
             />
           </label>
         );
+      case 'deviceSelection': {
+        if (devicesLoading) {
+          return <p className="muted">Loading device catalog…</p>;
+        }
+        if (deviceOptions.length === 0) {
+          return (
+            <p className="muted">
+              No matching devices in the catalog
+              {deviceQuestion?.allowedCategory ? ` for category "${deviceQuestion.allowedCategory}"` : ''}.
+              Add devices in the Admin → Devices tab.
+            </p>
+          );
+        }
+        return (
+          <div className="device-pick-list">
+            {deviceOptions.map((device) => {
+              const selected = answer === device.id;
+              return (
+                <label
+                  key={device.id}
+                  className={selected ? 'device-pick-row selected' : 'device-pick-row'}
+                >
+                  <input
+                    type="radio"
+                    name={question.id}
+                    checked={selected}
+                    onChange={() => setAnswer(device.id)}
+                    disabled={Boolean(submittedResult)}
+                  />
+                  <span className="device-pick-body">
+                    <strong>{device.name}</strong>
+                    <span className="muted small">
+                      {device.manufacturer} · {device.category}
+                      {device.subtype ? ` · ${device.subtype}` : ''}
+                    </span>
+                    <span className="muted small device-pick-description">
+                      {device.description}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        );
+      }
     }
   }
 
@@ -276,7 +366,11 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
       ) : null}
 
       {submittedResult ? (
-        measurementQuestion ? renderFeedback() : (
+        measurementQuestion ? (
+          renderFeedback()
+        ) : deviceQuestion ? (
+          renderDeviceFeedback(submittedResult, deviceOptions, deviceQuestion.correctDeviceId)
+        ) : (
           <div className={submittedResult.correct ? 'result-box correct' : 'result-box incorrect'}>
             <strong>{submittedResult.correct ? 'Correct' : 'Not correct'}</strong>
             <p>Expected: {submittedResult.expected}</p>
@@ -298,5 +392,31 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
         )}
       </div>
     </section>
+  );
+}
+
+function renderDeviceFeedback(
+  result: QuestionResult,
+  deviceOptions: Device[],
+  correctDeviceId: string,
+) {
+  const submittedId = typeof result.answer === 'string' ? result.answer : '';
+  const submitted = deviceOptions.find((d) => d.id === submittedId);
+  const correct = deviceOptions.find((d) => d.id === correctDeviceId);
+  return (
+    <div className={result.correct ? 'result-box correct' : 'result-box incorrect'}>
+      <strong>{result.correct ? 'Correct' : 'Not correct'}</strong>
+      <p>
+        <strong>Your pick:</strong> {submitted ? `${submitted.name} (${submitted.manufacturer})` : '— (no answer)'}
+      </p>
+      <p>
+        <strong>Best answer:</strong>{' '}
+        {correct ? `${correct.name} (${correct.manufacturer})` : correctDeviceId}
+      </p>
+      <p>{result.explanation}</p>
+      <p>
+        Score: {result.awardedPoints} / {result.maxPoints}
+      </p>
+    </div>
   );
 }
