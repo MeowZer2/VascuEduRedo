@@ -30,8 +30,8 @@ import {
   voxelWithSlice,
   type CrosshairVoxel,
   type DisplayPoint,
-  type DistanceMeasurement,
   type ImagePoint,
+  type Measurement,
   type ViewerLayout,
   type ViewerMeasurement,
   type ViewerToolMode,
@@ -85,7 +85,31 @@ function makePane(
     zoom: 1,
     pan: { x: 0, y: 0 },
     measurements: [],
-    pendingPoint: null,
+    pendingPoints: [],
+    selectedMeasurementId: null,
+  };
+}
+
+/**
+ * Pick the most recent distance measurement across all panes, or null if none.
+ * The quiz integration only cares about distance — angle measurements are
+ * intentionally ignored here so existing measurement questions keep working.
+ */
+function findLatestDistance(panes: PaneSnapshot[]): ViewerMeasurement | null {
+  let best: { m: Measurement; createdAt: number } | null = null;
+  for (const pane of panes) {
+    for (const m of pane.measurements) {
+      if (m.type !== 'distance') continue;
+      if (!best || m.createdAt > best.createdAt) best = { m, createdAt: m.createdAt };
+    }
+  }
+  if (!best) return null;
+  const m = best.m as Measurement & { type: 'distance' };
+  return {
+    id: m.id,
+    plane: m.plane,
+    sliceIndex: m.sliceIndex,
+    distanceMm: m.distanceMm,
   };
 }
 
@@ -172,16 +196,53 @@ export function NrrdViewer({
     onLatestMeasurementChangeRef.current?.(latestMeasurement);
   }, [latestMeasurement]);
 
-  // Escape clears any pending distance point in any pane.
+  // Switching tools clears any in-progress points so we never mix points from
+  // different tool flows.
   useEffect(() => {
+    setPanes((current) => current.map((p) => ({ ...p, pendingPoints: [] })));
+  }, [toolMode]);
+
+  // Keyboard: Escape clears pending points; Delete/Backspace deletes the active
+  // pane's selected measurement. Skip when a text input/textarea is focused so
+  // we don't hijack rename inputs etc.
+  useEffect(() => {
+    function isEditableTarget(target: EventTarget | null): boolean {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      return target.isContentEditable;
+    }
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
-        setPanes((current) => current.map((p) => ({ ...p, pendingPoint: null })));
+        setPanes((current) => current.map((p) => ({ ...p, pendingPoints: [] })));
+        return;
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (isEditableTarget(e.target)) return;
+        setPanes((current) => {
+          const pane = current[activePane];
+          if (!pane || !pane.selectedMeasurementId) return current;
+          const targetId = pane.selectedMeasurementId;
+          return current.map((p, i) =>
+            i === activePane
+              ? {
+                  ...p,
+                  measurements: p.measurements.filter((m) => m.id !== targetId),
+                  selectedMeasurementId: null,
+                }
+              : p,
+          );
+        });
       }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [activePane]);
+
+  // Whenever the panes' measurements change, recompute the latest distance for quiz.
+  useEffect(() => {
+    setLatestMeasurement(findLatestDistance(panes));
+  }, [panes]);
 
   // Helper: transform a single pane in the panes array.
   const updatePaneAt = useCallback(
@@ -228,7 +289,8 @@ export function NrrdViewer({
       plane,
       slice: newSlice,
       pan: { x: 0, y: 0 },
-      pendingPoint: null,
+      pendingPoints: [],
+      selectedMeasurementId: null,
     }));
   }
 
@@ -249,12 +311,17 @@ export function NrrdViewer({
     setCrosshair(nextCross);
     setPanes((current) =>
       current.map((p, i) => {
-        if (i === paneIndex) return { ...p, slice: safeSlice };
+        if (i === paneIndex) {
+          // Selected measurement is slice-specific — drop the selection when
+          // the user scrolls away so the list / rename UI stays in sync.
+          return { ...p, slice: safeSlice, selectedMeasurementId: null };
+        }
         if (!sync.slice) return p;
         const projected = paneFromVoxel(nextCross, p.plane).slice;
         return {
           ...p,
           slice: sanitizeSliceIndex(projected, volume.planeSliceRanges[p.plane].count),
+          selectedMeasurementId: null,
         };
       }),
     );
@@ -327,44 +394,58 @@ export function NrrdViewer({
     }
   }
 
-  function handlePendingPointChange(paneIndex: number, point: ImagePoint | null) {
-    updatePaneAt(paneIndex, (p) => ({ ...p, pendingPoint: point }));
+  function handlePendingPointsChange(paneIndex: number, points: ImagePoint[]) {
+    updatePaneAt(paneIndex, (p) => ({ ...p, pendingPoints: points }));
   }
 
-  function handleAddMeasurement(paneIndex: number, measurement: DistanceMeasurement) {
-    updatePaneAt(paneIndex, (p) => ({ ...p, measurements: [...p.measurements, measurement] }));
-    setLatestMeasurement({
-      id: measurement.id,
-      plane: measurement.plane,
-      sliceIndex: measurement.sliceIndex,
-      distanceMm: measurement.distanceMm,
+  function handleAddMeasurement(paneIndex: number, measurement: Measurement) {
+    // Newly-added measurement becomes the pane's selection so the user can immediately
+    // rename or delete it from the list panel.
+    updatePaneAt(paneIndex, (p) => ({
+      ...p,
+      measurements: [...p.measurements, measurement],
+      selectedMeasurementId: measurement.id,
+    }));
+    // latestMeasurement (distance-only, for quiz integration) is recomputed by the
+    // panes-watching useEffect, so no manual call here.
+  }
+
+  function handleSelectMeasurement(paneIndex: number, id: string | null) {
+    updatePaneAt(paneIndex, (p) => ({ ...p, selectedMeasurementId: id }));
+  }
+
+  function handleRenameSelected(paneIndex: number, label: string) {
+    updatePaneAt(paneIndex, (p) => {
+      if (!p.selectedMeasurementId) return p;
+      return {
+        ...p,
+        measurements: p.measurements.map((m) =>
+          m.id === p.selectedMeasurementId ? { ...m, label } : m,
+        ),
+      };
+    });
+  }
+
+  function handleDeleteSelected(paneIndex: number) {
+    updatePaneAt(paneIndex, (p) => {
+      if (!p.selectedMeasurementId) return p;
+      return {
+        ...p,
+        measurements: p.measurements.filter((m) => m.id !== p.selectedMeasurementId),
+        selectedMeasurementId: null,
+      };
     });
   }
 
   function handleClearMeasurements(paneIndex: number) {
-    const pane = panes[paneIndex];
-    if (!pane) return;
     updatePaneAt(paneIndex, (p) => ({
       ...p,
       measurements: p.measurements.filter(
         (m) => m.plane !== p.plane || m.sliceIndex !== p.slice,
       ),
-      pendingPoint: null,
+      pendingPoints: [],
+      selectedMeasurementId: null,
     }));
-    // If the latest measurement was in the cleared (plane, slice) bucket of THIS pane
-    // and it doesn't live in another pane, drop the "latest" reference. Quiz consumers
-    // re-measure to set a new one.
-    if (latestMeasurement) {
-      const survivedHere = pane.measurements.some(
-        (m) =>
-          m.id === latestMeasurement.id &&
-          (m.plane !== pane.plane || m.sliceIndex !== pane.slice),
-      );
-      const survivedElsewhere = panes.some(
-        (p, i) => i !== paneIndex && p.measurements.some((m) => m.id === latestMeasurement.id),
-      );
-      if (!survivedHere && !survivedElsewhere) setLatestMeasurement(null);
-    }
   }
 
   // -- toolbar handlers ------------------------------------------------------------
@@ -384,7 +465,8 @@ export function NrrdViewer({
         wl: DEFAULT_WINDOW_LEVEL,
         zoom: 1,
         pan: { x: 0, y: 0 },
-        pendingPoint: null,
+        pendingPoints: [],
+        selectedMeasurementId: null,
       })),
     );
     setCrosshair({
@@ -464,6 +546,14 @@ export function NrrdViewer({
           >
             Distance
           </button>
+          <button
+            type="button"
+            className={toolMode === 'angle' ? 'tool-tab active' : 'tool-tab'}
+            disabled={controlsDisabled}
+            onClick={() => setToolMode('angle')}
+          >
+            Angle
+          </button>
         </div>
         <div className="sync-tabs" role="group" aria-label="Sync toggles">
           <button
@@ -523,6 +613,11 @@ export function NrrdViewer({
       {toolMode === 'distance' ? (
         <p className="viewer-instruction">Click two points in any viewport to measure distance.</p>
       ) : null}
+      {toolMode === 'angle' ? (
+        <p className="viewer-instruction">
+          Click point A, then the vertex, then point C. Angle is reported at the vertex.
+        </p>
+      ) : null}
       {toolMode === 'scroll' ? (
         <p className="viewer-instruction">Click anywhere to relocate the crosshair across viewports.</p>
       ) : null}
@@ -570,12 +665,23 @@ export function NrrdViewer({
               onZoomChange={(zoom) => handleZoomChange(idx, zoom)}
               onPanChange={(pan) => handlePanChange(idx, pan)}
               onCrosshairFromPane={(point) => handleCrosshairFromPane(idx, point)}
-              onPendingPointChange={(point) => handlePendingPointChange(idx, point)}
+              onPendingPointsChange={(points) => handlePendingPointsChange(idx, points)}
               onAddMeasurement={(m) => handleAddMeasurement(idx, m)}
               onClearMeasurements={() => handleClearMeasurements(idx)}
+              onSelectMeasurement={(id) => handleSelectMeasurement(idx, id)}
             />
           ))}
         </div>
+      ) : null}
+
+      {activeWindow ? (
+        <MeasurementList
+          pane={activeWindow}
+          paneIndex={activePane}
+          onSelect={handleSelectMeasurement}
+          onRenameSelected={handleRenameSelected}
+          onDeleteSelected={handleDeleteSelected}
+        />
       ) : null}
 
       <div className="viewer-status-row" aria-live="polite">
@@ -666,6 +772,97 @@ export function NrrdViewer({
           </button>
         ))}
       </div>
+    </section>
+  );
+}
+
+interface MeasurementListProps {
+  pane: PaneSnapshot;
+  paneIndex: number;
+  onSelect: (paneIndex: number, id: string | null) => void;
+  onRenameSelected: (paneIndex: number, label: string) => void;
+  onDeleteSelected: (paneIndex: number) => void;
+}
+
+/**
+ * Compact measurement list for the *active pane's current slice*. Lets the user
+ * click an item to select it (highlights the SVG overlay), rename the selected
+ * one, and delete it. Lives at the parent so a single panel reflects whichever
+ * pane the user is currently driving.
+ */
+function MeasurementList({
+  pane,
+  paneIndex,
+  onSelect,
+  onRenameSelected,
+  onDeleteSelected,
+}: MeasurementListProps) {
+  // pane.slice is always written back through sanitizeSliceIndex by the parent
+  // handlers, so we can trust it as an integer in [0, count-1] here.
+  const sliceIndex = pane.slice;
+  const slicedMeasurements = pane.measurements.filter(
+    (m) => m.plane === pane.plane && m.sliceIndex === sliceIndex,
+  );
+  const selected = slicedMeasurements.find((m) => m.id === pane.selectedMeasurementId) ?? null;
+
+  return (
+    <section className="measurement-list-card" aria-label="Measurements on the active slice">
+      <header className="measurement-list-header">
+        <h4>Measurements · pane {paneIndex + 1} · {pane.plane} {sliceIndex + 1}</h4>
+        <div className="measurement-list-actions">
+          <button
+            type="button"
+            className="secondary-button small"
+            onClick={() => onDeleteSelected(paneIndex)}
+            disabled={!selected}
+          >
+            Delete selected
+          </button>
+        </div>
+      </header>
+
+      {slicedMeasurements.length === 0 ? (
+        <p className="muted small">No measurements on this slice yet.</p>
+      ) : (
+        <ul className="measurement-list">
+          {slicedMeasurements.map((m) => {
+            const isSelected = m.id === pane.selectedMeasurementId;
+            const value =
+              m.type === 'distance'
+                ? `${m.distanceMm.toFixed(1)} mm`
+                : `${m.angleDeg.toFixed(1)}°`;
+            return (
+              <li
+                key={m.id}
+                className={
+                  isSelected ? 'measurement-list-row selected' : 'measurement-list-row'
+                }
+              >
+                <button
+                  type="button"
+                  className="measurement-list-button"
+                  onClick={() => onSelect(paneIndex, isSelected ? null : m.id)}
+                >
+                  <span className={`measurement-type-pill measurement-type-${m.type}`}>
+                    {m.type === 'distance' ? 'Distance' : 'Angle'}
+                  </span>
+                  <strong>{value}</strong>
+                  {m.label ? <span className="measurement-list-label">{m.label}</span> : null}
+                </button>
+                {isSelected ? (
+                  <input
+                    className="text-input small"
+                    placeholder="Label (optional)"
+                    value={m.label ?? ''}
+                    onChange={(event) => onRenameSelected(paneIndex, event.target.value)}
+                    aria-label="Rename selected measurement"
+                  />
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }

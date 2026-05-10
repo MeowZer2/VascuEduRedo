@@ -7,7 +7,7 @@ import type { VolumeInfo, VolumePlane } from '../lib/volume';
 // ---------------------------------------------------------------------------
 
 export type ViewerLayout = '1x1' | '1x2' | '1x3' | '2x2';
-export type ViewerToolMode = 'scroll' | 'pan' | 'distance';
+export type ViewerToolMode = 'scroll' | 'pan' | 'distance' | 'angle';
 
 export interface ImagePoint {
   x: number;
@@ -19,15 +19,38 @@ export interface DisplayPoint {
   y: number;
 }
 
-export interface DistanceMeasurement {
+interface BaseMeasurement {
   id: string;
   plane: VolumePlane;
   sliceIndex: number;
+  /** Optional user-supplied label rendered next to the value. */
+  label?: string;
+  /** Sequencing key — higher means more recent. Used to pick the latest distance for quiz. */
+  createdAt: number;
+}
+
+export interface DistanceMeasurement extends BaseMeasurement {
+  type: 'distance';
   start: ImagePoint;
   end: ImagePoint;
   distanceMm: number;
 }
 
+export interface AngleMeasurement extends BaseMeasurement {
+  type: 'angle';
+  /** First click. */
+  a: ImagePoint;
+  /** Vertex (second click). */
+  vertex: ImagePoint;
+  /** Third click. */
+  c: ImagePoint;
+  /** Angle at the vertex in degrees, computed in mm-corrected space. */
+  angleDeg: number;
+}
+
+export type Measurement = DistanceMeasurement | AngleMeasurement;
+
+/** Quiz integration shape — distance-only (kept for backwards compat with QuestionPanel). */
 export interface ViewerMeasurement {
   id: string;
   plane: VolumePlane;
@@ -154,6 +177,54 @@ export function distanceMm(
   const deltaA = (end.x - start.x) * spacing[0];
   const deltaB = (end.y - start.y) * spacing[1];
   return Math.sqrt(deltaA * deltaA + deltaB * deltaB);
+}
+
+/**
+ * Angle at `vertex` (in degrees) between vectors vertex→a and vertex→c. Inputs are
+ * image-pixel coordinates; we weight by the plane's mm spacing so the reported
+ * angle reflects true geometry, not on-screen pixels (image spacing can be
+ * non-square along the depth axis).
+ */
+export function angleDeg(
+  a: ImagePoint,
+  vertex: ImagePoint,
+  c: ImagePoint,
+  spacing: [number, number],
+): number {
+  const sx = spacing[0];
+  const sy = spacing[1];
+  const va = { x: (a.x - vertex.x) * sx, y: (a.y - vertex.y) * sy };
+  const vc = { x: (c.x - vertex.x) * sx, y: (c.y - vertex.y) * sy };
+  const magA = Math.sqrt(va.x * va.x + va.y * va.y);
+  const magC = Math.sqrt(vc.x * vc.x + vc.y * vc.y);
+  if (magA === 0 || magC === 0) return 0;
+  const cosTheta = clamp((va.x * vc.x + va.y * vc.y) / (magA * magC), -1, 1);
+  return (Math.acos(cosTheta) * 180) / Math.PI;
+}
+
+/**
+ * Cheap "is this point near a line segment" hit test, used for click-to-select on
+ * the SVG overlay. Returns the perpendicular distance in display pixels.
+ */
+export function distanceToSegment(
+  point: DisplayPoint,
+  start: DisplayPoint,
+  end: DisplayPoint,
+): number {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) {
+    const ddx = point.x - start.x;
+    const ddy = point.y - start.y;
+    return Math.sqrt(ddx * ddx + ddy * ddy);
+  }
+  const t = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lenSq, 0, 1);
+  const cx = start.x + t * dx;
+  const cy = start.y + t * dy;
+  const ex = point.x - cx;
+  const ey = point.y - cy;
+  return Math.sqrt(ex * ex + ey * ey);
 }
 
 // ---------------------------------------------------------------------------

@@ -123,11 +123,19 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .nrrd-canvas-wrap.panning:active { cursor: grabbing; }
 .nrrd-canvas-wrap canvas { position: absolute; max-width: none; max-height: none; }
 .measurement-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-.measurement-line { stroke: #8fe3ff; stroke-width: 2; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.75)); }
-.measurement-line-selected { stroke: #ffe082; stroke-width: 2.5; filter: drop-shadow(0 1px 4px rgba(255,224,130,0.55)); }
+/* Make individual measurement groups clickable for selection while leaving the rest of the SVG transparent to pointer events. */
+.measurement-svg g.measurement-clickable { pointer-events: auto; cursor: pointer; }
+.measurement-line { stroke: #8fe3ff; stroke-width: 2; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.75)); fill: none; }
+.measurement-line-latest { stroke: #ffe082; filter: drop-shadow(0 1px 4px rgba(255,224,130,0.55)); }
+.measurement-line-selected { stroke: #ff8fb8; stroke-width: 2.75; filter: drop-shadow(0 1px 5px rgba(255,143,184,0.7)); }
+.measurement-line-pending { stroke: #8fe3ff; stroke-width: 1.5; stroke-dasharray: 5 4; opacity: 0.7; }
+/* Invisible thicker stroke under each visible line so users can click near it to select. */
+.measurement-hit { stroke: rgba(0, 0, 0, 0); stroke-width: 14; fill: none; pointer-events: stroke; }
 .measurement-point, .measurement-pending { fill: #10131a; stroke: #8fe3ff; stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+.measurement-point-vertex { stroke: #ffd166; stroke-width: 1.6; }
+.measurement-clickable.selected .measurement-point, .measurement-line-selected ~ .measurement-point { stroke: #ff8fb8; }
 .measurement-pending { fill: rgba(143,227,255,0.28); stroke-dasharray: 2 1.5; }
-.measurement-label { fill: #eff4ff; stroke: rgba(0,0,0,0.8); stroke-width: 4px; paint-order: stroke; font-size: 13px; font-weight: 850; }
+.measurement-label { fill: #eff4ff; stroke: rgba(0,0,0,0.8); stroke-width: 4px; paint-order: stroke; font-size: 13px; font-weight: 850; pointer-events: none; }
 .viewer-state { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); background: rgba(5, 7, 11, 0.86); z-index: 2; }
 .viewer-state-error { gap: 8px; color: #ffd0d5; }
 .viewer-state-info { gap: 8px; color: #d8e6ff; }
@@ -188,6 +196,22 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .layout-1x2 .nrrd-canvas-wrap { height: clamp(320px, 46vh, 440px); }
 .layout-1x3 .nrrd-canvas-wrap { height: clamp(260px, 38vh, 360px); }
 .layout-2x2 .nrrd-canvas-wrap { height: clamp(240px, 32vh, 320px); }
+
+/* Measurement list (active pane / current slice) */
+.measurement-list-card { padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: rgba(0,0,0,0.18); display: grid; gap: 10px; }
+.measurement-list-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.measurement-list-header h4 { margin: 0; font-size: 0.92rem; color: var(--text); }
+.measurement-list-actions { display: flex; gap: 6px; }
+.measurement-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.measurement-list-row { display: grid; grid-template-columns: 1fr 200px; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--border); border-radius: 10px; background: rgba(0,0,0,0.22); }
+.measurement-list-row.selected { border-color: rgba(255,143,184,0.55); background: rgba(255,143,184,0.08); }
+.measurement-list-button { background: transparent; border: 0; color: var(--text); padding: 0; display: flex; align-items: center; gap: 10px; text-align: left; cursor: pointer; min-width: 0; }
+.measurement-list-button strong { font-variant-numeric: tabular-nums; }
+.measurement-list-label { color: var(--muted); font-size: 0.84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.measurement-type-pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; border: 1px solid var(--border); }
+.measurement-type-distance { background: rgba(143,227,255,0.14); color: #cfeeff; border-color: rgba(143,227,255,0.4); }
+.measurement-type-angle { background: rgba(255,209,102,0.14); color: #ffe6a3; border-color: rgba(255,209,102,0.4); }
+.text-input.small { padding: 6px 8px; font-size: 0.86rem; }
 
 /* Crosshair overlay */
 .crosshair-line { stroke: rgba(120, 200, 255, 0.55); stroke-width: 1; stroke-dasharray: 4 3; fill: none; pointer-events: none; }

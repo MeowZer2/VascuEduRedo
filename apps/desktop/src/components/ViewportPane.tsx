@@ -9,6 +9,7 @@ import {
 import {
   PLANE_OPTIONS,
   ZOOM_STEP,
+  angleDeg,
   clamp,
   clearCanvas,
   displayToImagePoint,
@@ -19,11 +20,13 @@ import {
   imageToDisplayPoint,
   paneFromVoxel,
   sanitizeSliceIndex,
+  type AngleMeasurement,
   type CrosshairVoxel,
   type DisplayPoint,
   type DistanceMeasurement,
   type ImagePoint,
   type ImageSize,
+  type Measurement,
   type ViewerToolMode,
 } from './viewerShared';
 
@@ -51,8 +54,11 @@ export interface PaneSnapshot {
   wl: number;
   zoom: number;
   pan: DisplayPoint;
-  measurements: DistanceMeasurement[];
-  pendingPoint: ImagePoint | null;
+  measurements: Measurement[];
+  /** In-progress points for the active tool (1 for distance, 2 for angle). */
+  pendingPoints: ImagePoint[];
+  /** Currently selected measurement id in this pane (or null). */
+  selectedMeasurementId: string | null;
 }
 
 export interface ViewportPaneProps {
@@ -74,9 +80,10 @@ export interface ViewportPaneProps {
   onZoomChange: (zoom: number) => void;
   onPanChange: (pan: DisplayPoint) => void;
   onCrosshairFromPane: (imagePoint: ImagePoint) => void;
-  onPendingPointChange: (point: ImagePoint | null) => void;
-  onAddMeasurement: (measurement: DistanceMeasurement) => void;
+  onPendingPointsChange: (points: ImagePoint[]) => void;
+  onAddMeasurement: (measurement: Measurement) => void;
   onClearMeasurements: () => void;
+  onSelectMeasurement: (id: string | null) => void;
 }
 
 /**
@@ -100,9 +107,10 @@ export function ViewportPane({
   onZoomChange,
   onPanChange,
   onCrosshairFromPane,
-  onPendingPointChange,
+  onPendingPointsChange,
   onAddMeasurement,
   onClearMeasurements,
+  onSelectMeasurement,
 }: ViewportPaneProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -257,7 +265,6 @@ export function ViewportPane({
   );
 
   // Crosshair overlay: project the current voxel into this pane's plane.
-  // Only treat it as "on slice" (drawn solid) when the projected slice matches our slice.
   const crosshairOverlay = useMemo(() => {
     if (!showCrosshair || !crosshairVoxel || !imageSize || !fitRect) return null;
     const projection = paneFromVoxel(crosshairVoxel, pane.plane);
@@ -292,6 +299,11 @@ export function ViewportPane({
     return displayToImagePoint(display, imageSize, fitRect);
   }
 
+  function newMeasurementId(prefix: string): string {
+    measurementCounterRef.current += 1;
+    return `${pane.id}-${prefix}-${Date.now()}-${measurementCounterRef.current}`;
+  }
+
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     onActivate();
     const canStartPan =
@@ -313,22 +325,48 @@ export function ViewportPane({
 
     if (toolMode === 'distance') {
       event.preventDefault();
-      if (!pane.pendingPoint) {
-        onPendingPointChange(point);
+      if (pane.pendingPoints.length === 0) {
+        onPendingPointsChange([point]);
         return;
       }
+      const [start] = pane.pendingPoints;
       const spacing = getPlaneSpacing(volume.spacing, pane.plane);
-      measurementCounterRef.current += 1;
       const measurement: DistanceMeasurement = {
-        id: `${pane.id}-m-${Date.now()}-${measurementCounterRef.current}`,
+        type: 'distance',
+        id: newMeasurementId('d'),
         plane: pane.plane,
         sliceIndex,
-        start: pane.pendingPoint,
+        start,
         end: point,
-        distanceMm: distanceMm(pane.pendingPoint, point, spacing),
+        distanceMm: distanceMm(start, point, spacing),
+        createdAt: Date.now(),
       };
       onAddMeasurement(measurement);
-      onPendingPointChange(null);
+      onPendingPointsChange([]);
+      return;
+    }
+
+    if (toolMode === 'angle') {
+      event.preventDefault();
+      if (pane.pendingPoints.length < 2) {
+        onPendingPointsChange([...pane.pendingPoints, point]);
+        return;
+      }
+      const [a, vertex] = pane.pendingPoints;
+      const spacing = getPlaneSpacing(volume.spacing, pane.plane);
+      const measurement: AngleMeasurement = {
+        type: 'angle',
+        id: newMeasurementId('a'),
+        plane: pane.plane,
+        sliceIndex,
+        a,
+        vertex,
+        c: point,
+        angleDeg: angleDeg(a, vertex, point, spacing),
+        createdAt: Date.now(),
+      };
+      onAddMeasurement(measurement);
+      onPendingPointsChange([]);
       return;
     }
 
@@ -398,6 +436,15 @@ export function ViewportPane({
   const sliceLabel = `${sliceIndex + 1} / ${totalSlices}`;
   const imageSizeLabel = imageSize ? `${imageSize.width} x ${imageSize.height}` : '-';
 
+  function handleSelectMeasurement(event: PointerEvent, id: string) {
+    // Stop the canvas-wrap from also receiving a pointerdown (which would, e.g.,
+    // start a distance click in distance mode or relocate the crosshair).
+    event.stopPropagation();
+    event.preventDefault();
+    onActivate();
+    onSelectMeasurement(id);
+  }
+
   return (
     <article
       className={`viewer-pane${active ? ' viewer-pane-active' : ''}`}
@@ -423,7 +470,7 @@ export function ViewportPane({
 
       <div
         ref={panelRef}
-        className={`canvas-wrap nrrd-canvas-wrap ${toolMode === 'distance' ? 'measuring' : ''} ${toolMode === 'pan' ? 'panning' : ''}`}
+        className={`canvas-wrap nrrd-canvas-wrap ${toolMode === 'distance' || toolMode === 'angle' ? 'measuring' : ''} ${toolMode === 'pan' ? 'panning' : ''}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={endPanDrag}
@@ -457,47 +504,63 @@ export function ViewportPane({
             viewBox={`0 0 ${panelSize.width} ${panelSize.height}`}
             aria-hidden="true"
           >
-            {visibleMeasurements.map((measurement, idx) => {
+            {visibleMeasurements.map((measurement) => {
+              const isSelected = measurement.id === pane.selectedMeasurementId;
               const isLatest =
-                isLatestMeasurementOwner &&
-                latestMeasurementId === measurement.id &&
-                idx === visibleMeasurements.length - 1;
-              const start = imageToDisplayPoint(measurement.start, fitRect);
-              const end = imageToDisplayPoint(measurement.end, fitRect);
-              const labelX = clamp((start.x + end.x) / 2, 18, panelSize.width - 18);
-              const labelY = clamp((start.y + end.y) / 2 - 10, 18, panelSize.height - 18);
-              return (
-                <g key={measurement.id}>
-                  <line
-                    x1={start.x}
-                    y1={start.y}
-                    x2={end.x}
-                    y2={end.y}
-                    className={
-                      isLatest ? 'measurement-line measurement-line-selected' : 'measurement-line'
-                    }
-                    vectorEffect="non-scaling-stroke"
+                isLatestMeasurementOwner && latestMeasurementId === measurement.id;
+              if (measurement.type === 'distance') {
+                return (
+                  <DistanceOverlay
+                    key={measurement.id}
+                    measurement={measurement}
+                    fitRect={fitRect}
+                    panelSize={panelSize}
+                    isSelected={isSelected}
+                    isLatest={isLatest}
+                    onSelect={(e) => handleSelectMeasurement(e, measurement.id)}
                   />
-                  <circle cx={start.x} cy={start.y} r="4.5" className="measurement-point" />
-                  <circle cx={end.x} cy={end.y} r="4.5" className="measurement-point" />
-                  <text
-                    x={labelX}
-                    y={labelY}
-                    className="measurement-label"
-                    textAnchor="middle"
-                  >
-                    {measurement.distanceMm.toFixed(1)} mm
-                  </text>
-                </g>
+                );
+              }
+              return (
+                <AngleOverlay
+                  key={measurement.id}
+                  measurement={measurement}
+                  fitRect={fitRect}
+                  panelSize={panelSize}
+                  isSelected={isSelected}
+                  onSelect={(e) => handleSelectMeasurement(e, measurement.id)}
+                />
               );
             })}
-            {pane.pendingPoint && fitRect ? (
-              <circle
-                cx={imageToDisplayPoint(pane.pendingPoint, fitRect).x}
-                cy={imageToDisplayPoint(pane.pendingPoint, fitRect).y}
-                r="5"
-                className="measurement-pending"
-              />
+            {/* Pending points for the in-progress tool. */}
+            {pane.pendingPoints.map((point, idx) => {
+              const display = imageToDisplayPoint(point, fitRect);
+              return (
+                <circle
+                  key={`pending-${idx}`}
+                  cx={display.x}
+                  cy={display.y}
+                  r="5"
+                  className="measurement-pending"
+                />
+              );
+            })}
+            {/* Pending segment lines for the angle tool (a→vertex visible after vertex click). */}
+            {toolMode === 'angle' && pane.pendingPoints.length === 2 ? (
+              (() => {
+                const a = imageToDisplayPoint(pane.pendingPoints[0], fitRect);
+                const v = imageToDisplayPoint(pane.pendingPoints[1], fitRect);
+                return (
+                  <line
+                    x1={a.x}
+                    y1={a.y}
+                    x2={v.x}
+                    y2={v.y}
+                    className="measurement-line measurement-line-pending"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                );
+              })()
             ) : null}
             {crosshairOverlay
               ? renderCrosshair(crosshairOverlay.display, panelSize, crosshairOverlay.onSlice)
@@ -534,6 +597,132 @@ export function ViewportPane({
         </button>
       </footer>
     </article>
+  );
+}
+
+interface DistanceOverlayProps {
+  measurement: DistanceMeasurement;
+  fitRect: NonNullable<ReturnType<typeof fitImageToPanel>>;
+  panelSize: ImageSize;
+  isSelected: boolean;
+  isLatest: boolean;
+  onSelect: (event: PointerEvent) => void;
+}
+
+function DistanceOverlay({
+  measurement,
+  fitRect,
+  panelSize,
+  isSelected,
+  isLatest,
+  onSelect,
+}: DistanceOverlayProps) {
+  const start = imageToDisplayPoint(measurement.start, fitRect);
+  const end = imageToDisplayPoint(measurement.end, fitRect);
+  const labelX = clamp((start.x + end.x) / 2, 18, panelSize.width - 18);
+  const labelY = clamp((start.y + end.y) / 2 - 10, 18, panelSize.height - 18);
+  const lineClass = isSelected
+    ? 'measurement-line measurement-line-selected'
+    : isLatest
+      ? 'measurement-line measurement-line-latest'
+      : 'measurement-line';
+  const valueLabel = `${measurement.distanceMm.toFixed(1)} mm`;
+  const text = measurement.label
+    ? `${measurement.label} · ${valueLabel}`
+    : valueLabel;
+  return (
+    <g className="measurement-clickable" onPointerDown={onSelect}>
+      <line
+        x1={start.x}
+        y1={start.y}
+        x2={end.x}
+        y2={end.y}
+        className="measurement-hit"
+        vectorEffect="non-scaling-stroke"
+      />
+      <line
+        x1={start.x}
+        y1={start.y}
+        x2={end.x}
+        y2={end.y}
+        className={lineClass}
+        vectorEffect="non-scaling-stroke"
+      />
+      <circle cx={start.x} cy={start.y} r="4.5" className="measurement-point" />
+      <circle cx={end.x} cy={end.y} r="4.5" className="measurement-point" />
+      <text x={labelX} y={labelY} className="measurement-label" textAnchor="middle">
+        {text}
+      </text>
+    </g>
+  );
+}
+
+interface AngleOverlayProps {
+  measurement: AngleMeasurement;
+  fitRect: NonNullable<ReturnType<typeof fitImageToPanel>>;
+  panelSize: ImageSize;
+  isSelected: boolean;
+  onSelect: (event: PointerEvent) => void;
+}
+
+function AngleOverlay({
+  measurement,
+  fitRect,
+  panelSize,
+  isSelected,
+  onSelect,
+}: AngleOverlayProps) {
+  const a = imageToDisplayPoint(measurement.a, fitRect);
+  const v = imageToDisplayPoint(measurement.vertex, fitRect);
+  const c = imageToDisplayPoint(measurement.c, fitRect);
+  const labelX = clamp(v.x + 12, 18, panelSize.width - 18);
+  const labelY = clamp(v.y - 12, 18, panelSize.height - 18);
+  const lineClass = isSelected
+    ? 'measurement-line measurement-line-selected'
+    : 'measurement-line';
+  const valueLabel = `${measurement.angleDeg.toFixed(1)}°`;
+  const text = measurement.label ? `${measurement.label} · ${valueLabel}` : valueLabel;
+  return (
+    <g className="measurement-clickable" onPointerDown={onSelect}>
+      <line
+        x1={a.x}
+        y1={a.y}
+        x2={v.x}
+        y2={v.y}
+        className="measurement-hit"
+        vectorEffect="non-scaling-stroke"
+      />
+      <line
+        x1={v.x}
+        y1={v.y}
+        x2={c.x}
+        y2={c.y}
+        className="measurement-hit"
+        vectorEffect="non-scaling-stroke"
+      />
+      <line
+        x1={a.x}
+        y1={a.y}
+        x2={v.x}
+        y2={v.y}
+        className={lineClass}
+        vectorEffect="non-scaling-stroke"
+      />
+      <line
+        x1={v.x}
+        y1={v.y}
+        x2={c.x}
+        y2={c.y}
+        className={lineClass}
+        vectorEffect="non-scaling-stroke"
+      />
+      <circle cx={a.x} cy={a.y} r="4.5" className="measurement-point" />
+      <circle cx={v.x} cy={v.y} r="5.5" className="measurement-point measurement-point-vertex" />
+      <circle cx={c.x} cy={c.y} r="4.5" className="measurement-point" />
+      <text x={labelX} y={labelY} className="measurement-label" textAnchor="start">
+        {text}
+      </text>
+    </g>
   );
 }
 
