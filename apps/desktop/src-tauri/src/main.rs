@@ -4,8 +4,9 @@ mod volume;
 use db::{
     admin_create_case, admin_create_question, admin_delete_case, admin_delete_question,
     admin_get_case_with_questions, admin_list_cases, admin_reorder_questions, admin_update_case,
-    admin_update_question, complete_attempt, create_attempt, get_case, get_case_questions,
-    list_attempts, list_cases, open_and_initialize, submit_question_response, DbState,
+    admin_update_question, complete_attempt, create_attempt, get_attempt_details, get_case,
+    get_case_questions, get_recent_activity, list_attempts, list_cases, open_and_initialize,
+    progress_by_case, progress_summary, submit_question_response, DbState,
 };
 use serde::Serialize;
 use tauri::Manager;
@@ -68,7 +69,11 @@ fn main() {
             admin_create_question,
             admin_update_question,
             admin_delete_question,
-            admin_reorder_questions
+            admin_reorder_questions,
+            progress_summary,
+            progress_by_case,
+            get_recent_activity,
+            get_attempt_details
         ])
         .run(tauri::generate_context!())
         .expect("error while running VascEdu desktop app");

@@ -61,7 +61,7 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
     }
   }
 
-  function next() {
+  async function next() {
     if (!submittedResult) return;
     const updatedResults = [...results, submittedResult];
     setResults(updatedResults);
@@ -80,8 +80,9 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
         questionResults: updatedResults,
       };
       // Mark the SQLite attempt complete with the final score (no-op in browser mode).
+      // Await before navigating so the Progress page's first refetch sees the completed row.
       if (attemptId) {
-        void completeAttempt(attemptId, attempt.score);
+        await completeAttempt(attemptId, attempt.score);
       }
       onComplete(attempt);
       return;
@@ -291,7 +292,7 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
             Submit answer
           </button>
         ) : (
-          <button className="primary-button" onClick={next}>
+          <button className="primary-button" onClick={() => void next()}>
             {isLast ? 'Finish case' : 'Next question'}
           </button>
         )}

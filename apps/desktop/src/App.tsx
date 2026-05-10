@@ -19,6 +19,8 @@ export default function App() {
   // once the backend responds. Browser mode keeps the sample data.
   const [cases, setCases] = useState<VascCase[]>(sampleCases);
   const [selectedCaseId, setSelectedCaseId] = useState<string>(sampleCases[0]?.id ?? '');
+  // Bumped each time an attempt completes so the Progress page refetches its SQLite stats.
+  const [progressRefreshKey, setProgressRefreshKey] = useState(0);
   const selectedCase = useMemo<VascCase | undefined>(
     () => cases.find((item) => item.id === selectedCaseId),
     [cases, selectedCaseId],
@@ -71,9 +73,16 @@ export default function App() {
         <CaseDetailPage vascCase={selectedCase} onBack={() => setScreen('cases')} onStart={() => startCase(selectedCase.id)} />
       )}
       {screen === 'training' && selectedCase && (
-        <TrainingWorkspace vascCase={selectedCase} onFinish={() => setScreen('progress')} onChooseCase={() => setScreen('cases')} />
+        <TrainingWorkspace
+          vascCase={selectedCase}
+          onFinish={() => {
+            setProgressRefreshKey((k) => k + 1);
+            setScreen('progress');
+          }}
+          onChooseCase={() => setScreen('cases')}
+        />
       )}
-      {screen === 'progress' && <ProgressPage />}
+      {screen === 'progress' && <ProgressPage refreshKey={progressRefreshKey} />}
       {screen === 'admin' && (
         <AdminContentPage
           onCasesChanged={() => {

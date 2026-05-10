@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
@@ -850,4 +851,611 @@ pub fn admin_reorder_questions(
     tx.commit()
         .map_err(|e| format!("admin_reorder_questions commit failed: {e}"))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Progress + attempt review (v0.8)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressSummary {
+    pub total_attempts: i64,
+    pub completed_attempts: i64,
+    pub cases_completed: i64,
+    pub total_questions_answered: i64,
+    pub correct_answers: i64,
+    pub accuracy_percent: f64,
+    pub average_score: f64,
+    pub best_score: f64,
+    pub average_percent: f64,
+    pub best_percent: f64,
+    pub measurement_questions_answered: i64,
+    pub average_measurement_error: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseProgress {
+    pub case_id: String,
+    pub case_title: String,
+    pub category: String,
+    pub max_score: f64,
+    pub attempts: i64,
+    pub completed: i64,
+    pub best_score: Option<f64>,
+    pub latest_score: Option<f64>,
+    pub average_score: Option<f64>,
+    pub best_percent: Option<f64>,
+    pub latest_percent: Option<f64>,
+    pub average_percent: Option<f64>,
+    pub last_attempt_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptSummary {
+    pub id: String,
+    pub case_id: String,
+    pub case_title: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub score: Option<f64>,
+    pub max_score: f64,
+    pub percent: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasurementDetail {
+    pub plane: String,
+    pub unit: String,
+    pub correct_value: f64,
+    pub tolerance: f64,
+    pub submitted_value: Option<f64>,
+    pub difference: Option<f64>,
+    pub within_tolerance: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptQuestionDetail {
+    pub response_id: Option<String>,
+    pub question_id: String,
+    pub order_index: i64,
+    pub r#type: String,
+    pub prompt: String,
+    pub points: f64,
+    /// Full question data_json so the frontend can render expected answers etc.
+    pub question_data: Value,
+    /// The submitted answer (parsed JSON). `Value::Null` if the learner skipped this one.
+    pub answer: Value,
+    pub is_correct: Option<bool>,
+    pub submitted_at: Option<String>,
+    /// Pre-computed comparison for measurement questions (mirrors the training feedback box).
+    pub measurement: Option<MeasurementDetail>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptDetails {
+    pub attempt: AttemptSummary,
+    pub questions: Vec<AttemptQuestionDetail>,
+}
+
+struct QuestionMeta {
+    case_id: String,
+    qtype: String,
+    points: f64,
+    data: Value,
+}
+
+fn load_questions_meta(conn: &Connection) -> Result<HashMap<String, QuestionMeta>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, case_id, type, data_json FROM questions")
+        .map_err(|e| format!("load_questions_meta prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| format!("load_questions_meta query failed: {e}"))?;
+
+    let mut map = HashMap::new();
+    for r in rows {
+        let (id, case_id, qtype, data_json) =
+            r.map_err(|e| format!("load_questions_meta row failed: {e}"))?;
+        let data: Value = serde_json::from_str(&data_json).unwrap_or(Value::Null);
+        let points = data.get("points").and_then(Value::as_f64).unwrap_or(1.0);
+        map.insert(
+            id,
+            QuestionMeta {
+                case_id,
+                qtype,
+                points,
+                data,
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Sum of `points` across all questions in each case.
+fn case_max_scores_from(meta: &HashMap<String, QuestionMeta>) -> HashMap<String, f64> {
+    let mut map: HashMap<String, f64> = HashMap::new();
+    for q in meta.values() {
+        *map.entry(q.case_id.clone()).or_insert(0.0) += q.points;
+    }
+    map
+}
+
+fn percent_of(score: f64, max: f64) -> Option<f64> {
+    if max > 0.0 {
+        Some(100.0 * score / max)
+    } else {
+        None
+    }
+}
+
+fn build_measurement_detail(question_data: &Value, answer: &Value) -> Option<MeasurementDetail> {
+    let plane = question_data
+        .get("plane")
+        .and_then(Value::as_str)
+        .unwrap_or("axial")
+        .to_string();
+    let unit = question_data
+        .get("unit")
+        .and_then(Value::as_str)
+        .unwrap_or("mm")
+        .to_string();
+    let correct_value = question_data.get("correctValue").and_then(Value::as_f64)?;
+    let tolerance = question_data
+        .get("tolerance")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let submitted_value = answer.as_f64();
+    let difference = submitted_value.map(|v| (v - correct_value).abs());
+    let within_tolerance = difference.map(|d| d <= tolerance);
+    Some(MeasurementDetail {
+        plane,
+        unit,
+        correct_value,
+        tolerance,
+        submitted_value,
+        difference,
+        within_tolerance,
+    })
+}
+
+#[tauri::command]
+pub fn progress_summary(state: State<DbState>) -> Result<ProgressSummary, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+
+    let total_attempts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM attempts", [], |r| r.get(0))
+        .map_err(|e| format!("progress_summary count attempts failed: {e}"))?;
+    let completed_attempts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM attempts WHERE completed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("progress_summary completed count failed: {e}"))?;
+    let cases_completed: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT case_id) FROM attempts WHERE completed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("progress_summary distinct cases failed: {e}"))?;
+
+    let total_responses: i64 = conn
+        .query_row("SELECT COUNT(*) FROM question_responses", [], |r| r.get(0))
+        .map_err(|e| format!("progress_summary count responses failed: {e}"))?;
+    let correct_responses: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM question_responses WHERE is_correct = 1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("progress_summary correct responses failed: {e}"))?;
+
+    let accuracy_percent = if total_responses > 0 {
+        100.0 * correct_responses as f64 / total_responses as f64
+    } else {
+        0.0
+    };
+
+    let questions_meta = load_questions_meta(&conn)?;
+    let max_scores = case_max_scores_from(&questions_meta);
+
+    let mut completed_scores: Vec<f64> = Vec::new();
+    let mut completed_percents: Vec<f64> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT case_id, score FROM attempts WHERE completed_at IS NOT NULL AND score IS NOT NULL",
+            )
+            .map_err(|e| format!("progress_summary scores prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|e| format!("progress_summary scores query failed: {e}"))?;
+        for r in rows {
+            let (case_id, score) = r.map_err(|e| format!("progress_summary scores row failed: {e}"))?;
+            completed_scores.push(score);
+            if let Some(max) = max_scores.get(&case_id).copied() {
+                if let Some(p) = percent_of(score, max) {
+                    completed_percents.push(p);
+                }
+            }
+        }
+    }
+    let average_score = if !completed_scores.is_empty() {
+        completed_scores.iter().sum::<f64>() / completed_scores.len() as f64
+    } else {
+        0.0
+    };
+    let best_score = completed_scores.iter().cloned().fold(0.0_f64, f64::max);
+    let average_percent = if !completed_percents.is_empty() {
+        completed_percents.iter().sum::<f64>() / completed_percents.len() as f64
+    } else {
+        0.0
+    };
+    let best_percent = completed_percents.iter().cloned().fold(0.0_f64, f64::max);
+
+    // Measurement-specific aggregation: walk responses for measurement questions.
+    let mut measurement_questions_answered: i64 = 0;
+    let mut measurement_errors: Vec<f64> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT question_id, answer_json FROM question_responses",
+            )
+            .map_err(|e| format!("progress_summary measurement prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("progress_summary measurement query failed: {e}"))?;
+        for r in rows {
+            let (qid, answer_json) =
+                r.map_err(|e| format!("progress_summary measurement row failed: {e}"))?;
+            let Some(meta) = questions_meta.get(&qid) else { continue };
+            if meta.qtype != "measurement" {
+                continue;
+            }
+            measurement_questions_answered += 1;
+            let answer: Value = serde_json::from_str(&answer_json).unwrap_or(Value::Null);
+            if let (Some(expected), Some(submitted)) = (
+                meta.data.get("correctValue").and_then(Value::as_f64),
+                answer.as_f64(),
+            ) {
+                measurement_errors.push((submitted - expected).abs());
+            }
+        }
+    }
+    let average_measurement_error = if !measurement_errors.is_empty() {
+        Some(measurement_errors.iter().sum::<f64>() / measurement_errors.len() as f64)
+    } else {
+        None
+    };
+
+    Ok(ProgressSummary {
+        total_attempts,
+        completed_attempts,
+        cases_completed,
+        total_questions_answered: total_responses,
+        correct_answers: correct_responses,
+        accuracy_percent,
+        average_score,
+        best_score,
+        average_percent,
+        best_percent,
+        measurement_questions_answered,
+        average_measurement_error,
+    })
+}
+
+#[tauri::command]
+pub fn progress_by_case(state: State<DbState>) -> Result<Vec<CaseProgress>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let questions_meta = load_questions_meta(&conn)?;
+    let max_scores = case_max_scores_from(&questions_meta);
+
+    // Pull all attempts joined with case info.
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT a.case_id, c.title, c.category, a.started_at, a.completed_at, a.score
+            FROM attempts a
+            INNER JOIN cases c ON c.id = a.case_id
+            ORDER BY a.case_id ASC, a.started_at DESC
+            "#,
+        )
+        .map_err(|e| format!("progress_by_case prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<f64>>(5)?,
+            ))
+        })
+        .map_err(|e| format!("progress_by_case query failed: {e}"))?;
+
+    struct Bucket {
+        case_id: String,
+        case_title: String,
+        category: String,
+        max_score: f64,
+        attempts: i64,
+        completed: i64,
+        best_score: Option<f64>,
+        latest_score: Option<f64>,
+        scores: Vec<f64>,
+        last_attempt_at: Option<String>,
+    }
+    let mut buckets: HashMap<String, Bucket> = HashMap::new();
+
+    for r in rows {
+        let (case_id, title, category, started_at, completed_at, score) =
+            r.map_err(|e| format!("progress_by_case row failed: {e}"))?;
+        let max_score = max_scores.get(&case_id).copied().unwrap_or(0.0);
+        let bucket = buckets.entry(case_id.clone()).or_insert_with(|| Bucket {
+            case_id: case_id.clone(),
+            case_title: title,
+            category,
+            max_score,
+            attempts: 0,
+            completed: 0,
+            best_score: None,
+            latest_score: None,
+            scores: Vec::new(),
+            last_attempt_at: None,
+        });
+        bucket.attempts += 1;
+        // Rows are ordered by started_at DESC, so the first row we see per case is the latest.
+        if bucket.last_attempt_at.is_none() {
+            bucket.last_attempt_at = Some(started_at);
+            bucket.latest_score = score;
+        }
+        if completed_at.is_some() {
+            bucket.completed += 1;
+        }
+        if let Some(s) = score {
+            bucket.scores.push(s);
+            bucket.best_score = Some(bucket.best_score.map_or(s, |b| b.max(s)));
+        }
+    }
+
+    let mut out: Vec<CaseProgress> = buckets
+        .into_values()
+        .map(|b| {
+            let average_score = if !b.scores.is_empty() {
+                Some(b.scores.iter().sum::<f64>() / b.scores.len() as f64)
+            } else {
+                None
+            };
+            let best_percent = b.best_score.and_then(|s| percent_of(s, b.max_score));
+            let latest_percent = b.latest_score.and_then(|s| percent_of(s, b.max_score));
+            let average_percent = average_score.and_then(|s| percent_of(s, b.max_score));
+            CaseProgress {
+                case_id: b.case_id,
+                case_title: b.case_title,
+                category: b.category,
+                max_score: b.max_score,
+                attempts: b.attempts,
+                completed: b.completed,
+                best_score: b.best_score,
+                latest_score: b.latest_score,
+                average_score,
+                best_percent,
+                latest_percent,
+                average_percent,
+                last_attempt_at: b.last_attempt_at,
+            }
+        })
+        .collect();
+
+    out.sort_by(|a, b| b.last_attempt_at.cmp(&a.last_attempt_at));
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn get_recent_activity(
+    state: State<DbState>,
+    limit: Option<i64>,
+) -> Result<Vec<AttemptSummary>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let limit = limit.unwrap_or(10).clamp(1, 200);
+    let questions_meta = load_questions_meta(&conn)?;
+    let max_scores = case_max_scores_from(&questions_meta);
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score
+            FROM attempts a
+            INNER JOIN cases c ON c.id = a.case_id
+            ORDER BY a.started_at DESC
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|e| format!("get_recent_activity prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<f64>>(5)?,
+            ))
+        })
+        .map_err(|e| format!("get_recent_activity query failed: {e}"))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        let (id, case_id, case_title, started_at, completed_at, score) =
+            r.map_err(|e| format!("get_recent_activity row failed: {e}"))?;
+        let max_score = max_scores.get(&case_id).copied().unwrap_or(0.0);
+        let percent = score.and_then(|s| percent_of(s, max_score));
+        out.push(AttemptSummary {
+            id,
+            case_id,
+            case_title,
+            started_at,
+            completed_at,
+            score,
+            max_score,
+            percent,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn get_attempt_details(
+    state: State<DbState>,
+    attempt_id: String,
+) -> Result<Option<AttemptDetails>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+
+    let attempt_row = conn
+        .query_row(
+            r#"
+            SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score
+            FROM attempts a
+            INNER JOIN cases c ON c.id = a.case_id
+            WHERE a.id = ?1
+            LIMIT 1
+            "#,
+            params![attempt_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<f64>>(5)?,
+                ))
+            },
+        )
+        .ok();
+    let Some((id, case_id, case_title, started_at, completed_at, score)) = attempt_row else {
+        return Ok(None);
+    };
+
+    let questions_meta = load_questions_meta(&conn)?;
+    let max_score = case_max_scores_from(&questions_meta)
+        .get(&case_id)
+        .copied()
+        .unwrap_or(0.0);
+    let percent = score.and_then(|s| percent_of(s, max_score));
+
+    let attempt = AttemptSummary {
+        id: id.clone(),
+        case_id: case_id.clone(),
+        case_title,
+        started_at,
+        completed_at,
+        score,
+        max_score,
+        percent,
+    };
+
+    // Map question_id → response row (latest if duplicates).
+    let mut response_map: HashMap<String, (String, Value, bool, String)> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, question_id, answer_json, is_correct, submitted_at FROM question_responses WHERE attempt_id = ?1 ORDER BY submitted_at ASC",
+            )
+            .map_err(|e| format!("get_attempt_details responses prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map(params![id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| format!("get_attempt_details responses query failed: {e}"))?;
+        for r in rows {
+            let (response_id, qid, answer_json, is_correct, submitted_at) =
+                r.map_err(|e| format!("get_attempt_details responses row failed: {e}"))?;
+            let answer: Value = serde_json::from_str(&answer_json).unwrap_or(Value::Null);
+            // Last write wins (rows are ordered ascending by submitted_at).
+            response_map.insert(
+                qid,
+                (response_id, answer, is_correct != 0, submitted_at),
+            );
+        }
+    }
+
+    // Fetch the case's questions in order so the review respects authoring order even
+    // when the learner skipped some or didn't reach the end.
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+        )
+        .map_err(|e| format!("get_attempt_details questions prepare failed: {e}"))?;
+    let q_rows = stmt
+        .query_map(params![case_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| format!("get_attempt_details questions query failed: {e}"))?;
+
+    let mut questions: Vec<AttemptQuestionDetail> = Vec::new();
+    for r in q_rows {
+        let (qid, order_index, qtype, prompt, data_json) =
+            r.map_err(|e| format!("get_attempt_details questions row failed: {e}"))?;
+        let question_data: Value = serde_json::from_str(&data_json).unwrap_or(Value::Null);
+        let points = question_data
+            .get("points")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let response = response_map.remove(&qid);
+        let (response_id, answer, is_correct, submitted_at) = match response {
+            Some((rid, ans, ok, ts)) => (Some(rid), ans, Some(ok), Some(ts)),
+            None => (None, Value::Null, None, None),
+        };
+        let measurement = if qtype == "measurement" {
+            build_measurement_detail(&question_data, &answer)
+        } else {
+            None
+        };
+        questions.push(AttemptQuestionDetail {
+            response_id,
+            question_id: qid,
+            order_index,
+            r#type: qtype,
+            prompt,
+            points,
+            question_data,
+            answer,
+            is_correct,
+            submitted_at,
+            measurement,
+        });
+    }
+
+    Ok(Some(AttemptDetails { attempt, questions }))
 }
