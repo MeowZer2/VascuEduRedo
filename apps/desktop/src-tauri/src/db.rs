@@ -78,6 +78,8 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
 pub fn open_and_initialize(app: &AppHandle) -> Result<Connection, String> {
     let path = database_path(app)?;
     let conn = Connection::open(&path).map_err(|e| format!("Cannot open SQLite at {path:?}: {e}"))?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|e| format!("Cannot enable foreign keys: {e}"))?;
     initialize_schema(&conn)?;
     seed_if_empty(&conn)?;
     Ok(conn)
@@ -501,3 +503,351 @@ pub fn list_attempts(
 }
 
 const SEED_JSON: &str = include_str!("seed/aaa_seed.json");
+
+// ---------------------------------------------------------------------------
+// Admin authoring commands (v0.7)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminCaseInput {
+    pub slug: String,
+    pub title: String,
+    pub summary: String,
+    pub category: String,
+    pub volume_path: Option<String>,
+    /// Extended payload (patient, learning objectives, tags, etc.). When omitted on
+    /// create we generate a minimal default; on update we merge into the existing blob.
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminQuestionInput {
+    pub r#type: String,
+    pub prompt: String,
+    /// Type-specific payload (choices, correctValue, plane, tolerance, explanation, points, hints, …).
+    pub data: Value,
+    pub order_index: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseWithQuestions {
+    #[serde(flatten)]
+    pub case: CaseRow,
+    pub questions: Vec<QuestionRow>,
+}
+
+/// Ensure `data.volume.path` and `data.categoryId` mirror the row-level columns so the
+/// frontend reconstruction (which prefers nested values) stays consistent with the DB.
+fn merge_case_data(mut data: Value, volume_path: &Option<String>, category: &str) -> Value {
+    if !data.is_object() {
+        data = serde_json::json!({});
+    }
+    if let Some(obj) = data.as_object_mut() {
+        // categoryId mirrors the top-level category column.
+        obj.insert("categoryId".to_string(), Value::String(category.to_string()));
+
+        // Ensure a volume object exists; sync its path with volume_path.
+        let volume_entry = obj
+            .entry("volume".to_string())
+            .or_insert_with(|| {
+                serde_json::json!({
+                    "type": "nrrd",
+                    "path": Value::Null,
+                    "description": ""
+                })
+            });
+        if let Some(vobj) = volume_entry.as_object_mut() {
+            let path_val = match volume_path {
+                Some(p) if !p.is_empty() => Value::String(p.clone()),
+                _ => Value::Null,
+            };
+            vobj.insert("path".to_string(), path_val);
+            vobj.entry("type".to_string())
+                .or_insert_with(|| Value::String("nrrd".to_string()));
+            vobj.entry("description".to_string())
+                .or_insert_with(|| Value::String(String::new()));
+        }
+    }
+    data
+}
+
+fn fetch_case_row(conn: &Connection, case_id: &str) -> Result<CaseRow, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, slug, title, summary, category, volume_path, data_json FROM cases WHERE id = ?1",
+        )
+        .map_err(|e| format!("fetch_case_row prepare failed: {e}"))?;
+    let row = stmt
+        .query_row(params![case_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|e| format!("fetch_case_row query failed: {e}"))?;
+    parse_case_row(row.0, row.1, row.2, row.3, row.4, row.5, row.6)
+}
+
+fn fetch_question_row(conn: &Connection, question_id: &str) -> Result<QuestionRow, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE id = ?1",
+        )
+        .map_err(|e| format!("fetch_question_row prepare failed: {e}"))?;
+    let row = stmt
+        .query_row(params![question_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|e| format!("fetch_question_row query failed: {e}"))?;
+    parse_question_row(row.0, row.1, row.2, row.3, row.4, row.5)
+}
+
+#[tauri::command]
+pub fn admin_list_cases(state: State<DbState>) -> Result<Vec<CaseRow>, String> {
+    list_cases(state)
+}
+
+#[tauri::command]
+pub fn admin_get_case_with_questions(
+    state: State<DbState>,
+    case_id: String,
+) -> Result<Option<CaseWithQuestions>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cases WHERE id = ?1",
+            params![case_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("admin_get_case_with_questions exists check failed: {e}"))?;
+    if exists == 0 {
+        return Ok(None);
+    }
+    let case = fetch_case_row(&conn, &case_id)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+        )
+        .map_err(|e| format!("admin_get_case_with_questions prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(params![case_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|e| format!("admin_get_case_with_questions query failed: {e}"))?;
+
+    let mut questions = Vec::new();
+    for row in rows {
+        let (id, case_id, order_index, qtype, prompt, data_json) =
+            row.map_err(|e| format!("admin_get_case_with_questions row failed: {e}"))?;
+        questions.push(parse_question_row(id, case_id, order_index, qtype, prompt, data_json)?);
+    }
+    Ok(Some(CaseWithQuestions { case, questions }))
+}
+
+#[tauri::command]
+pub fn admin_create_case(state: State<DbState>, input: AdminCaseInput) -> Result<CaseRow, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let id = Uuid::new_v4().to_string();
+    let data = merge_case_data(
+        input.data.unwrap_or_else(|| serde_json::json!({})),
+        &input.volume_path,
+        &input.category,
+    );
+    let data_json = data.to_string();
+    conn.execute(
+        "INSERT INTO cases (id, slug, title, summary, category, volume_path, data_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, input.slug, input.title, input.summary, input.category, input.volume_path, data_json],
+    )
+    .map_err(|e| format!("admin_create_case insert failed: {e}"))?;
+    fetch_case_row(&conn, &id)
+}
+
+#[tauri::command]
+pub fn admin_update_case(
+    state: State<DbState>,
+    case_id: String,
+    input: AdminCaseInput,
+) -> Result<CaseRow, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+
+    // If caller didn't supply data, preserve the existing blob and only patch the
+    // mirrored volume.path / categoryId fields.
+    let base_data = match input.data {
+        Some(d) => d,
+        None => {
+            let mut stmt = conn
+                .prepare("SELECT data_json FROM cases WHERE id = ?1")
+                .map_err(|e| format!("admin_update_case prepare failed: {e}"))?;
+            let data_json: String = stmt
+                .query_row(params![case_id], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("admin_update_case existing data fetch failed: {e}"))?;
+            serde_json::from_str(&data_json).unwrap_or_else(|_| serde_json::json!({}))
+        }
+    };
+    let data = merge_case_data(base_data, &input.volume_path, &input.category);
+    let data_json = data.to_string();
+
+    let updated = conn
+        .execute(
+            "UPDATE cases SET slug = ?1, title = ?2, summary = ?3, category = ?4, volume_path = ?5, data_json = ?6 WHERE id = ?7",
+            params![input.slug, input.title, input.summary, input.category, input.volume_path, data_json, case_id],
+        )
+        .map_err(|e| format!("admin_update_case update failed: {e}"))?;
+    if updated == 0 {
+        return Err(format!("No case found with id {case_id}"));
+    }
+    fetch_case_row(&conn, &case_id)
+}
+
+#[tauri::command]
+pub fn admin_delete_case(state: State<DbState>, case_id: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    // Manual cascade so this works even if foreign_keys pragma was missed.
+    conn.execute("DELETE FROM question_responses WHERE attempt_id IN (SELECT id FROM attempts WHERE case_id = ?1)", params![case_id])
+        .map_err(|e| format!("admin_delete_case responses failed: {e}"))?;
+    conn.execute("DELETE FROM attempts WHERE case_id = ?1", params![case_id])
+        .map_err(|e| format!("admin_delete_case attempts failed: {e}"))?;
+    conn.execute("DELETE FROM questions WHERE case_id = ?1", params![case_id])
+        .map_err(|e| format!("admin_delete_case questions failed: {e}"))?;
+    let removed = conn
+        .execute("DELETE FROM cases WHERE id = ?1", params![case_id])
+        .map_err(|e| format!("admin_delete_case case failed: {e}"))?;
+    if removed == 0 {
+        return Err(format!("No case found with id {case_id}"));
+    }
+    Ok(())
+}
+
+fn next_question_order_index(conn: &Connection, case_id: &str) -> Result<i64, String> {
+    let mut stmt = conn
+        .prepare("SELECT COALESCE(MAX(order_index), -1) + 1 FROM questions WHERE case_id = ?1")
+        .map_err(|e| format!("next_question_order_index prepare failed: {e}"))?;
+    let next: i64 = stmt
+        .query_row(params![case_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| format!("next_question_order_index query failed: {e}"))?;
+    Ok(next)
+}
+
+#[tauri::command]
+pub fn admin_create_question(
+    state: State<DbState>,
+    case_id: String,
+    input: AdminQuestionInput,
+) -> Result<QuestionRow, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let id = Uuid::new_v4().to_string();
+    let order_index = match input.order_index {
+        Some(i) => i,
+        None => next_question_order_index(&conn, &case_id)?,
+    };
+    let data_json = input.data.to_string();
+    conn.execute(
+        "INSERT INTO questions (id, case_id, order_index, type, prompt, data_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, case_id, order_index, input.r#type, input.prompt, data_json],
+    )
+    .map_err(|e| format!("admin_create_question insert failed: {e}"))?;
+    fetch_question_row(&conn, &id)
+}
+
+#[tauri::command]
+pub fn admin_update_question(
+    state: State<DbState>,
+    question_id: String,
+    input: AdminQuestionInput,
+) -> Result<QuestionRow, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let data_json = input.data.to_string();
+
+    let updated = if let Some(order_index) = input.order_index {
+        conn.execute(
+            "UPDATE questions SET type = ?1, prompt = ?2, data_json = ?3, order_index = ?4 WHERE id = ?5",
+            params![input.r#type, input.prompt, data_json, order_index, question_id],
+        )
+    } else {
+        conn.execute(
+            "UPDATE questions SET type = ?1, prompt = ?2, data_json = ?3 WHERE id = ?4",
+            params![input.r#type, input.prompt, data_json, question_id],
+        )
+    }
+    .map_err(|e| format!("admin_update_question update failed: {e}"))?;
+    if updated == 0 {
+        return Err(format!("No question found with id {question_id}"));
+    }
+    fetch_question_row(&conn, &question_id)
+}
+
+#[tauri::command]
+pub fn admin_delete_question(state: State<DbState>, question_id: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let removed = conn
+        .execute("DELETE FROM questions WHERE id = ?1", params![question_id])
+        .map_err(|e| format!("admin_delete_question failed: {e}"))?;
+    if removed == 0 {
+        return Err(format!("No question found with id {question_id}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn admin_reorder_questions(
+    state: State<DbState>,
+    case_id: String,
+    ordered_question_ids: Vec<String>,
+) -> Result<(), String> {
+    let mut conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("admin_reorder_questions begin failed: {e}"))?;
+
+    // Two-phase update keeps the (case_id, order_index) values unique even though there
+    // is no explicit UNIQUE constraint, and guards against partial reorderings.
+    for (index, qid) in ordered_question_ids.iter().enumerate() {
+        let bumped = -1 - index as i64;
+        let updated = tx
+            .execute(
+                "UPDATE questions SET order_index = ?1 WHERE id = ?2 AND case_id = ?3",
+                params![bumped, qid, case_id],
+            )
+            .map_err(|e| format!("admin_reorder_questions phase1 failed: {e}"))?;
+        if updated == 0 {
+            return Err(format!(
+                "Question {qid} does not belong to case {case_id} (or was deleted)"
+            ));
+        }
+    }
+    for (index, qid) in ordered_question_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE questions SET order_index = ?1 WHERE id = ?2 AND case_id = ?3",
+            params![index as i64, qid, case_id],
+        )
+        .map_err(|e| format!("admin_reorder_questions phase2 failed: {e}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("admin_reorder_questions commit failed: {e}"))?;
+    Ok(())
+}

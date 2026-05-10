@@ -68,13 +68,16 @@ export async function loadCases(): Promise<VascCase[]> {
   }
   try {
     const rows = await safeInvoke<CaseRow[]>('list_cases');
+    // safeInvoke returns null when not in Tauri / command unavailable — only then
+    // do we fall back to bundled samples. An empty array from SQLite is a real
+    // "all cases were deleted" state and should be respected.
     if (!rows) return sampleCases;
     const result: VascCase[] = [];
     for (const row of rows) {
       const questionRows = (await safeInvoke<QuestionRow[]>('get_case_questions', { caseId: row.id })) ?? [];
       result.push(rowToVascCase(row, questionRows.map(rowToQuestion)));
     }
-    return result.length > 0 ? result : sampleCases;
+    return result;
   } catch (error) {
     console.error('loadCases failed, falling back to sample data:', error);
     return sampleCases;

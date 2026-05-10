@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AppShell } from './components/AppShell';
 import { cases as sampleCases } from './data/sampleContent';
 import { AdminContentPage } from './features/admin/AdminContentPage';
@@ -24,21 +24,23 @@ export default function App() {
     [cases, selectedCaseId],
   );
 
+  const refreshCases = useCallback(async () => {
+    const loaded = await loadCases();
+    setCases(loaded);
+    setSelectedCaseId((current) => {
+      if (current && loaded.find((c) => c.id === current)) return current;
+      return loaded[0]?.id ?? '';
+    });
+    return loaded;
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    loadCases().then((loaded) => {
-      if (cancelled) return;
-      setCases(loaded);
-      if (!loaded.find((c) => c.id === selectedCaseId) && loaded[0]) {
-        setSelectedCaseId(loaded[0].id);
-      }
-    });
+    void refreshCases().catch(() => undefined).then(() => cancelled);
     return () => {
       cancelled = true;
     };
-    // Intentionally empty deps: we want this to run once on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshCases]);
 
   function openCase(caseId: string) {
     setSelectedCaseId(caseId);
@@ -48,6 +50,15 @@ export default function App() {
   function startCase(caseId: string) {
     setSelectedCaseId(caseId);
     setScreen('training');
+  }
+
+  async function openCaseInTraining(caseId: string) {
+    // Pull the latest cases so freshly-edited content shows up in training.
+    const loaded = await refreshCases();
+    if (loaded.find((c) => c.id === caseId)) {
+      setSelectedCaseId(caseId);
+      setScreen('training');
+    }
   }
 
   return (
@@ -63,7 +74,16 @@ export default function App() {
         <TrainingWorkspace vascCase={selectedCase} onFinish={() => setScreen('progress')} onChooseCase={() => setScreen('cases')} />
       )}
       {screen === 'progress' && <ProgressPage />}
-      {screen === 'admin' && <AdminContentPage />}
+      {screen === 'admin' && (
+        <AdminContentPage
+          onCasesChanged={() => {
+            void refreshCases();
+          }}
+          onOpenInTraining={(caseId) => {
+            void openCaseInTraining(caseId);
+          }}
+        />
+      )}
       {screen === 'settings' && <SettingsPage />}
     </AppShell>
   );
