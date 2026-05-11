@@ -202,6 +202,27 @@ export interface PlanValidationIssue {
   message: string;
 }
 
+export interface PlanReadinessSummary {
+  status: 'ready' | 'warnings' | 'blocked' | 'empty';
+  errorCount: number;
+  warningCount: number;
+  infoCount: number;
+  segmentCount: number;
+  deviceCount: number;
+  markerCount: number;
+  bifurcationCount: number;
+  interventionTargets: number;
+  unresolvedFitWarnings: number;
+  hasNotes: boolean;
+  headline: string;
+}
+
+export interface LabelLayoutEntry {
+  segmentId: string;
+  primary: ComposerPoint & { anchor: 'start' | 'middle' | 'end' };
+  secondary: (ComposerPoint & { anchor: 'start' | 'middle' | 'end' }) | null;
+}
+
 interface VesselCompositionWire {
   id: string;
   caseId: string | null;
@@ -1103,4 +1124,178 @@ function makeLocalId(): string {
     return crypto.randomUUID();
   }
   return `local-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+const SEGMENT_LABEL_OFFSET = 22;
+const SEGMENT_LABEL_HEIGHT = 16;
+const SEGMENT_LABEL_HALF_WIDTH = 64;
+
+export function layoutSegmentLabels(
+  segments: VesselSegment[],
+  bounds: { width: number; height: number },
+): Map<string, LabelLayoutEntry> {
+  const layout = new Map<string, LabelLayoutEntry>();
+  const placed: Array<{ x: number; y: number; w: number; h: number }> = [];
+
+  const rectsOverlap = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) =>
+    Math.abs(a.x - b.x) * 2 < a.w + b.w && Math.abs(a.y - b.y) * 2 < a.h + b.h;
+
+  for (const segment of segments) {
+    const candidates = candidateLabelPositions(segment, bounds);
+    let chosen = candidates[0];
+    let chosenScore = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const rect = {
+        x: candidate.x,
+        y: candidate.y,
+        w: SEGMENT_LABEL_HALF_WIDTH * 2,
+        h: SEGMENT_LABEL_HEIGHT * 2,
+      };
+      const collisions = placed.filter((existing) => rectsOverlap(existing, rect)).length;
+      const edgePenalty = candidate.edgePenalty ?? 0;
+      const score = collisions * 1000 + edgePenalty;
+      if (score < chosenScore) {
+        chosenScore = score;
+        chosen = candidate;
+      }
+    }
+
+    const primary = { x: chosen.x, y: chosen.y, anchor: chosen.anchor };
+    const primaryRect = { x: chosen.x, y: chosen.y, w: SEGMENT_LABEL_HALF_WIDTH * 2, h: SEGMENT_LABEL_HEIGHT };
+    placed.push(primaryRect);
+
+    const secondaryY = chosen.y + 14;
+    const secondaryRect = {
+      x: chosen.x,
+      y: secondaryY,
+      w: SEGMENT_LABEL_HALF_WIDTH * 1.6,
+      h: SEGMENT_LABEL_HEIGHT,
+    };
+    const secondaryCollides = placed.some((existing) => rectsOverlap(existing, secondaryRect));
+    let secondary: LabelLayoutEntry['secondary'] = null;
+    if (!secondaryCollides && secondaryY + SEGMENT_LABEL_HEIGHT < bounds.height - 8) {
+      secondary = { x: chosen.x, y: secondaryY, anchor: chosen.anchor };
+      placed.push(secondaryRect);
+    }
+
+    layout.set(segment.id, { segmentId: segment.id, primary, secondary });
+  }
+
+  return layout;
+}
+
+function candidateLabelPositions(
+  segment: VesselSegment,
+  bounds: { width: number; height: number },
+): Array<{ x: number; y: number; anchor: 'start' | 'middle' | 'end'; edgePenalty?: number }> {
+  const dx = segment.end.x - segment.start.x;
+  const dy = segment.end.y - segment.start.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const ux = dx / length;
+  const uy = dy / length;
+  const nx = -uy;
+  const ny = ux;
+  const padX = SEGMENT_LABEL_HALF_WIDTH;
+  const padY = SEGMENT_LABEL_HEIGHT;
+  const clampX = (x: number) => clamp(x, padX, bounds.width - padX);
+  const clampY = (y: number) => clamp(y, padY, bounds.height - padY);
+
+  const offsets = [0.5, 0.35, 0.65, 0.25, 0.75];
+  const sides: Array<{ sign: 1 | -1; anchor: 'start' | 'end' }> = [
+    { sign: 1, anchor: nx >= 0 ? 'start' : 'end' },
+    { sign: -1, anchor: -nx >= 0 ? 'start' : 'end' },
+  ];
+
+  const candidates: Array<{ x: number; y: number; anchor: 'start' | 'middle' | 'end'; edgePenalty?: number }> = [];
+  for (const t of offsets) {
+    const cx = segment.start.x + dx * t;
+    const cy = segment.start.y + dy * t;
+    for (const side of sides) {
+      const ox = nx * SEGMENT_LABEL_OFFSET * side.sign;
+      const oy = ny * SEGMENT_LABEL_OFFSET * side.sign;
+      const x = clampX(cx + ox);
+      const y = clampY(cy + oy);
+      const dxClamp = Math.abs(x - (cx + ox));
+      const dyClamp = Math.abs(y - (cy + oy));
+      const edgePenalty = (dxClamp + dyClamp) * 4 + Math.abs(t - 0.5) * 60;
+      candidates.push({ x, y, anchor: side.anchor, edgePenalty });
+    }
+  }
+  return candidates;
+}
+
+export function snapNormalizedT(t: number, tolerance = 0.04): number {
+  const stops = [0, 0.25, 0.5, 0.75, 1];
+  for (const stop of stops) {
+    if (Math.abs(t - stop) <= tolerance) return stop;
+  }
+  return t;
+}
+
+export function snapToGrid(value: number, grid = 20): number {
+  return Math.round(value / grid) * grid;
+}
+
+export function findEndpointSnap(
+  point: ComposerPoint,
+  segments: VesselSegment[],
+  excludeSegmentId: string | null,
+  threshold = 14,
+): ComposerPoint | null {
+  let best: { point: ComposerPoint; distance: number } | null = null;
+  for (const segment of segments) {
+    if (segment.id === excludeSegmentId) continue;
+    for (const candidate of [segment.start, segment.end]) {
+      const d = Math.hypot(point.x - candidate.x, point.y - candidate.y);
+      if (d <= threshold && (!best || d < best.distance)) {
+        best = { point: { x: candidate.x, y: candidate.y }, distance: d };
+      }
+    }
+  }
+  return best?.point ?? null;
+}
+
+export function assessPlanReadiness(
+  data: VesselCompositionData,
+  issues: PlanValidationIssue[],
+  fitWarnings: DeviceFitWarning[],
+): PlanReadinessSummary {
+  const errorCount = issues.filter((issue) => issue.severity === 'error').length;
+  const warningCount = issues.filter((issue) => issue.severity === 'warning').length;
+  const fitWarningCount = fitWarnings.filter((warning) => warning.severity === 'warning').length;
+  const infoCount = fitWarnings.filter((warning) => warning.severity === 'info').length;
+  const interventionTargets = data.segments.filter(
+    (segment) => segment.targetForIntervention || segment.pathologyType !== 'normal',
+  ).length;
+  const segmentCount = data.segments.length;
+  const notes = typeof data.metadata.notes === 'string' ? data.metadata.notes.trim() : '';
+
+  let status: PlanReadinessSummary['status'] = 'ready';
+  let headline = 'Plan is ready for review.';
+  if (segmentCount === 0) {
+    status = 'empty';
+    headline = 'Add at least one vessel segment to begin planning.';
+  } else if (errorCount > 0) {
+    status = 'blocked';
+    headline = `${errorCount} blocking issue${errorCount === 1 ? '' : 's'} must be resolved before saving.`;
+  } else if (warningCount > 0 || fitWarningCount > 0) {
+    status = 'warnings';
+    const total = warningCount + fitWarningCount;
+    headline = `${total} planning warning${total === 1 ? '' : 's'} to review.`;
+  }
+
+  return {
+    status,
+    errorCount,
+    warningCount: warningCount + fitWarningCount,
+    infoCount,
+    segmentCount,
+    deviceCount: data.devicePlacements.length,
+    markerCount: data.treatmentMarkers.length,
+    bifurcationCount: data.bifurcations.length,
+    interventionTargets,
+    unresolvedFitWarnings: fitWarningCount,
+    hasNotes: notes.length > 0,
+    headline,
+  };
 }

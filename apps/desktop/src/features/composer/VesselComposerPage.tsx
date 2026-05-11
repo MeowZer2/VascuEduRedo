@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -13,15 +14,20 @@ import {
   TREATMENT_MARKER_OPTIONS,
   VESSEL_PRESETS,
   assessDeviceFit,
+  assessPlanReadiness,
   createAnatomyTemplateData,
   devicePlacementFromDevice,
   emptyVesselCompositionData,
+  findEndpointSnap,
   getVesselComposition,
   getVesselPreset,
+  layoutSegmentLabels,
   listVesselCompositions,
   makeSegmentFromPreset,
   makeTreatmentMarker,
   saveVesselComposition,
+  snapNormalizedT,
+  snapToGrid,
   treatmentMarkerLabel,
   validateVesselCompositionData,
   type AnatomyTemplate,
@@ -29,7 +35,9 @@ import {
   type ComposerPoint,
   type DeviceFitWarning,
   type DevicePlacement,
+  type LabelLayoutEntry,
   type PathologyType,
+  type PlanReadinessSummary,
   type PlanValidationIssue,
   type TreatmentMarker,
   type TreatmentMarkerType,
@@ -42,6 +50,12 @@ import type { VascCase } from '../../types';
 
 const WORKSPACE_WIDTH = 1000;
 const WORKSPACE_HEIGHT = 620;
+const GRID_SIZE = 20;
+const HISTORY_LIMIT = 60;
+const DRAFT_KEY = 'vascedu.composerDraft.v0.14';
+const AUTOSAVE_DEBOUNCE_MS = 800;
+const PROPERTY_HISTORY_DEBOUNCE_MS = 700;
+const CLICK_DRAG_THRESHOLD = 4;
 
 type ComposerTool = 'select' | 'segment' | 'bifurcation' | 'device' | 'marker';
 
@@ -51,10 +65,20 @@ interface VesselComposerPageProps {
   onOpenCase: (caseId: string) => void;
 }
 
+interface PlanState {
+  segments: VesselSegment[];
+  bifurcations: BifurcationNode[];
+  devicePlacements: DevicePlacement[];
+  treatmentMarkers: TreatmentMarker[];
+  metadata: Record<string, unknown>;
+}
+
 interface DragState {
   id: string;
   startPointer: ComposerPoint;
   original: VascularPlanningEntity;
+  moved: boolean;
+  historyPushed: boolean;
 }
 
 interface SegmentProjection {
@@ -62,6 +86,14 @@ interface SegmentProjection {
   point: ComposerPoint;
   t: number;
   distance: number;
+}
+
+interface DraftEnvelope {
+  compositionId: string | null;
+  compositionName: string;
+  caseId: string;
+  data: PlanState;
+  savedAt: string;
 }
 
 export function VesselComposerPage({
@@ -76,6 +108,7 @@ export function VesselComposerPage({
   const [devicePlacements, setDevicePlacements] = useState<DevicePlacement[]>([]);
   const [treatmentMarkers, setTreatmentMarkers] = useState<TreatmentMarker[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [compositionId, setCompositionId] = useState<string | null>(null);
   const [compositionName, setCompositionName] = useState('Untitled vessel plan');
@@ -93,6 +126,25 @@ export function VesselComposerPage({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
+  const [shiftDown, setShiftDown] = useState(false);
+  const [historyVersion, setHistoryVersion] = useState(0);
+
+  const stateRef = useRef<PlanState>({
+    segments: [],
+    bifurcations: [],
+    devicePlacements: [],
+    treatmentMarkers: [],
+    metadata: {},
+  });
+  const undoStackRef = useRef<PlanState[]>([]);
+  const redoStackRef = useRef<PlanState[]>([]);
+  const pendingPropertySnapshotRef = useRef<PlanState | null>(null);
+  const propertyTimerRef = useRef<number | null>(null);
+  const autosaveTimerRef = useRef<number | null>(null);
+  const ignoreNextDirtyRef = useRef(false);
+  const initializedRef = useRef(false);
 
   const selectedObject = useMemo(
     () =>
@@ -114,13 +166,12 @@ export function VesselComposerPage({
   const filteredDevices = useMemo(() => {
     const needle = deviceSearch.trim().toLowerCase();
     if (!needle) return devices;
-    return devices.filter((device) => {
-      return (
+    return devices.filter(
+      (device) =>
         device.name.toLowerCase().includes(needle) ||
         device.manufacturer.toLowerCase().includes(needle) ||
-        device.category.toLowerCase().includes(needle)
-      );
-    });
+        device.category.toLowerCase().includes(needle),
+    );
   }, [devices, deviceSearch]);
   const currentData = useMemo<VesselCompositionData>(
     () => ({
@@ -143,6 +194,78 @@ export function VesselComposerPage({
     () => buildFitWarnings(devicePlacements, segments, devices),
     [devicePlacements, devices, segments],
   );
+  const readiness = useMemo(
+    () => assessPlanReadiness(currentData, validationIssues, fitWarnings),
+    [currentData, fitWarnings, validationIssues],
+  );
+  const labelLayout = useMemo(
+    () => layoutSegmentLabels(segments, { width: WORKSPACE_WIDTH, height: WORKSPACE_HEIGHT }),
+    [segments],
+  );
+  const canUndo = undoStackRef.current.length > 0;
+  const canRedo = redoStackRef.current.length > 0;
+
+  useEffect(() => {
+    stateRef.current = {
+      segments,
+      bifurcations,
+      devicePlacements,
+      treatmentMarkers,
+      metadata: compositionMetadata,
+    };
+  }, [segments, bifurcations, devicePlacements, treatmentMarkers, compositionMetadata]);
+
+  useEffect(() => {
+    if (ignoreNextDirtyRef.current) {
+      ignoreNextDirtyRef.current = false;
+      return;
+    }
+    if (!initializedRef.current) return;
+    setIsDirty(true);
+  }, [segments, bifurcations, devicePlacements, treatmentMarkers, compositionMetadata]);
+
+  useEffect(() => {
+    if (!initializedRef.current) return;
+    if (!isDirty) return;
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      try {
+        const draft: DraftEnvelope = {
+          compositionId,
+          compositionName,
+          caseId,
+          data: stateRef.current,
+          savedAt: new Date().toISOString(),
+        };
+        window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+      } catch {
+        // localStorage may be unavailable; silently skip.
+      }
+    }, AUTOSAVE_DEBOUNCE_MS);
+    return () => {
+      if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+    };
+  }, [
+    caseId,
+    compositionId,
+    compositionName,
+    isDirty,
+    segments,
+    bifurcations,
+    devicePlacements,
+    treatmentMarkers,
+    compositionMetadata,
+  ]);
+
+  useEffect(() => {
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      if (!isDirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isDirty]);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,54 +293,101 @@ export function VesselComposerPage({
         const rows = await listVesselCompositions();
         if (cancelled) return;
         setSavedRows(rows);
+        const draft = readDraft();
         const linked = initialCaseId
           ? rows.find((row) => row.caseId === initialCaseId)
           : rows[0] ?? null;
-        if (linked) {
+
+        if (
+          draft &&
+          (!initialCaseId || draft.caseId === initialCaseId) &&
+          window.confirm(
+            `Restore unsaved vessel plan draft "${draft.compositionName}"\nfrom ${new Date(draft.savedAt).toLocaleString()}?`,
+          )
+        ) {
+          applyDraft(draft);
+          setStatus('Restored unsaved draft.');
+        } else if (linked) {
           applyComposition(linked);
-          setStatus(initialCaseId ? 'Loaded linked vessel plan.' : null);
+          if (initialCaseId) setStatus('Loaded linked vessel plan.');
         } else {
           startNewComposition(initialCaseId ?? '');
         }
       } catch (e) {
         if (!cancelled) setError(messageFromError(e));
+      } finally {
+        initializedRef.current = true;
       }
     }
     void boot();
     return () => {
       cancelled = true;
     };
-    // The initial case is the navigation payload. Case list changes should not reload an open draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialCaseId]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target instanceof HTMLElement ? event.target : null;
-      if (target?.closest('input, textarea, select')) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        setSelectedId(null);
-        setTool('select');
-        setPendingSegmentStart(null);
-        setDrag(null);
+      const inField = !!target?.closest('input, textarea, select');
+      if (event.key === 'Shift') setShiftDown(true);
+
+      if (!inField) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setSelectedId(null);
+          setTool('select');
+          setPendingSegmentStart(null);
+          setDrag(null);
+          setStatus(null);
+          setError(null);
+          return;
+        }
+        if (event.key.toLowerCase() === 'd' && !event.metaKey && !event.ctrlKey) {
+          if (!selectedId) return;
+          event.preventDefault();
+          duplicateSelected();
+          return;
+        }
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+          if (!selectedId) return;
+          event.preventDefault();
+          deleteSelected();
+          return;
+        }
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        if (event.shiftKey) {
+          event.preventDefault();
+          handleRedo();
+        } else {
+          event.preventDefault();
+          handleUndo();
+        }
         return;
       }
-      if (event.key.toLowerCase() === 'd') {
-        if (!selectedId) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y') {
         event.preventDefault();
-        duplicateSelected();
+        handleRedo();
         return;
       }
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
-      if (!selectedId) return;
-      event.preventDefault();
-      deleteSelected();
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's' && !inField) {
+        event.preventDefault();
+        void handleSave();
+      }
+    }
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.key === 'Shift') setShiftDown(false);
     }
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, selectedObject, segments, bifurcations, devicePlacements, treatmentMarkers]);
+  }, [selectedId, selectedObject, segments, bifurcations, devicePlacements, treatmentMarkers, isDirty, compositionId, compositionName, caseId]);
 
   useEffect(() => {
     return () => setComposerDragSelectionSuppressed(false);
@@ -226,6 +396,102 @@ export function VesselComposerPage({
   useEffect(() => {
     if (tool !== 'segment') setPendingSegmentStart(null);
   }, [tool]);
+
+  function snapshotState(): PlanState {
+    return {
+      segments: stateRef.current.segments.slice(),
+      bifurcations: stateRef.current.bifurcations.slice(),
+      devicePlacements: stateRef.current.devicePlacements.slice(),
+      treatmentMarkers: stateRef.current.treatmentMarkers.slice(),
+      metadata: { ...stateRef.current.metadata },
+    };
+  }
+
+  function applyState(state: PlanState) {
+    ignoreNextDirtyRef.current = true;
+    setSegments(state.segments);
+    setBifurcations(state.bifurcations);
+    setDevicePlacements(state.devicePlacements);
+    setTreatmentMarkers(state.treatmentMarkers);
+    setCompositionMetadata(state.metadata);
+  }
+
+  const flushPendingPropertyHistory = useCallback(() => {
+    if (propertyTimerRef.current) {
+      window.clearTimeout(propertyTimerRef.current);
+      propertyTimerRef.current = null;
+    }
+    if (pendingPropertySnapshotRef.current) {
+      pushSnapshot(pendingPropertySnapshotRef.current);
+      pendingPropertySnapshotRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function pushSnapshot(snapshot: PlanState) {
+    undoStackRef.current.push(snapshot);
+    if (undoStackRef.current.length > HISTORY_LIMIT) {
+      undoStackRef.current = undoStackRef.current.slice(-HISTORY_LIMIT);
+    }
+    redoStackRef.current = [];
+    setHistoryVersion((v) => v + 1);
+  }
+
+  function commitNow() {
+    flushPendingPropertyHistory();
+    pushSnapshot(snapshotState());
+  }
+
+  function commitPropertyChange() {
+    if (!pendingPropertySnapshotRef.current) {
+      pendingPropertySnapshotRef.current = snapshotState();
+    }
+    if (propertyTimerRef.current) window.clearTimeout(propertyTimerRef.current);
+    propertyTimerRef.current = window.setTimeout(() => {
+      if (pendingPropertySnapshotRef.current) {
+        pushSnapshot(pendingPropertySnapshotRef.current);
+        pendingPropertySnapshotRef.current = null;
+      }
+      propertyTimerRef.current = null;
+    }, PROPERTY_HISTORY_DEBOUNCE_MS);
+  }
+
+  function handleUndo() {
+    flushPendingPropertyHistory();
+    const snapshot = undoStackRef.current.pop();
+    if (!snapshot) return;
+    redoStackRef.current.push(snapshotState());
+    applyState(snapshot);
+    setSelectedId(null);
+    setDrag(null);
+    setHistoryVersion((v) => v + 1);
+    setStatus('Undo');
+    setError(null);
+  }
+
+  function handleRedo() {
+    flushPendingPropertyHistory();
+    const snapshot = redoStackRef.current.pop();
+    if (!snapshot) return;
+    undoStackRef.current.push(snapshotState());
+    applyState(snapshot);
+    setSelectedId(null);
+    setDrag(null);
+    setHistoryVersion((v) => v + 1);
+    setStatus('Redo');
+    setError(null);
+  }
+
+  function clearHistory() {
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    pendingPropertySnapshotRef.current = null;
+    if (propertyTimerRef.current) {
+      window.clearTimeout(propertyTimerRef.current);
+      propertyTimerRef.current = null;
+    }
+    setHistoryVersion((v) => v + 1);
+  }
 
   function captureComposerPointer(event: ReactPointerEvent<SVGElement>) {
     try {
@@ -241,14 +507,53 @@ export function VesselComposerPage({
         svgRef.current.releasePointerCapture(event.pointerId);
       }
     } catch {
-      // Best-effort cleanup; selection suppression is still restored below.
+      // Best-effort cleanup.
     }
+  }
+
+  function readDraft(): DraftEnvelope | null {
+    try {
+      const raw = window.localStorage.getItem(DRAFT_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as DraftEnvelope;
+      if (!parsed?.data || !Array.isArray(parsed.data.segments)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function discardDraft() {
+    try {
+      window.localStorage.removeItem(DRAFT_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
+  function applyDraft(draft: DraftEnvelope) {
+    setCompositionId(draft.compositionId);
+    setCompositionName(draft.compositionName);
+    setCaseId(draft.caseId);
+    ignoreNextDirtyRef.current = true;
+    setSegments(draft.data.segments);
+    setBifurcations(draft.data.bifurcations);
+    setDevicePlacements(draft.data.devicePlacements);
+    setTreatmentMarkers(draft.data.treatmentMarkers);
+    setCompositionMetadata(draft.data.metadata ?? {});
+    setSelectedId(null);
+    setPendingSegmentStart(null);
+    setLoadId(draft.compositionId ?? '');
+    setError(null);
+    setIsDirty(true);
+    clearHistory();
   }
 
   function applyComposition(row: VesselCompositionRow) {
     setCompositionId(row.id);
     setCompositionName(row.name);
     setCaseId(row.caseId ?? '');
+    ignoreNextDirtyRef.current = true;
     setSegments(row.data.segments);
     setBifurcations(row.data.bifurcations);
     setDevicePlacements(row.data.devicePlacements);
@@ -258,13 +563,21 @@ export function VesselComposerPage({
     setSelectedId(null);
     setLoadId(row.id);
     setError(null);
+    setIsDirty(false);
+    clearHistory();
+    discardDraft();
   }
 
   function startNewComposition(nextCaseId = caseId) {
+    if (isDirty && initializedRef.current) {
+      const ok = window.confirm('Discard unsaved changes and start a new vessel plan?');
+      if (!ok) return;
+    }
     const targetCase = cases.find((item) => item.id === nextCaseId);
     setCompositionId(null);
     setCompositionName(targetCase ? `${targetCase.title} vessel plan` : 'Untitled vessel plan');
     setCaseId(nextCaseId);
+    ignoreNextDirtyRef.current = true;
     setSegments([]);
     setBifurcations([]);
     setDevicePlacements([]);
@@ -276,6 +589,9 @@ export function VesselComposerPage({
     setTool('select');
     setError(null);
     setStatus('New vascular plan ready.');
+    setIsDirty(false);
+    clearHistory();
+    discardDraft();
   }
 
   async function refreshSavedRows(): Promise<VesselCompositionRow[]> {
@@ -285,6 +601,7 @@ export function VesselComposerPage({
   }
 
   async function handleSave() {
+    flushPendingPropertyHistory();
     const issues = validateVesselCompositionData(currentData, deviceIds);
     const blocking = issues.filter((issue) => issue.severity === 'error');
     if (blocking.length > 0) {
@@ -320,6 +637,10 @@ export function VesselComposerPage({
 
   async function handleLoad() {
     if (!loadId) return;
+    if (isDirty) {
+      const ok = window.confirm('Discard unsaved changes and load the selected plan?');
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       const row = await getVesselComposition(loadId);
@@ -338,24 +659,36 @@ export function VesselComposerPage({
     }
   }
 
+  function maybeSnapPoint(point: ComposerPoint, opts?: { excludeSegmentId?: string | null }): ComposerPoint {
+    const endpoint = findEndpointSnap(point, segments, opts?.excludeSegmentId ?? null, 14);
+    if (endpoint) return endpoint;
+    if (shiftDown) {
+      return {
+        x: clamp(snapToGrid(point.x, GRID_SIZE), 0, WORKSPACE_WIDTH),
+        y: clamp(snapToGrid(point.y, GRID_SIZE), 0, WORKSPACE_HEIGHT),
+      };
+    }
+    return point;
+  }
+
   function handleCanvasPointerDown(event: ReactPointerEvent<SVGRectElement>) {
     event.preventDefault();
-    const point = svgPoint(event);
+    const rawPoint = svgPoint(event);
     if (tool === 'segment') {
-      handleSegmentCanvasClick(point);
+      handleSegmentCanvasClick(maybeSnapPoint(rawPoint));
       return;
     }
     if (tool === 'bifurcation') {
-      addBifurcationAt(point);
+      addBifurcationAt(maybeSnapPoint(rawPoint));
       return;
     }
     if (tool === 'device') {
-      setStatus('Select a vessel segment for device placement.');
+      setStatus('Click a vessel segment to place the selected device.');
       setError(null);
       return;
     }
     if (tool === 'marker') {
-      setStatus('Select a vessel segment for treatment marker placement.');
+      setStatus('Click a vessel segment to place a treatment marker.');
       setError(null);
       return;
     }
@@ -371,7 +704,7 @@ export function VesselComposerPage({
     captureComposerPointer(event);
     const point = svgPoint(event);
     if (tool === 'segment') {
-      handleSegmentCanvasClick(point);
+      handleSegmentCanvasClick(maybeSnapPoint(point));
       return;
     }
     if (tool === 'device') {
@@ -397,7 +730,7 @@ export function VesselComposerPage({
     if (!original) return;
     setComposerDragSelectionSuppressed(true);
     setSelectedId(id);
-    setDrag({ id, startPointer: point, original });
+    setDrag({ id, startPointer: point, original, moved: false, historyPushed: false });
   }
 
   function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
@@ -406,16 +739,24 @@ export function VesselComposerPage({
     const point = svgPoint(event);
     const dx = point.x - drag.startPointer.x;
     const dy = point.y - drag.startPointer.y;
+    if (!drag.moved && Math.hypot(dx, dy) < CLICK_DRAG_THRESHOLD) return;
+    if (!drag.historyPushed) {
+      commitNow();
+      setDrag({ ...drag, moved: true, historyPushed: true });
+    } else if (!drag.moved) {
+      setDrag({ ...drag, moved: true });
+    }
+
     if (drag.original.type === 'segment') {
       setSegments((current) =>
         current.map((segment) =>
-          segment.id === drag.id ? moveSegment(drag.original as VesselSegment, dx, dy) : segment,
+          segment.id === drag.id ? moveSegment(drag.original as VesselSegment, dx, dy, shiftDown) : segment,
         ),
       );
     } else if (drag.original.type === 'bifurcation') {
       setBifurcations((current) =>
         current.map((node) =>
-          node.id === drag.id ? moveBifurcation(drag.original as BifurcationNode, dx, dy) : node,
+          node.id === drag.id ? moveBifurcation(drag.original as BifurcationNode, dx, dy, shiftDown) : node,
         ),
       );
     } else if (drag.original.type === 'devicePlacement') {
@@ -446,16 +787,18 @@ export function VesselComposerPage({
     if (hasExistingPlan && !window.confirm('Replace the current vessel plan with this anatomy template?')) {
       return;
     }
+    commitNow();
     const template = createAnatomyTemplateData(templateId, makeId);
+    const adjusted = relayoutTemplateBranches(template);
     const templateInfo = ANATOMY_TEMPLATES.find((item) => item.id === templateId);
     setCompositionId(null);
-    setSegments(template.segments);
-    setBifurcations(template.bifurcations);
-    setDevicePlacements(template.devicePlacements);
-    setTreatmentMarkers(template.treatmentMarkers);
-    setCompositionMetadata(template.metadata);
+    setSegments(adjusted.segments);
+    setBifurcations(adjusted.bifurcations);
+    setDevicePlacements(adjusted.devicePlacements);
+    setTreatmentMarkers(adjusted.treatmentMarkers);
+    setCompositionMetadata(adjusted.metadata);
     setPendingSegmentStart(null);
-    setSelectedId(template.segments[0]?.id ?? null);
+    setSelectedId(adjusted.segments[0]?.id ?? null);
     setLoadId('');
     setTool('select');
     if (!compositionName.trim() || compositionName === 'Untitled vessel plan') {
@@ -473,7 +816,7 @@ export function VesselComposerPage({
     if (!pendingSegmentStart) {
       setPendingSegmentStart(point);
       setSelectedId(null);
-      setStatus('Segment start set. Click the end point to define direction and length.');
+      setStatus('Segment start set. Click the end point. Hold Shift to snap to grid.');
       setError(null);
       return;
     }
@@ -486,6 +829,7 @@ export function VesselComposerPage({
       setError(null);
       return;
     }
+    commitNow();
     const preset = VESSEL_PRESETS.find((item) => item.id === segmentPresetId) ?? VESSEL_PRESETS[0];
     const id = makeId('segment');
     const segment = makeSegmentFromPreset(
@@ -505,16 +849,18 @@ export function VesselComposerPage({
   }
 
   function addBifurcationAt(point: ComposerPoint) {
+    commitNow();
     const id = makeId('bifurcation');
     const nearest = nearestSegmentProjection(point, segments);
-    const parent = nearest && nearest.distance < 120 ? nearest.segment : null;
+    const parent = nearest && nearest.distance < 60 ? nearest.segment : null;
+    const snappedPoint = parent ? nearest!.point : point;
     const node: BifurcationNode = {
       id,
       type: 'bifurcation',
       label: parent ? `${parent.label} bifurcation` : `Bifurcation ${bifurcations.length + 1}`,
       position: {
-        x: clamp(point.x, 40, WORKSPACE_WIDTH - 40),
-        y: clamp(point.y, 40, WORKSPACE_HEIGHT - 40),
+        x: clamp(snappedPoint.x, 40, WORKSPACE_WIDTH - 40),
+        y: clamp(snappedPoint.y, 40, WORKSPACE_HEIGHT - 40),
       },
       parentSegmentId: parent?.id ?? null,
       childSegmentIds: [],
@@ -522,7 +868,7 @@ export function VesselComposerPage({
     setBifurcations((current) => [...current, node]);
     setSelectedId(id);
     setTool('select');
-    setStatus('Bifurcation relationship added.');
+    setStatus(parent ? `Bifurcation snapped to ${parent.label}.` : 'Bifurcation added.');
     setError(null);
   }
 
@@ -532,12 +878,14 @@ export function VesselComposerPage({
       setStatus(null);
       return;
     }
+    commitNow();
     const projection = projectPointToSegment(point, segment);
+    const snappedT = snapNormalizedT(projection.t);
     const placement = devicePlacementFromDevice(
       makeId('device'),
       selectedDevice,
       segment.id,
-      projection.t,
+      snappedT,
     );
     setDevicePlacements((current) => [...current, placement]);
     setSelectedId(placement.id);
@@ -547,8 +895,10 @@ export function VesselComposerPage({
   }
 
   function addTreatmentMarker(segment: VesselSegment, point: ComposerPoint) {
+    commitNow();
     const projection = projectPointToSegment(point, segment);
-    const marker = makeTreatmentMarker(makeId('marker'), markerType, segment.id, projection.t);
+    const snappedT = snapNormalizedT(projection.t);
+    const marker = makeTreatmentMarker(makeId('marker'), markerType, segment.id, snappedT);
     setTreatmentMarkers((current) => [...current, marker]);
     setSelectedId(marker.id);
     setTool('select');
@@ -558,6 +908,7 @@ export function VesselComposerPage({
 
   function deleteSelected() {
     if (!selectedObject) return;
+    commitNow();
     if (selectedObject.type === 'segment') {
       setSegments((current) => current.filter((segment) => segment.id !== selectedObject.id));
       setDevicePlacements((current) =>
@@ -590,6 +941,7 @@ export function VesselComposerPage({
 
   function duplicateSelected() {
     if (!selectedObject) return;
+    commitNow();
     const offset = 28;
     if (selectedObject.type === 'segment') {
       const source = selectedObject;
@@ -656,6 +1008,7 @@ export function VesselComposerPage({
   }
 
   function patchSegment(id: string, patch: Partial<VesselSegment>) {
+    commitPropertyChange();
     setSegments((current) =>
       current.map((segment) => {
         if (segment.id !== id) return segment;
@@ -672,21 +1025,29 @@ export function VesselComposerPage({
   }
 
   function patchBifurcation(id: string, patch: Partial<BifurcationNode>) {
+    commitPropertyChange();
     setBifurcations((current) =>
       current.map((node) => (node.id === id ? { ...node, ...patch } : node)),
     );
   }
 
   function patchDevicePlacement(id: string, patch: Partial<DevicePlacement>) {
+    commitPropertyChange();
     setDevicePlacements((current) =>
       current.map((placement) => (placement.id === id ? { ...placement, ...patch } : placement)),
     );
   }
 
   function patchTreatmentMarker(id: string, patch: Partial<TreatmentMarker>) {
+    commitPropertyChange();
     setTreatmentMarkers((current) =>
       current.map((marker) => (marker.id === id ? { ...marker, ...patch } : marker)),
     );
+  }
+
+  function patchMetadata(patch: Record<string, unknown>) {
+    commitPropertyChange();
+    setCompositionMetadata((current) => ({ ...current, ...patch }));
   }
 
   function handleSegmentPresetChange(segment: VesselSegment, vesselType: string) {
@@ -738,21 +1099,7 @@ export function VesselComposerPage({
     };
   }
 
-  const toolButtons: Array<{ id: ComposerTool; label: string; disabled?: boolean }> = [
-    { id: 'select', label: 'Select' },
-    { id: 'segment', label: 'Add Segment' },
-    { id: 'bifurcation', label: 'Add Bifurcation' },
-    {
-      id: 'device',
-      label: 'Add Device',
-      disabled: devices.length === 0 || segments.length === 0,
-    },
-    {
-      id: 'marker',
-      label: 'Add Marker',
-      disabled: segments.length === 0,
-    },
-  ];
+  const totalEntities = segments.length + bifurcations.length + devicePlacements.length + treatmentMarkers.length;
 
   return (
     <div className="page-stack composer-page">
@@ -778,109 +1125,188 @@ export function VesselComposerPage({
             onClick={() => startNewComposition(caseId)}
             disabled={busy}
           >
-            New
+            New plan
           </button>
         </div>
       </header>
 
       <section className="composer-toolbar" aria-label="Vessel composer tools">
-        <div className="tool-tabs">
-          {toolButtons.map((item) => (
+        <div className="composer-toolbar-row">
+          <div className="composer-tool-group" role="group" aria-label="Drawing tools">
+            <ToolButton tool={tool} value="select" label="Select" onSelect={setTool} title="Select / move (Esc to clear)" />
+            <ToolButton tool={tool} value="segment" label="Segment" onSelect={setTool} title="Add a vessel segment" />
+            <ToolButton tool={tool} value="bifurcation" label="Branch" onSelect={setTool} title="Add a bifurcation" />
+            <ToolButton
+              tool={tool}
+              value="device"
+              label="Device"
+              onSelect={setTool}
+              title="Place a catalog device on a segment"
+              disabled={devices.length === 0 || segments.length === 0}
+            />
+            <ToolButton
+              tool={tool}
+              value="marker"
+              label="Marker"
+              onSelect={setTool}
+              title="Place a treatment marker"
+              disabled={segments.length === 0}
+            />
+          </div>
+
+          <div className="composer-tool-group" role="group" aria-label="Edit actions">
             <button
-              key={item.id}
               type="button"
-              className={tool === item.id ? 'tool-tab active' : 'tool-tab'}
-              onClick={() => setTool(item.id)}
-              disabled={item.disabled}
+              className="secondary-button small"
+              onClick={duplicateSelected}
+              disabled={!selectedObject || busy}
+              title="Duplicate selection (D)"
             >
-              {item.label}
+              Duplicate
             </button>
-          ))}
+            <button
+              type="button"
+              className="secondary-button small"
+              onClick={deleteSelected}
+              disabled={!selectedId || busy}
+              title="Delete selection (Del)"
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              className="secondary-button small"
+              onClick={handleUndo}
+              disabled={!canUndo || busy}
+              title="Undo (Ctrl+Z)"
+            >
+              Undo
+            </button>
+            <button
+              type="button"
+              className="secondary-button small"
+              onClick={handleRedo}
+              disabled={!canRedo || busy}
+              title="Redo (Ctrl+Shift+Z)"
+            >
+              Redo
+            </button>
+          </div>
+
+          <div className="composer-toolbar-spacer" />
+
+          <div className="composer-tool-group" role="group" aria-label="File actions">
+            {isDirty && (
+              <span className="composer-dirty-pill" title="Unsaved changes - autosaved as draft">
+                Unsaved
+              </span>
+            )}
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void handleSave()}
+              disabled={busy}
+              title="Save (Ctrl+S)"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              className={moreOpen ? 'secondary-button small active' : 'secondary-button small'}
+              onClick={() => setMoreOpen((v) => !v)}
+              aria-expanded={moreOpen}
+              aria-controls="composer-secondary-toolbar"
+            >
+              {moreOpen ? 'Less' : 'More'}
+            </button>
+          </div>
         </div>
-        <select
-          className="text-input small composer-template-select"
-          value={templateId}
-          onChange={(event) => setTemplateId(event.target.value as AnatomyTemplate['id'])}
-          title="Anatomy template"
-        >
-          {ANATOMY_TEMPLATES.map((template) => (
-            <option key={template.id} value={template.id}>
-              {template.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="secondary-button small"
-          onClick={applyTemplate}
-          disabled={busy}
-        >
-          Apply Template
-        </button>
-        <select
-          className="text-input small composer-preset-select"
-          value={segmentPresetId}
-          onChange={(event) => setSegmentPresetId(event.target.value)}
-          title="Segment preset"
-        >
-          {VESSEL_PRESETS.map((preset) => (
-            <option key={preset.id} value={preset.id}>
-              {preset.label}
-            </option>
-          ))}
-        </select>
-        <select
-          className="text-input small composer-marker-select"
-          value={markerType}
-          onChange={(event) => setMarkerType(event.target.value as TreatmentMarkerType)}
-          title="Treatment marker"
-        >
-          {TREATMENT_MARKER_OPTIONS.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="secondary-button small"
-          onClick={duplicateSelected}
-          disabled={!selectedObject || busy}
-        >
-          Duplicate
-        </button>
-        <button
-          type="button"
-          className="secondary-button small"
-          onClick={deleteSelected}
-          disabled={!selectedId || busy}
-        >
-          Delete Selected
-        </button>
-        <button type="button" className="primary-button" onClick={() => void handleSave()} disabled={busy}>
-          Save
-        </button>
-        <select
-          className="text-input small composer-load-select"
-          value={loadId}
-          onChange={(event) => setLoadId(event.target.value)}
-          disabled={savedRows.length === 0 || busy}
-        >
-          <option value="">Saved plans</option>
-          {savedRows.map((row) => (
-            <option key={row.id} value={row.id}>
-              {row.name}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="secondary-button small"
-          onClick={() => void handleLoad()}
-          disabled={!loadId || busy}
-        >
-          Load
-        </button>
+
+        {moreOpen && (
+          <div className="composer-toolbar-row composer-toolbar-secondary" id="composer-secondary-toolbar">
+            <div className="composer-tool-group">
+              <label className="composer-mini-label" htmlFor="composer-template-select">Template</label>
+              <select
+                id="composer-template-select"
+                className="text-input small composer-template-select"
+                value={templateId}
+                onChange={(event) => setTemplateId(event.target.value as AnatomyTemplate['id'])}
+              >
+                {ANATOMY_TEMPLATES.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={applyTemplate}
+                disabled={busy}
+              >
+                Apply
+              </button>
+            </div>
+
+            <div className="composer-tool-group">
+              <label className="composer-mini-label" htmlFor="composer-preset-select">Segment preset</label>
+              <select
+                id="composer-preset-select"
+                className="text-input small composer-preset-select"
+                value={segmentPresetId}
+                onChange={(event) => setSegmentPresetId(event.target.value)}
+              >
+                {VESSEL_PRESETS.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="composer-tool-group">
+              <label className="composer-mini-label" htmlFor="composer-marker-select">Marker type</label>
+              <select
+                id="composer-marker-select"
+                className="text-input small composer-marker-select"
+                value={markerType}
+                onChange={(event) => setMarkerType(event.target.value as TreatmentMarkerType)}
+              >
+                {TREATMENT_MARKER_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="composer-tool-group">
+              <label className="composer-mini-label" htmlFor="composer-load-select">Saved plans</label>
+              <select
+                id="composer-load-select"
+                className="text-input small composer-load-select"
+                value={loadId}
+                onChange={(event) => setLoadId(event.target.value)}
+                disabled={savedRows.length === 0 || busy}
+              >
+                <option value="">Choose a plan</option>
+                {savedRows.map((row) => (
+                  <option key={row.id} value={row.id}>
+                    {row.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={() => void handleLoad()}
+                disabled={!loadId || busy}
+              >
+                Load
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       {(status || error) && (
@@ -891,44 +1317,66 @@ export function VesselComposerPage({
 
       <section className="composer-layout">
         <aside className="composer-side-panel">
-          <section>
-            <h3>Composition</h3>
-            <label className="field-label">
-              <span>Name</span>
-              <input
-                className="text-input"
-                value={compositionName}
-                onChange={(event) => setCompositionName(event.target.value)}
+          <PlanReadinessPanel
+            readiness={readiness}
+            issues={validationIssues}
+            fitWarnings={fitWarnings}
+          />
+
+          <PlanSummaryPanel
+            compositionName={compositionName}
+            onNameChange={setCompositionName}
+            caseId={caseId}
+            onCaseChange={setCaseId}
+            cases={cases}
+            linkedCaseTitle={selectedCase?.title ?? null}
+            segments={segments}
+            devicePlacements={devicePlacements}
+            treatmentMarkers={treatmentMarkers}
+            readiness={readiness}
+            notes={typeof compositionMetadata.notes === 'string' ? compositionMetadata.notes : ''}
+            onNotesChange={(notes) => patchMetadata({ notes })}
+          />
+
+          <section className="composer-properties-section">
+            <h3>Properties</h3>
+            {selectedObject ? (
+              <PropertyEditor
+                key={selectedObject.id}
+                selected={selectedObject}
+                segments={segments}
+                devices={filteredDevices}
+                allDevices={devices}
+                fitWarnings={fitWarnings}
+                onPatchSegment={patchSegment}
+                onPatchBifurcation={patchBifurcation}
+                onPatchDevicePlacement={patchDevicePlacement}
+                onPatchTreatmentMarker={patchTreatmentMarker}
+                onSegmentPresetChange={handleSegmentPresetChange}
+                onPlacementDeviceChange={handlePlacementDeviceChange}
+                onToggleBifurcationChild={toggleBifurcationChild}
               />
-            </label>
-            <label className="field-label">
-              <span>Linked case</span>
-              <select
-                className="text-input"
-                value={caseId}
-                onChange={(event) => setCaseId(event.target.value)}
-              >
-                <option value="">No case link</option>
-                {cases.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.title}
-                  </option>
-                ))}
-              </select>
-            </label>
+            ) : (
+              <div className="composer-empty-properties">
+                <p className="muted small">Select an object on the canvas to edit its properties.</p>
+                <p className="muted small">
+                  Tips: hold <kbd>Shift</kbd> to snap to grid · press <kbd>Esc</kbd> to cancel an add-tool ·
+                  <kbd>Ctrl+Z</kbd> to undo.
+                </p>
+              </div>
+            )}
           </section>
 
-          <section>
-            <h3>Catalog device</h3>
-            <input
-              className="text-input"
-              type="search"
-              placeholder="Filter devices"
-              value={deviceSearch}
-              onChange={(event) => setDeviceSearch(event.target.value)}
-            />
-            <label className="field-label">
-              <span>Device</span>
+          {selectedDevice && (
+            <section className="composer-catalog-section">
+              <h3>Catalog device</h3>
+              <input
+                className="text-input"
+                type="search"
+                placeholder="Filter devices"
+                value={deviceSearch}
+                onChange={(event) => setDeviceSearch(event.target.value)}
+              />
               <select
                 className="text-input"
                 value={selectedDeviceId}
@@ -945,49 +1393,11 @@ export function VesselComposerPage({
                   ))
                 )}
               </select>
-            </label>
-            {selectedDevice && (
               <p className="muted small">
                 {selectedDevice.manufacturer} / {selectedDevice.category}
               </p>
-            )}
-          </section>
-
-          <PlanSummaryPanel
-            linkedCaseTitle={selectedCase?.title ?? null}
-            segments={segments}
-            devicePlacements={devicePlacements}
-            treatmentMarkers={treatmentMarkers}
-            fitWarnings={fitWarnings}
-            notes={typeof compositionMetadata.notes === 'string' ? compositionMetadata.notes : ''}
-            onNotesChange={(notes) =>
-              setCompositionMetadata((current) => ({ ...current, notes }))
-            }
-          />
-
-          <PlanHealth issues={validationIssues} />
-
-          <section>
-            <h3>Properties</h3>
-            {selectedObject ? (
-              <PropertyEditor
-                selected={selectedObject}
-                segments={segments}
-                devices={filteredDevices}
-                allDevices={devices}
-                fitWarnings={fitWarnings}
-                onPatchSegment={patchSegment}
-                onPatchBifurcation={patchBifurcation}
-                onPatchDevicePlacement={patchDevicePlacement}
-                onPatchTreatmentMarker={patchTreatmentMarker}
-                onSegmentPresetChange={handleSegmentPresetChange}
-                onPlacementDeviceChange={handlePlacementDeviceChange}
-                onToggleBifurcationChild={toggleBifurcationChild}
-              />
-            ) : (
-              <p className="muted small">No vessel object selected.</p>
-            )}
-          </section>
+            </section>
+          )}
         </aside>
 
         <div className="composer-canvas-panel">
@@ -996,15 +1406,17 @@ export function VesselComposerPage({
               <strong>{compositionName || 'Untitled vessel plan'}</strong>
               <span>{selectedCase ? selectedCase.title : 'Unlinked composition'}</span>
             </div>
-            <span className="pill">
-              {segments.length} segment{segments.length === 1 ? '' : 's'} / {devicePlacements.length} device
-              {devicePlacements.length === 1 ? '' : 's'}
-            </span>
+            <div className="composer-canvas-stats">
+              <span className="pill">{segments.length} seg</span>
+              <span className="pill">{devicePlacements.length} dev</span>
+              <span className="pill">{treatmentMarkers.length} mkr</span>
+              <span className={`pill readiness-${readiness.status}`}>{readinessLabel(readiness.status)}</span>
+            </div>
           </header>
 
           <svg
             ref={svgRef}
-            className="vessel-composer-svg"
+            className={`vessel-composer-svg tool-${tool}`}
             viewBox={`0 0 ${WORKSPACE_WIDTH} ${WORKSPACE_HEIGHT}`}
             role="img"
             aria-label="Vessel composer canvas"
@@ -1023,6 +1435,18 @@ export function VesselComposerPage({
               height={WORKSPACE_HEIGHT}
               onPointerDown={handleCanvasPointerDown}
             />
+
+            {totalEntities === 0 && pendingSegmentStart === null && (
+              <g className="composer-empty-hint" pointerEvents="none">
+                <text x={WORKSPACE_WIDTH / 2} y={WORKSPACE_HEIGHT / 2 - 10} textAnchor="middle">
+                  Click "Segment" to draw a vessel
+                </text>
+                <text x={WORKSPACE_WIDTH / 2} y={WORKSPACE_HEIGHT / 2 + 18} textAnchor="middle" className="composer-empty-hint-sub">
+                  or open "More" and apply an anatomy template
+                </text>
+              </g>
+            )}
+
             {pendingSegmentStart && (
               <g className="composer-pending-segment">
                 <circle cx={pendingSegmentStart.x} cy={pendingSegmentStart.y} r="7" />
@@ -1041,7 +1465,10 @@ export function VesselComposerPage({
                 key={segment.id}
                 segment={segment}
                 selected={selectedId === segment.id}
+                hovered={hoveredId === segment.id && tool === 'select'}
+                layout={labelLayout.get(segment.id) ?? null}
                 onPointerDown={handleSegmentPointerDown}
+                onHoverChange={setHoveredId}
               />
             ))}
 
@@ -1050,7 +1477,9 @@ export function VesselComposerPage({
                 key={node.id}
                 node={node}
                 selected={selectedId === node.id}
+                hovered={hoveredId === node.id && tool === 'select'}
                 onPointerDown={handleObjectPointerDown}
+                onHoverChange={setHoveredId}
               />
             ))}
 
@@ -1064,7 +1493,9 @@ export function VesselComposerPage({
                   marker={marker}
                   point={point}
                   selected={selectedId === marker.id}
+                  hovered={hoveredId === marker.id && tool === 'select'}
                   onPointerDown={handleObjectPointerDown}
+                  onHoverChange={setHoveredId}
                 />
               );
             })}
@@ -1079,99 +1510,286 @@ export function VesselComposerPage({
                   placement={placement}
                   point={point}
                   selected={selectedId === placement.id}
+                  hovered={hoveredId === placement.id && tool === 'select'}
                   onPointerDown={handleObjectPointerDown}
+                  onHoverChange={setHoveredId}
                 />
               );
             })}
           </svg>
+          <footer className="composer-canvas-footer">
+            <span className="muted small">
+              {tool === 'segment' && pendingSegmentStart && 'Click the end point. Hold Shift for grid snap.'}
+              {tool === 'segment' && !pendingSegmentStart && 'Click the start point. Hold Shift for grid snap.'}
+              {tool === 'bifurcation' && 'Click near a vessel to add a bifurcation.'}
+              {tool === 'device' && 'Click a vessel segment to place the selected device.'}
+              {tool === 'marker' && 'Click a vessel segment to add a treatment marker.'}
+              {tool === 'select' && (selectedObject ? `${selectedObject.label} selected` : 'Click an object to select it. Esc clears.')}
+            </span>
+            <span className="muted small">
+              History {undoStackRef.current.length}/{redoStackRef.current.length}
+              {historyVersion >= 0 ? '' : ''}
+            </span>
+          </footer>
         </div>
       </section>
     </div>
   );
 }
 
+function ToolButton({
+  tool,
+  value,
+  label,
+  onSelect,
+  title,
+  disabled,
+}: {
+  tool: ComposerTool;
+  value: ComposerTool;
+  label: string;
+  onSelect: (next: ComposerTool) => void;
+  title?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={tool === value ? 'tool-tab active' : 'tool-tab'}
+      onClick={() => onSelect(value)}
+      disabled={disabled}
+      title={title}
+    >
+      {label}
+    </button>
+  );
+}
+
+function readinessLabel(status: PlanReadinessSummary['status']): string {
+  switch (status) {
+    case 'ready':
+      return 'Ready';
+    case 'warnings':
+      return 'Warnings';
+    case 'blocked':
+      return 'Blocked';
+    case 'empty':
+    default:
+      return 'Empty';
+  }
+}
+
+function PlanReadinessPanel({
+  readiness,
+  issues,
+  fitWarnings,
+}: {
+  readiness: PlanReadinessSummary;
+  issues: PlanValidationIssue[];
+  fitWarnings: DeviceFitWarning[];
+}) {
+  const errors = issues.filter((issue) => issue.severity === 'error');
+  const warnings = issues.filter((issue) => issue.severity === 'warning');
+  const fitWarn = fitWarnings.filter((w) => w.severity === 'warning');
+  const fitInfo = fitWarnings.filter((w) => w.severity === 'info');
+  return (
+    <section className="composer-readiness-panel">
+      <header className="composer-readiness-header">
+        <h3>Plan readiness</h3>
+        <span className={`composer-readiness-pill readiness-${readiness.status}`}>
+          {readinessLabel(readiness.status)}
+        </span>
+      </header>
+      <p className="composer-readiness-headline">{readiness.headline}</p>
+      <div className="composer-readiness-stats">
+        <ReadinessStat label="Segments" value={readiness.segmentCount} />
+        <ReadinessStat label="Branches" value={readiness.bifurcationCount} />
+        <ReadinessStat label="Devices" value={readiness.deviceCount} />
+        <ReadinessStat label="Markers" value={readiness.markerCount} />
+        <ReadinessStat label="Targets" value={readiness.interventionTargets} />
+        <ReadinessStat
+          label="Fit warn"
+          value={readiness.unresolvedFitWarnings}
+          accent={readiness.unresolvedFitWarnings > 0 ? 'warning' : undefined}
+        />
+      </div>
+      {errors.length > 0 && (
+        <ReadinessGroup title={`Blocking (${errors.length})`} severity="error">
+          {errors.slice(0, 5).map((issue) => (
+            <li key={issue.field}>{issue.message}</li>
+          ))}
+          {errors.length > 5 && <li className="muted small">{errors.length - 5} more…</li>}
+        </ReadinessGroup>
+      )}
+      {warnings.length > 0 && (
+        <ReadinessGroup title={`Warnings (${warnings.length})`} severity="warning">
+          {warnings.slice(0, 5).map((issue) => (
+            <li key={issue.field}>{issue.message}</li>
+          ))}
+          {warnings.length > 5 && <li className="muted small">{warnings.length - 5} more…</li>}
+        </ReadinessGroup>
+      )}
+      {fitWarn.length > 0 && (
+        <ReadinessGroup title={`Device fit (${fitWarn.length})`} severity="warning">
+          {fitWarn.slice(0, 4).map((warning, index) => (
+            <li key={`${warning.placementId}-${index}`}>{warning.message}</li>
+          ))}
+        </ReadinessGroup>
+      )}
+      {fitInfo.length > 0 && (
+        <ReadinessGroup title={`Info (${fitInfo.length})`} severity="info">
+          {fitInfo.slice(0, 3).map((warning, index) => (
+            <li key={`${warning.placementId}-${index}`}>{warning.message}</li>
+          ))}
+        </ReadinessGroup>
+      )}
+      {readiness.status === 'ready' && (
+        <p className="muted small">Plan validates clean. Save to keep changes.</p>
+      )}
+    </section>
+  );
+}
+
+function ReadinessStat({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent?: 'warning';
+}) {
+  return (
+    <div className={`composer-readiness-stat${accent ? ` ${accent}` : ''}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function ReadinessGroup({
+  title,
+  severity,
+  children,
+}: {
+  title: string;
+  severity: 'error' | 'warning' | 'info';
+  children: ReactNode;
+}) {
+  return (
+    <div className={`composer-readiness-group ${severity}`}>
+      <strong>{title}</strong>
+      <ul>{children}</ul>
+    </div>
+  );
+}
+
 function PlanSummaryPanel({
+  compositionName,
+  onNameChange,
+  caseId,
+  onCaseChange,
+  cases,
   linkedCaseTitle,
   segments,
   devicePlacements,
   treatmentMarkers,
-  fitWarnings,
+  readiness,
   notes,
   onNotesChange,
 }: {
+  compositionName: string;
+  onNameChange: (value: string) => void;
+  caseId: string;
+  onCaseChange: (value: string) => void;
+  cases: VascCase[];
   linkedCaseTitle: string | null;
   segments: VesselSegment[];
   devicePlacements: DevicePlacement[];
   treatmentMarkers: TreatmentMarker[];
-  fitWarnings: DeviceFitWarning[];
+  readiness: PlanReadinessSummary;
   notes: string;
   onNotesChange: (notes: string) => void;
 }) {
-  const pathologicSegments = segments.filter(
-    (segment) => segment.pathologyType !== 'normal' || segment.targetForIntervention,
+  const interventionTargets = segments.filter(
+    (segment) => segment.targetForIntervention || segment.pathologyType !== 'normal',
   );
-  const landingSummary = segments.filter(
-    (segment) => segment.pathologyType !== 'normal' || segment.targetForIntervention,
-  );
+  const pathologySummary = interventionTargets
+    .map((segment) => `${segment.label} (${prettyPathology(segment)})`)
+    .slice(0, 3);
+  const noteWords = notes.trim().split(/\s+/).filter(Boolean);
+  const noteSummary = noteWords.slice(0, 24).join(' ');
 
   return (
-    <section>
+    <section className="composer-summary-panel">
       <h3>Plan summary</h3>
       <div className="composer-summary-card">
-        <p className="muted small">
-          <strong>Case:</strong> {linkedCaseTitle ?? 'Unlinked'}
-        </p>
-        <SummaryBlock title="Main segments">
-          {segments.length === 0 ? (
-            <span className="muted small">No vessel segments drawn.</span>
-          ) : (
-            segments.slice(0, 6).map((segment) => (
-              <span key={segment.id}>
-                {segment.label}: {segment.proximalDiameterMm}/{segment.distalDiameterMm} mm, {segment.lengthMm} mm
-              </span>
-            ))
-          )}
-        </SummaryBlock>
-        <SummaryBlock title="Pathology">
-          {pathologicSegments.length === 0 ? (
-            <span className="muted small">No pathology marked.</span>
-          ) : (
-            pathologicSegments.map((segment) => (
-              <span key={segment.id}>
-                {segment.label}: {prettyPathology(segment)}
-              </span>
-            ))
-          )}
-        </SummaryBlock>
-        <SummaryBlock title="Devices">
-          {devicePlacements.length === 0 ? (
-            <span className="muted small">No devices placed.</span>
-          ) : (
-            devicePlacements.map((placement) => <span key={placement.id}>{placement.label}</span>)
-          )}
-        </SummaryBlock>
-        <SummaryBlock title="Landing zones">
-          {landingSummary.length === 0 ? (
-            <span className="muted small">No intervention target selected.</span>
-          ) : (
-            landingSummary.map((segment) => (
-              <span key={segment.id}>{segment.label}: {landingZoneSummary(segment, treatmentMarkers)}</span>
-            ))
-          )}
-        </SummaryBlock>
-        {fitWarnings.length > 0 && (
-          <SummaryBlock title="Fit warnings">
-            {fitWarnings.slice(0, 4).map((warning, index) => (
-              <span key={`${warning.placementId}-${index}`}>{warning.message}</span>
+        <label className="field-label">
+          <span>Plan name</span>
+          <input
+            className="text-input"
+            value={compositionName}
+            onChange={(event) => onNameChange(event.target.value)}
+          />
+        </label>
+        <label className="field-label">
+          <span>Linked case</span>
+          <select
+            className="text-input"
+            value={caseId}
+            onChange={(event) => onCaseChange(event.target.value)}
+          >
+            <option value="">No case link</option>
+            {cases.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.title}
+              </option>
             ))}
-          </SummaryBlock>
+          </select>
+        </label>
+        <SummaryRow label="Case">{linkedCaseTitle ?? 'Unlinked plan'}</SummaryRow>
+        <SummaryRow label="Pathology">
+          {pathologySummary.length === 0 ? 'No pathology marked' : pathologySummary.join(' · ')}
+          {interventionTargets.length > 3 ? ` · +${interventionTargets.length - 3} more` : ''}
+        </SummaryRow>
+        <SummaryRow label="Targets">
+          {interventionTargets.length === 0
+            ? 'None'
+            : interventionTargets
+                .slice(0, 3)
+                .map((segment) => `${segment.label}: ${landingZoneSummary(segment, treatmentMarkers)}`)
+                .join(' · ')}
+        </SummaryRow>
+        <SummaryRow label="Devices">
+          {devicePlacements.length === 0
+            ? 'No devices placed'
+            : devicePlacements
+                .slice(0, 3)
+                .map((placement) => placement.label || placement.deviceName)
+                .join(' · ') + (devicePlacements.length > 3 ? ` · +${devicePlacements.length - 3} more` : '')}
+        </SummaryRow>
+        <SummaryRow label="Status">
+          {readiness.errorCount > 0
+            ? `${readiness.errorCount} blocking issue(s)`
+            : readiness.warningCount > 0
+              ? `${readiness.warningCount} warning(s)`
+              : segments.length === 0
+                ? 'Empty plan'
+                : 'Ready'}
+        </SummaryRow>
+        {noteSummary && (
+          <SummaryRow label="Notes">
+            {noteSummary}
+            {noteWords.length > 24 ? '…' : ''}
+          </SummaryRow>
         )}
         <label className="field-label">
-          <span>Procedure notes</span>
+          <span>Procedural notes</span>
           <textarea
             className="text-input textarea compact"
             value={notes}
             onChange={(event) => onNotesChange(event.target.value)}
+            placeholder="Approach, sequence, contingencies…"
           />
         </label>
       </div>
@@ -1179,11 +1797,11 @@ function PlanSummaryPanel({
   );
 }
 
-function SummaryBlock({ title, children }: { title: string; children: ReactNode }) {
+function SummaryRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="composer-summary-block">
-      <strong>{title}</strong>
-      <div>{children}</div>
+    <div className="composer-summary-row">
+      <span className="composer-summary-row-label">{label}</span>
+      <span className="composer-summary-row-value">{children}</span>
     </div>
   );
 }
@@ -1231,24 +1849,84 @@ function PropertyEditor({
   onToggleBifurcationChild: (node: BifurcationNode, segmentId: string) => void;
 }) {
   if (selected.type === 'segment') {
-    const angleDeg = segmentAngleDeg(selected);
     return (
-      <div className="composer-selection-card">
-        <span className="measurement-type-pill">vessel segment</span>
+      <SegmentPropertyEditor
+        segment={selected}
+        onPatch={onPatchSegment}
+        onPresetChange={onSegmentPresetChange}
+      />
+    );
+  }
+  if (selected.type === 'devicePlacement') {
+    return (
+      <DevicePlacementPropertyEditor
+        placement={selected}
+        segments={segments}
+        devices={devices}
+        allDevices={allDevices}
+        fitWarnings={fitWarnings}
+        onPatch={onPatchDevicePlacement}
+        onDeviceChange={onPlacementDeviceChange}
+      />
+    );
+  }
+  if (selected.type === 'treatmentMarker') {
+    return (
+      <TreatmentMarkerPropertyEditor
+        marker={selected}
+        segments={segments}
+        onPatch={onPatchTreatmentMarker}
+      />
+    );
+  }
+  return (
+    <BifurcationPropertyEditor
+      node={selected}
+      segments={segments}
+      onPatch={onPatchBifurcation}
+      onToggleChild={onToggleBifurcationChild}
+    />
+  );
+}
+
+function PropertyGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="composer-property-group">
+      <h4>{title}</h4>
+      <div className="composer-property-group-body">{children}</div>
+    </div>
+  );
+}
+
+function SegmentPropertyEditor({
+  segment,
+  onPatch,
+  onPresetChange,
+}: {
+  segment: VesselSegment;
+  onPatch: (id: string, patch: Partial<VesselSegment>) => void;
+  onPresetChange: (segment: VesselSegment, vesselType: string) => void;
+}) {
+  const angleDeg = segmentAngleDeg(segment);
+  return (
+    <div className="composer-selection-card">
+      <span className="composer-selection-pill segment">vessel segment</span>
+
+      <PropertyGroup title="Identity">
         <label className="field-label">
           <span>Label</span>
           <input
             className="text-input"
-            value={selected.label}
-            onChange={(event) => onPatchSegment(selected.id, { label: event.target.value })}
+            value={segment.label}
+            onChange={(event) => onPatch(segment.id, { label: event.target.value })}
           />
         </label>
         <label className="field-label">
           <span>Preset</span>
           <select
             className="text-input"
-            value={getVesselPreset(selected.vesselType).id}
-            onChange={(event) => onSegmentPresetChange(selected, event.target.value)}
+            value={getVesselPreset(segment.vesselType).id}
+            onChange={(event) => onPresetChange(segment, event.target.value)}
           >
             {VESSEL_PRESETS.map((preset) => (
               <option key={preset.id} value={preset.id}>
@@ -1258,86 +1936,97 @@ function PropertyEditor({
           </select>
         </label>
         <label className="field-label">
-          <span>Vessel type/name</span>
+          <span>Vessel type / name</span>
           <input
             className="text-input"
-            value={selected.vesselType}
-            onChange={(event) => onPatchSegment(selected.id, { vesselType: event.target.value })}
+            value={segment.vesselType}
+            onChange={(event) => onPatch(segment.id, { vesselType: event.target.value })}
           />
         </label>
+      </PropertyGroup>
+
+      <PropertyGroup title="Geometry">
         <div className="composer-field-grid">
           <NumberField
-            label="Prox diameter mm"
-            value={selected.proximalDiameterMm}
+            label="Prox Ø mm"
+            value={segment.proximalDiameterMm}
             onChange={(value) => {
-              if (value !== '') onPatchSegment(selected.id, { proximalDiameterMm: value });
+              if (value !== '') onPatch(segment.id, { proximalDiameterMm: value });
             }}
           />
           <NumberField
-            label="Distal diameter mm"
-            value={selected.distalDiameterMm}
+            label="Distal Ø mm"
+            value={segment.distalDiameterMm}
             onChange={(value) => {
-              if (value !== '') onPatchSegment(selected.id, { distalDiameterMm: value });
-            }}
-          />
-        </div>
-        <NumberField
-          label="Length mm"
-          value={selected.lengthMm}
-          onChange={(value) => {
-            if (value !== '') onPatchSegment(selected.id, { lengthMm: value });
-          }}
-        />
-        <NumberField
-          label="Angle degrees"
-          value={angleDeg}
-          onChange={(value) => {
-            if (value !== '') onPatchSegment(selected.id, rotateSegmentToAngle(selected, value));
-          }}
-        />
-        <div className="composer-field-grid">
-          <NumberField
-            label="Start X"
-            value={Number(selected.start.x.toFixed(1))}
-            step={0.5}
-            onChange={(value) => {
-              if (value !== '') onPatchSegment(selected.id, { start: { ...selected.start, x: value } });
-            }}
-          />
-          <NumberField
-            label="Start Y"
-            value={Number(selected.start.y.toFixed(1))}
-            step={0.5}
-            onChange={(value) => {
-              if (value !== '') onPatchSegment(selected.id, { start: { ...selected.start, y: value } });
+              if (value !== '') onPatch(segment.id, { distalDiameterMm: value });
             }}
           />
         </div>
         <div className="composer-field-grid">
           <NumberField
-            label="End X"
-            value={Number(selected.end.x.toFixed(1))}
-            step={0.5}
+            label="Length mm"
+            value={segment.lengthMm}
             onChange={(value) => {
-              if (value !== '') onPatchSegment(selected.id, { end: { ...selected.end, x: value } });
+              if (value !== '') onPatch(segment.id, { lengthMm: value });
             }}
           />
           <NumberField
-            label="End Y"
-            value={Number(selected.end.y.toFixed(1))}
-            step={0.5}
+            label="Angle °"
+            value={angleDeg}
             onChange={(value) => {
-              if (value !== '') onPatchSegment(selected.id, { end: { ...selected.end, y: value } });
+              if (value !== '') onPatch(segment.id, rotateSegmentToAngle(segment, value));
             }}
           />
         </div>
+        <details className="composer-property-details">
+          <summary>Endpoint coordinates</summary>
+          <div className="composer-field-grid">
+            <NumberField
+              label="Start X"
+              value={Number(segment.start.x.toFixed(1))}
+              step={0.5}
+              onChange={(value) => {
+                if (value !== '') onPatch(segment.id, { start: { ...segment.start, x: value } });
+              }}
+            />
+            <NumberField
+              label="Start Y"
+              value={Number(segment.start.y.toFixed(1))}
+              step={0.5}
+              onChange={(value) => {
+                if (value !== '') onPatch(segment.id, { start: { ...segment.start, y: value } });
+              }}
+            />
+          </div>
+          <div className="composer-field-grid">
+            <NumberField
+              label="End X"
+              value={Number(segment.end.x.toFixed(1))}
+              step={0.5}
+              onChange={(value) => {
+                if (value !== '') onPatch(segment.id, { end: { ...segment.end, x: value } });
+              }}
+            />
+            <NumberField
+              label="End Y"
+              value={Number(segment.end.y.toFixed(1))}
+              step={0.5}
+              onChange={(value) => {
+                if (value !== '') onPatch(segment.id, { end: { ...segment.end, y: value } });
+              }}
+            />
+          </div>
+        </details>
+      </PropertyGroup>
+
+      <PropertyGroup title="Pathology">
         <label className="field-label">
-          <span>Pathology</span>
+          <span>Type</span>
           <select
             className="text-input"
-            value={selected.pathologyType}
+            value={segment.pathologyType}
             onChange={(event) =>
-              onPatchSegment(selected.id, { pathologyType: event.target.value as PathologyType })
+              onPatch(segment.id, { pathologyType: event.target.value as PathologyType })
             }
           >
             {PATHOLOGY_OPTIONS.map((option) => (
@@ -1349,53 +2038,74 @@ function PropertyEditor({
         </label>
         <NumberField
           label="Severity %"
-          value={selected.severityPercent ?? ''}
+          value={segment.severityPercent ?? ''}
           allowBlank
-          onChange={(value) => onPatchSegment(selected.id, { severityPercent: value === '' ? null : value })}
+          onChange={(value) => onPatch(segment.id, { severityPercent: value === '' ? null : value })}
         />
         <div className="composer-checkbox-grid">
           <label>
             <input
               type="checkbox"
-              checked={selected.treated}
-              onChange={(event) => onPatchSegment(selected.id, { treated: event.target.checked })}
+              checked={segment.targetForIntervention}
+              onChange={(event) =>
+                onPatch(segment.id, { targetForIntervention: event.target.checked })
+              }
             />
-            <span>Treated</span>
+            <span>Intervention target</span>
           </label>
           <label>
             <input
               type="checkbox"
-              checked={selected.targetForIntervention}
-              onChange={(event) =>
-                onPatchSegment(selected.id, { targetForIntervention: event.target.checked })
-              }
+              checked={segment.treated}
+              onChange={(event) => onPatch(segment.id, { treated: event.target.checked })}
             />
-            <span>Target</span>
+            <span>Treated</span>
           </label>
         </div>
-        <label className="field-label">
-          <span>Notes</span>
-          <textarea
-            className="text-input textarea compact"
-            value={selected.notes ?? ''}
-            onChange={(event) => onPatchSegment(selected.id, { notes: event.target.value || undefined })}
-          />
-        </label>
-      </div>
-    );
-  }
+      </PropertyGroup>
 
-  if (selected.type === 'devicePlacement') {
-    const deviceOptions = devices.length > 0 ? devices : allDevices;
-    return (
-      <div className="composer-selection-card">
-        <span className="measurement-type-pill">device placement</span>
+      <PropertyGroup title="Notes">
+        <textarea
+          className="text-input textarea compact"
+          value={segment.notes ?? ''}
+          onChange={(event) => onPatch(segment.id, { notes: event.target.value || undefined })}
+          placeholder="Anatomical notes, calcification, tortuosity…"
+        />
+      </PropertyGroup>
+    </div>
+  );
+}
+
+function DevicePlacementPropertyEditor({
+  placement,
+  segments,
+  devices,
+  allDevices,
+  fitWarnings,
+  onPatch,
+  onDeviceChange,
+}: {
+  placement: DevicePlacement;
+  segments: VesselSegment[];
+  devices: Device[];
+  allDevices: Device[];
+  fitWarnings: DeviceFitWarning[];
+  onPatch: (id: string, patch: Partial<DevicePlacement>) => void;
+  onDeviceChange: (placement: DevicePlacement, deviceId: string) => void;
+}) {
+  const deviceOptions = devices.length > 0 ? devices : allDevices;
+  const placementWarnings = fitWarnings.filter((warning) => warning.placementId === placement.id);
+  return (
+    <div className="composer-selection-card">
+      <span className="composer-selection-pill device">device placement</span>
+
+      <PropertyGroup title="Device">
         <label className="field-label">
-          <span>Linked device</span>
+          <span>Catalog device</span>
           <select
             className="text-input"
-            value={selected.deviceId}
-            onChange={(event) => onPlacementDeviceChange(selected, event.target.value)}
+            value={placement.deviceId}
+            onChange={(event) => onDeviceChange(placement, event.target.value)}
           >
             {deviceOptions.map((device) => (
               <option key={device.id} value={device.id}>
@@ -1405,19 +2115,27 @@ function PropertyEditor({
           </select>
         </label>
         <label className="field-label">
-          <span>Label</span>
+          <span>Placement label</span>
           <input
             className="text-input"
-            value={selected.label}
-            onChange={(event) => onPatchDevicePlacement(selected.id, { label: event.target.value })}
+            value={placement.label}
+            onChange={(event) => onPatch(placement.id, { label: event.target.value })}
           />
         </label>
+        <p className="muted small">
+          {placement.deviceName}
+          {placement.deviceManufacturer ? ` / ${placement.deviceManufacturer}` : ''}
+          {placement.deviceCategory ? ` / ${placement.deviceCategory}` : ''}
+        </p>
+      </PropertyGroup>
+
+      <PropertyGroup title="Position">
         <label className="field-label">
           <span>Attached segment</span>
           <select
             className="text-input"
-            value={selected.segmentId}
-            onChange={(event) => onPatchDevicePlacement(selected.id, { segmentId: event.target.value })}
+            value={placement.segmentId}
+            onChange={(event) => onPatch(placement.id, { segmentId: event.target.value })}
           >
             {segments.map((segment) => (
               <option key={segment.id} value={segment.id}>
@@ -1427,56 +2145,56 @@ function PropertyEditor({
           </select>
         </label>
         <label className="field-label">
-          <span>Position along segment</span>
+          <span>Position along segment ({Math.round(placement.t * 100)}%)</span>
           <input
             type="range"
             min={0}
             max={1}
             step={0.01}
-            value={selected.t}
-            onChange={(event) => onPatchDevicePlacement(selected.id, { t: Number(event.target.value) })}
+            value={placement.t}
+            onChange={(event) => onPatch(placement.id, { t: Number(event.target.value) })}
           />
         </label>
-        <NumberField
-          label="Normalized position"
-          value={selected.t}
-          step={0.01}
-          min={0}
-          max={1}
-          onChange={(value) => {
-            if (value !== '') onPatchDevicePlacement(selected.id, { t: clamp(value, 0, 1) });
-          }}
-        />
-        <p className="muted small">
-          {selected.deviceName}
-          {selected.deviceManufacturer ? ` / ${selected.deviceManufacturer}` : ''}
-          {selected.deviceCategory ? ` / ${selected.deviceCategory}` : ''}
-        </p>
-        <FitWarningList warnings={fitWarnings.filter((warning) => warning.placementId === selected.id)} />
-        <label className="field-label">
-          <span>Notes</span>
-          <textarea
-            className="text-input textarea compact"
-            value={selected.notes ?? ''}
-            onChange={(event) => onPatchDevicePlacement(selected.id, { notes: event.target.value || undefined })}
-          />
-        </label>
-      </div>
-    );
-  }
+      </PropertyGroup>
 
-  if (selected.type === 'treatmentMarker') {
-    return (
-      <div className="composer-selection-card">
-        <span className="measurement-type-pill">treatment marker</span>
+      <PropertyGroup title="Fit check">
+        <FitWarningList warnings={placementWarnings} />
+      </PropertyGroup>
+
+      <PropertyGroup title="Notes">
+        <textarea
+          className="text-input textarea compact"
+          value={placement.notes ?? ''}
+          onChange={(event) => onPatch(placement.id, { notes: event.target.value || undefined })}
+          placeholder="Sizing rationale, deployment plan…"
+        />
+      </PropertyGroup>
+    </div>
+  );
+}
+
+function TreatmentMarkerPropertyEditor({
+  marker,
+  segments,
+  onPatch,
+}: {
+  marker: TreatmentMarker;
+  segments: VesselSegment[];
+  onPatch: (id: string, patch: Partial<TreatmentMarker>) => void;
+}) {
+  return (
+    <div className="composer-selection-card">
+      <span className="composer-selection-pill marker">treatment marker</span>
+
+      <PropertyGroup title="Marker">
         <label className="field-label">
-          <span>Marker type</span>
+          <span>Type</span>
           <select
             className="text-input"
-            value={selected.markerType}
+            value={marker.markerType}
             onChange={(event) => {
               const nextType = event.target.value as TreatmentMarkerType;
-              onPatchTreatmentMarker(selected.id, {
+              onPatch(marker.id, {
                 markerType: nextType,
                 label: treatmentMarkerLabel(nextType),
               });
@@ -1489,12 +2207,15 @@ function PropertyEditor({
             ))}
           </select>
         </label>
+      </PropertyGroup>
+
+      <PropertyGroup title="Position">
         <label className="field-label">
           <span>Attached segment</span>
           <select
             className="text-input"
-            value={selected.segmentId}
-            onChange={(event) => onPatchTreatmentMarker(selected.id, { segmentId: event.target.value })}
+            value={marker.segmentId}
+            onChange={(event) => onPatch(marker.id, { segmentId: event.target.value })}
           >
             {segments.map((segment) => (
               <option key={segment.id} value={segment.id}>
@@ -1504,122 +2225,108 @@ function PropertyEditor({
           </select>
         </label>
         <label className="field-label">
-          <span>Position along segment</span>
+          <span>Position along segment ({Math.round(marker.t * 100)}%)</span>
           <input
             type="range"
             min={0}
             max={1}
             step={0.01}
-            value={selected.t}
-            onChange={(event) =>
-              onPatchTreatmentMarker(selected.id, { t: Number(event.target.value) })
-            }
+            value={marker.t}
+            onChange={(event) => onPatch(marker.id, { t: Number(event.target.value) })}
           />
         </label>
-        <NumberField
-          label="Normalized position"
-          value={selected.t}
-          step={0.01}
-          min={0}
-          max={1}
-          onChange={(value) => {
-            if (value !== '') onPatchTreatmentMarker(selected.id, { t: clamp(value, 0, 1) });
-          }}
-        />
-        <label className="field-label">
-          <span>Notes</span>
-          <textarea
-            className="text-input textarea compact"
-            value={selected.notes ?? ''}
-            onChange={(event) =>
-              onPatchTreatmentMarker(selected.id, { notes: event.target.value || undefined })
-            }
-          />
-        </label>
-      </div>
-    );
-  }
+      </PropertyGroup>
 
-  return (
-    <div className="composer-selection-card">
-      <span className="measurement-type-pill">bifurcation</span>
-      <label className="field-label">
-        <span>Label</span>
-        <input
-          className="text-input"
-          value={selected.label}
-          onChange={(event) => onPatchBifurcation(selected.id, { label: event.target.value })}
-        />
-      </label>
-      <label className="field-label">
-        <span>Parent segment</span>
-        <select
-          className="text-input"
-          value={selected.parentSegmentId ?? ''}
-          onChange={(event) =>
-            onPatchBifurcation(selected.id, {
-              parentSegmentId: event.target.value || null,
-              childSegmentIds: selected.childSegmentIds.filter((id) => id !== event.target.value),
-            })
-          }
-        >
-          <option value="">No parent</option>
-          {segments.map((segment) => (
-            <option key={segment.id} value={segment.id}>
-              {segment.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div className="field-label">
-        <span>Child branches</span>
-        <div className="composer-relation-list">
-          {segments.map((segment) => (
-            <label key={segment.id} className="composer-relation-row">
-              <input
-                type="checkbox"
-                checked={selected.childSegmentIds.includes(segment.id)}
-                disabled={selected.parentSegmentId === segment.id}
-                onChange={() => onToggleBifurcationChild(selected, segment.id)}
-              />
-              <span>{segment.label}</span>
-            </label>
-          ))}
-        </div>
-      </div>
-      <label className="field-label">
-        <span>Notes</span>
+      <PropertyGroup title="Notes">
         <textarea
           className="text-input textarea compact"
-          value={selected.notes ?? ''}
-          onChange={(event) => onPatchBifurcation(selected.id, { notes: event.target.value || undefined })}
+          value={marker.notes ?? ''}
+          onChange={(event) => onPatch(marker.id, { notes: event.target.value || undefined })}
+          placeholder="Anatomic landmark, fluoroscopy reference…"
         />
-      </label>
+      </PropertyGroup>
     </div>
   );
 }
 
-function PlanHealth({ issues }: { issues: PlanValidationIssue[] }) {
-  if (issues.length === 0) {
-    return (
-      <section>
-        <h3>Plan health</h3>
-        <p className="muted small">No validation issues.</p>
-      </section>
-    );
-  }
+function BifurcationPropertyEditor({
+  node,
+  segments,
+  onPatch,
+  onToggleChild,
+}: {
+  node: BifurcationNode;
+  segments: VesselSegment[];
+  onPatch: (id: string, patch: Partial<BifurcationNode>) => void;
+  onToggleChild: (node: BifurcationNode, segmentId: string) => void;
+}) {
   return (
-    <section>
-      <h3>Plan health</h3>
-      <ul className="composer-health-list">
-        {issues.slice(0, 6).map((issue) => (
-          <li key={`${issue.field}-${issue.message}`} className={issue.severity}>
-            <strong>{issue.severity}</strong>
-            <span>{issue.message}</span>
-          </li>
-        ))}
-      </ul>
-    </section>
+    <div className="composer-selection-card">
+      <span className="composer-selection-pill bifurcation">bifurcation</span>
+
+      <PropertyGroup title="Identity">
+        <label className="field-label">
+          <span>Label</span>
+          <input
+            className="text-input"
+            value={node.label}
+            onChange={(event) => onPatch(node.id, { label: event.target.value })}
+          />
+        </label>
+      </PropertyGroup>
+
+      <PropertyGroup title="Branches">
+        <label className="field-label">
+          <span>Parent segment</span>
+          <select
+            className="text-input"
+            value={node.parentSegmentId ?? ''}
+            onChange={(event) =>
+              onPatch(node.id, {
+                parentSegmentId: event.target.value || null,
+                childSegmentIds: node.childSegmentIds.filter((id) => id !== event.target.value),
+              })
+            }
+          >
+            <option value="">No parent</option>
+            {segments.map((segment) => (
+              <option key={segment.id} value={segment.id}>
+                {segment.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="field-label">
+          <span>Child branches</span>
+          <div className="composer-relation-list">
+            {segments.length === 0 ? (
+              <span className="muted small">Add segments to attach branches.</span>
+            ) : (
+              segments.map((segment) => (
+                <label key={segment.id} className="composer-relation-row">
+                  <input
+                    type="checkbox"
+                    checked={node.childSegmentIds.includes(segment.id)}
+                    disabled={node.parentSegmentId === segment.id}
+                    onChange={() => onToggleChild(node, segment.id)}
+                  />
+                  <span>{segment.label}</span>
+                </label>
+              ))
+            )}
+          </div>
+        </div>
+      </PropertyGroup>
+
+      <PropertyGroup title="Notes">
+        <textarea
+          className="text-input textarea compact"
+          value={node.notes ?? ''}
+          onChange={(event) => onPatch(node.id, { notes: event.target.value || undefined })}
+          placeholder="Origin, angulation, calcium burden…"
+        />
+      </PropertyGroup>
+    </div>
   );
 }
 
@@ -1665,20 +2372,37 @@ function NumberField({
 function SegmentSvg({
   segment,
   selected,
+  hovered,
+  layout,
   onPointerDown,
+  onHoverChange,
 }: {
   segment: VesselSegment;
   selected: boolean;
+  hovered: boolean;
+  layout: LabelLayoutEntry | null;
   onPointerDown: (event: ReactPointerEvent<SVGGElement>, segment: VesselSegment) => void;
+  onHoverChange: (id: string | null) => void;
 }) {
-  const labelPoint = segmentLabelPoint(segment);
   const preset = getVesselPreset(segment.vesselType);
   const avgDiameter = (segment.proximalDiameterMm + segment.distalDiameterMm) / 2;
   const strokeWidth = clamp(5 + avgDiameter / 2.6, 7, 18);
+  const primary = layout?.primary;
+  const secondary = layout?.secondary;
+  const className = [
+    'composer-object',
+    selected ? 'selected' : '',
+    hovered ? 'hovered' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
     <g
-      className={selected ? 'composer-object selected' : 'composer-object'}
+      className={className}
       onPointerDown={(event) => onPointerDown(event, segment)}
+      onPointerEnter={() => onHoverChange(segment.id)}
+      onPointerLeave={() => onHoverChange(null)}
     >
       <line
         className="composer-hit-line"
@@ -1695,22 +2419,17 @@ function SegmentSvg({
         y2={segment.end.y}
         strokeWidth={strokeWidth}
       />
-      {segment.pathologyType === 'stenosis' ? (
-        <circle className="composer-pathology-glyph stenosis" cx={labelPoint.x} cy={labelPoint.y - 2} r="9" />
+      {segment.pathologyType === 'stenosis' && primary ? (
+        <circle className="composer-pathology-glyph stenosis" cx={primary.x} cy={primary.y - 2} r="9" />
       ) : null}
-      {segment.pathologyType === 'occlusion' ? (
+      {segment.pathologyType === 'occlusion' && primary ? (
         <line
           className="composer-pathology-glyph occlusion"
-          x1={labelPoint.x - 11}
-          y1={labelPoint.y - 11}
-          x2={labelPoint.x + 11}
-          y2={labelPoint.y + 11}
+          x1={primary.x - 11}
+          y1={primary.y - 11}
+          x2={primary.x + 11}
+          y2={primary.y + 11}
         />
-      ) : null}
-      {segment.pathologyType === 'dissection' || segment.pathologyType === 'thrombus' ? (
-        <text className="composer-pathology-text" x={labelPoint.x} y={labelPoint.y - 26} textAnchor={labelPoint.anchor}>
-          {segment.pathologyType}
-        </text>
       ) : null}
       <line
         className="composer-centerline"
@@ -1721,22 +2440,26 @@ function SegmentSvg({
       />
       <circle className="composer-endpoint" cx={segment.start.x} cy={segment.start.y} r="5" />
       <circle className="composer-endpoint" cx={segment.end.x} cy={segment.end.y} r="5" />
-      <text
-        className="composer-label"
-        x={labelPoint.x}
-        y={labelPoint.y}
-        textAnchor={labelPoint.anchor}
-      >
-        {segment.label}
-      </text>
-      <text
-        className="composer-sub-label"
-        x={labelPoint.x}
-        y={labelPoint.y + 16}
-        textAnchor={labelPoint.anchor}
-      >
-        {segment.proximalDiameterMm} / {segment.distalDiameterMm} mm - {segment.lengthMm} mm
-      </text>
+      {primary && (
+        <text
+          className="composer-label"
+          x={primary.x}
+          y={primary.y}
+          textAnchor={primary.anchor}
+        >
+          {segment.label}
+        </text>
+      )}
+      {secondary && (
+        <text
+          className="composer-sub-label"
+          x={secondary.x}
+          y={secondary.y}
+          textAnchor={secondary.anchor}
+        >
+          {segment.proximalDiameterMm}/{segment.distalDiameterMm} mm · {segment.lengthMm} mm
+        </text>
+      )}
     </g>
   );
 }
@@ -1775,24 +2498,34 @@ function BifurcationLinks({
 function BifurcationSvg({
   node,
   selected,
+  hovered,
   onPointerDown,
+  onHoverChange,
 }: {
   node: BifurcationNode;
   selected: boolean;
+  hovered: boolean;
   onPointerDown: (event: ReactPointerEvent<SVGGElement>, id: string) => void;
+  onHoverChange: (id: string | null) => void;
 }) {
+  const className = [
+    'composer-object',
+    selected ? 'selected' : '',
+    hovered ? 'hovered' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   return (
     <g
-      className={selected ? 'composer-object selected' : 'composer-object'}
+      className={className}
       onPointerDown={(event) => onPointerDown(event, node.id)}
+      onPointerEnter={() => onHoverChange(node.id)}
+      onPointerLeave={() => onHoverChange(null)}
     >
-      <circle className="composer-node-hit" cx={node.position.x} cy={node.position.y} r="24" />
-      <circle className="composer-node" cx={node.position.x} cy={node.position.y} r="12" />
-      <text className="composer-label" x={node.position.x} y={node.position.y - 22} textAnchor="middle">
+      <circle className="composer-node-hit" cx={node.position.x} cy={node.position.y} r="22" />
+      <circle className="composer-node" cx={node.position.x} cy={node.position.y} r="11" />
+      <text className="composer-label" x={node.position.x} y={node.position.y - 20} textAnchor="middle">
         {node.label}
-      </text>
-      <text className="composer-sub-label" x={node.position.x} y={node.position.y + 32} textAnchor="middle">
-        {node.childSegmentIds.length} child branch{node.childSegmentIds.length === 1 ? '' : 'es'}
       </text>
     </g>
   );
@@ -1802,22 +2535,35 @@ function DevicePlacementSvg({
   placement,
   point,
   selected,
+  hovered,
   onPointerDown,
+  onHoverChange,
 }: {
   placement: DevicePlacement;
   point: ComposerPoint;
   selected: boolean;
+  hovered: boolean;
   onPointerDown: (event: ReactPointerEvent<SVGGElement>, id: string) => void;
+  onHoverChange: (id: string | null) => void;
 }) {
+  const className = [
+    'composer-marker',
+    selected ? 'selected' : '',
+    hovered ? 'hovered' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   return (
     <g
-      className={selected ? 'composer-marker selected' : 'composer-marker'}
+      className={className}
       transform={`translate(${point.x} ${point.y})`}
       onPointerDown={(event) => onPointerDown(event, placement.id)}
+      onPointerEnter={() => onHoverChange(placement.id)}
+      onPointerLeave={() => onHoverChange(null)}
     >
-      <circle r="12" />
+      <circle r="11" />
       <path d="M -5 0 L 0 -6 L 5 0 L 0 6 Z" />
-      <text x="17" y="5">
+      <text x="16" y="5">
         {placement.label || placement.deviceName}
       </text>
     </g>
@@ -1828,22 +2574,32 @@ function TreatmentMarkerSvg({
   marker,
   point,
   selected,
+  hovered,
   onPointerDown,
+  onHoverChange,
 }: {
   marker: TreatmentMarker;
   point: ComposerPoint;
   selected: boolean;
+  hovered: boolean;
   onPointerDown: (event: ReactPointerEvent<SVGGElement>, id: string) => void;
+  onHoverChange: (id: string | null) => void;
 }) {
+  const className = [
+    'composer-treatment-marker',
+    `marker-${marker.markerType}`,
+    selected ? 'selected' : '',
+    hovered ? 'hovered' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   return (
     <g
-      className={
-        selected
-          ? `composer-treatment-marker marker-${marker.markerType} selected`
-          : `composer-treatment-marker marker-${marker.markerType}`
-      }
+      className={className}
       transform={`translate(${point.x} ${point.y})`}
       onPointerDown={(event) => onPointerDown(event, marker.id)}
+      onPointerEnter={() => onHoverChange(marker.id)}
+      onPointerLeave={() => onHoverChange(null)}
     >
       <line x1="0" y1="-15" x2="0" y2="15" />
       <circle r="6" />
@@ -1854,11 +2610,31 @@ function TreatmentMarkerSvg({
   );
 }
 
-function moveSegment(original: VesselSegment, dx: number, dy: number): VesselSegment {
+function moveSegment(
+  original: VesselSegment,
+  dx: number,
+  dy: number,
+  snap: boolean,
+): VesselSegment {
+  const newStart = translatePoint(original.start, dx, dy);
+  const newEnd = translatePoint(original.end, dx, dy);
+  if (snap) {
+    const snappedStart: ComposerPoint = {
+      x: clamp(snapToGrid(newStart.x, GRID_SIZE), 0, WORKSPACE_WIDTH),
+      y: clamp(snapToGrid(newStart.y, GRID_SIZE), 0, WORKSPACE_HEIGHT),
+    };
+    const offsetX = snappedStart.x - newStart.x;
+    const offsetY = snappedStart.y - newStart.y;
+    return {
+      ...original,
+      start: snappedStart,
+      end: translatePoint(newEnd, offsetX, offsetY),
+    };
+  }
   return {
     ...original,
-    start: translatePoint(original.start, dx, dy),
-    end: translatePoint(original.end, dx, dy),
+    start: newStart,
+    end: newEnd,
   };
 }
 
@@ -1900,10 +2676,21 @@ function rotateSegmentToAngle(segment: VesselSegment, angleDeg: number): Partial
   };
 }
 
-function moveBifurcation(original: BifurcationNode, dx: number, dy: number): BifurcationNode {
+function moveBifurcation(
+  original: BifurcationNode,
+  dx: number,
+  dy: number,
+  snap: boolean,
+): BifurcationNode {
+  const moved = translatePoint(original.position, dx, dy);
   return {
     ...original,
-    position: translatePoint(original.position, dx, dy),
+    position: snap
+      ? {
+          x: clamp(snapToGrid(moved.x, GRID_SIZE), 0, WORKSPACE_WIDTH),
+          y: clamp(snapToGrid(moved.y, GRID_SIZE), 0, WORKSPACE_HEIGHT),
+        }
+      : moved,
   };
 }
 
@@ -1921,7 +2708,7 @@ function moveDevicePlacement(
   return {
     ...original,
     segmentId: projection.segment.id,
-    t: projection.t,
+    t: snapNormalizedT(projection.t, 0.025),
   };
 }
 
@@ -1939,7 +2726,7 @@ function moveTreatmentMarker(
   return {
     ...original,
     segmentId: projection.segment.id,
-    t: projection.t,
+    t: snapNormalizedT(projection.t, 0.025),
   };
 }
 
@@ -2002,45 +2789,6 @@ function interpolateSegment(segment: VesselSegment, t: number): ComposerPoint {
   };
 }
 
-function midpoint(a: ComposerPoint, b: ComposerPoint): ComposerPoint {
-  return {
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2,
-  };
-}
-
-function segmentLabelPoint(segment: VesselSegment): ComposerPoint & { anchor: 'start' | 'middle' | 'end' } {
-  const mid = midpoint(segment.start, segment.end);
-  const dx = segment.end.x - segment.start.x;
-  const dy = segment.end.y - segment.start.y;
-  const length = Math.hypot(dx, dy) || 1;
-  const isMostlyVertical = Math.abs(dy) > Math.abs(dx) * 1.4;
-  const isMostlyHorizontal = Math.abs(dx) > Math.abs(dy) * 1.4;
-
-  if (isMostlyVertical) {
-    return {
-      x: clamp(mid.x + 34, 24, WORKSPACE_WIDTH - 24),
-      y: clamp(mid.y - 6, 24, WORKSPACE_HEIGHT - 24),
-      anchor: 'start',
-    };
-  }
-  if (isMostlyHorizontal) {
-    return {
-      x: clamp(mid.x, 24, WORKSPACE_WIDTH - 24),
-      y: clamp(mid.y - 22, 24, WORKSPACE_HEIGHT - 24),
-      anchor: 'middle',
-    };
-  }
-
-  const normalX = (-dy / length) * 22;
-  const normalY = (dx / length) * 22;
-  return {
-    x: clamp(mid.x + normalX, 24, WORKSPACE_WIDTH - 24),
-    y: clamp(mid.y + normalY, 24, WORKSPACE_HEIGHT - 24),
-    anchor: normalX >= 0 ? 'start' : 'end',
-  };
-}
-
 function buildFitWarnings(
   placements: DevicePlacement[],
   segments: VesselSegment[],
@@ -2069,10 +2817,10 @@ function landingZoneSummary(segment: VesselSegment, markers: TreatmentMarker[]):
   const segmentMarkers = markers.filter((marker) => marker.segmentId === segment.id);
   const hasProximal = segmentMarkers.some((marker) => marker.markerType === 'proximalLandingZone');
   const hasDistal = segmentMarkers.some((marker) => marker.markerType === 'distalLandingZone');
-  if (hasProximal && hasDistal) return 'proximal and distal present';
-  if (hasProximal) return 'missing distal';
-  if (hasDistal) return 'missing proximal';
-  return 'missing proximal and distal';
+  if (hasProximal && hasDistal) return 'landing zones complete';
+  if (hasProximal) return 'distal LZ missing';
+  if (hasDistal) return 'proximal LZ missing';
+  return 'landing zones missing';
 }
 
 function distance(a: ComposerPoint, b: ComposerPoint): number {
@@ -2103,4 +2851,52 @@ function setComposerDragSelectionSuppressed(active: boolean) {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function relayoutTemplateBranches(
+  template: Pick<
+    VesselCompositionData,
+    'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers'
+  >,
+): Pick<
+  VesselCompositionData,
+  'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers'
+> {
+  const updatedSegments = template.segments.map((segment) => ({ ...segment }));
+
+  for (const bifurcation of template.bifurcations) {
+    const children = bifurcation.childSegmentIds
+      .map((id) => updatedSegments.find((segment) => segment.id === id))
+      .filter((segment): segment is VesselSegment => Boolean(segment));
+    if (children.length < 2) continue;
+
+    const center = bifurcation.position;
+    children.sort((a, b) => {
+      const angleA = Math.atan2(a.end.y - center.y, a.end.x - center.x);
+      const angleB = Math.atan2(b.end.y - center.y, b.end.x - center.x);
+      return angleA - angleB;
+    });
+
+    const minSpacing = 0.32;
+    for (let i = 1; i < children.length; i++) {
+      const prev = children[i - 1];
+      const curr = children[i];
+      const angleA = Math.atan2(prev.end.y - center.y, prev.end.x - center.x);
+      const angleB = Math.atan2(curr.end.y - center.y, curr.end.x - center.x);
+      const delta = angleB - angleA;
+      if (Math.abs(delta) < minSpacing) {
+        const additional = minSpacing - Math.abs(delta);
+        const sign = delta >= 0 ? 1 : -1;
+        const length = Math.hypot(curr.end.x - center.x, curr.end.y - center.y) || 1;
+        const newAngle = angleB + sign * additional;
+        curr.end = {
+          x: clamp(center.x + Math.cos(newAngle) * length, 24, WORKSPACE_WIDTH - 24),
+          y: clamp(center.y + Math.sin(newAngle) * length, 24, WORKSPACE_HEIGHT - 24),
+        };
+        curr.start = { x: center.x, y: center.y };
+      }
+    }
+  }
+
+  return { ...template, segments: updatedSegments };
 }
