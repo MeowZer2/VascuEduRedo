@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useState } from 'react';
 import { NrrdViewer, type ViewerMeasurement } from '../../components/NrrdViewer';
 import { createAttempt } from '../../lib/attempts';
 import { saveAttempt } from '../../lib/progress';
@@ -11,7 +11,51 @@ interface TrainingWorkspaceProps {
   onChooseCase: () => void;
 }
 
+const WORKSPACE_PREF_KEY = 'vascedu:training-workspace';
+const DEFAULT_ASIDE_WIDTH = 430;
+const MIN_ASIDE_WIDTH = 320;
+const MAX_ASIDE_WIDTH = 620;
+
+interface WorkspacePrefs {
+  asideCollapsed: boolean;
+  keyFindingsCollapsed: boolean;
+  asideWidth: number;
+}
+
+function loadWorkspacePrefs(): WorkspacePrefs {
+  if (typeof window === 'undefined') {
+    return { asideCollapsed: false, keyFindingsCollapsed: false, asideWidth: DEFAULT_ASIDE_WIDTH };
+  }
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_PREF_KEY);
+    if (!raw) {
+      return { asideCollapsed: false, keyFindingsCollapsed: false, asideWidth: DEFAULT_ASIDE_WIDTH };
+    }
+    const parsed = JSON.parse(raw) as Partial<WorkspacePrefs>;
+    return {
+      asideCollapsed: Boolean(parsed.asideCollapsed),
+      keyFindingsCollapsed: Boolean(parsed.keyFindingsCollapsed),
+      asideWidth:
+        typeof parsed.asideWidth === 'number'
+          ? Math.min(MAX_ASIDE_WIDTH, Math.max(MIN_ASIDE_WIDTH, parsed.asideWidth))
+          : DEFAULT_ASIDE_WIDTH,
+    };
+  } catch {
+    return { asideCollapsed: false, keyFindingsCollapsed: false, asideWidth: DEFAULT_ASIDE_WIDTH };
+  }
+}
+
+function saveWorkspacePrefs(prefs: WorkspacePrefs) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(WORKSPACE_PREF_KEY, JSON.stringify(prefs));
+  } catch {
+    // Best-effort local preference persistence.
+  }
+}
+
 export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: TrainingWorkspaceProps) {
+  const [workspacePrefs, setWorkspacePrefs] = useState<WorkspacePrefs>(() => loadWorkspacePrefs());
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const [attemptId, setAttemptId] = useState<string | null>(null);
@@ -47,8 +91,50 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
     setJumpBookmark({ ...bookmark });
   }
 
+  function updateWorkspacePrefs(updater: (current: WorkspacePrefs) => WorkspacePrefs) {
+    setWorkspacePrefs((current) => {
+      const next = updater(current);
+      saveWorkspacePrefs(next);
+      return next;
+    });
+  }
+
+  function startAsideResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = workspacePrefs.asideWidth;
+    const pointerId = event.pointerId;
+    event.currentTarget.setPointerCapture(pointerId);
+
+    function onMove(moveEvent: PointerEvent) {
+      const nextWidth = Math.min(
+        MAX_ASIDE_WIDTH,
+        Math.max(MIN_ASIDE_WIDTH, startWidth - (moveEvent.clientX - startX)),
+      );
+      updateWorkspacePrefs((current) => ({ ...current, asideWidth: nextWidth, asideCollapsed: false }));
+    }
+
+    function onUp() {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    }
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+  }
+
+  const hasBookmarks = Boolean(vascCase.bookmarks && vascCase.bookmarks.length > 0);
+  const asideCollapsed = workspacePrefs.asideCollapsed;
+
   return (
-    <div className="training-layout">
+    <div
+      className={`training-layout${asideCollapsed ? ' training-layout-aside-collapsed' : ''}`}
+      style={
+        {
+          '--training-aside-width': `${workspacePrefs.asideWidth}px`,
+        } as CSSProperties
+      }
+    >
       <section className="training-main">
         <div className="workspace-header">
           <div>
@@ -75,34 +161,65 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
           activeBookmark={activeBookmark}
         />
       </section>
+      <button
+        type="button"
+        className="training-splitter"
+        onPointerDown={startAsideResize}
+        disabled={asideCollapsed}
+        aria-label="Resize question panel"
+        title="Drag to resize question panel"
+      />
       <aside className="training-aside">
-        {vascCase.bookmarks && vascCase.bookmarks.length > 0 ? (
+        <button
+          type="button"
+          className="training-aside-toggle"
+          onClick={() =>
+            updateWorkspacePrefs((current) => ({ ...current, asideCollapsed: !current.asideCollapsed }))
+          }
+        >
+          {asideCollapsed ? 'Show questions' : 'Hide panel'}
+        </button>
+        {!asideCollapsed && hasBookmarks ? (
           <section className="question-card key-findings-panel">
-            <h3>Key findings</h3>
-            <div className="key-finding-list">
-              {vascCase.bookmarks.map((bookmark) => (
-                <button
-                  key={bookmark.id}
-                  type="button"
-                  className={
-                    activeBookmark?.id === bookmark.id
-                      ? 'key-finding-row active'
-                      : 'key-finding-row'
-                  }
-                  onClick={() => jumpToBookmark(bookmark)}
-                >
-                  <strong>{bookmark.title}</strong>
-                  <span>
-                    {bookmark.plane} slice {bookmark.sliceIndex + 1}
-                  </span>
-                </button>
-              ))}
-            </div>
+            <button
+              type="button"
+              className="panel-section-toggle"
+              onClick={() =>
+                updateWorkspacePrefs((current) => ({
+                  ...current,
+                  keyFindingsCollapsed: !current.keyFindingsCollapsed,
+                }))
+              }
+            >
+              <span>Key findings</span>
+              <strong>{workspacePrefs.keyFindingsCollapsed ? 'Show' : 'Hide'}</strong>
+            </button>
+            {!workspacePrefs.keyFindingsCollapsed ? (
+              <div className="key-finding-list">
+                {vascCase.bookmarks?.map((bookmark) => (
+                  <button
+                    key={bookmark.id}
+                    type="button"
+                    className={
+                      activeBookmark?.id === bookmark.id
+                        ? 'key-finding-row active'
+                        : 'key-finding-row'
+                    }
+                    onClick={() => jumpToBookmark(bookmark)}
+                  >
+                    <strong>{bookmark.title}</strong>
+                    <span>
+                      {bookmark.plane} slice {bookmark.sliceIndex + 1}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </section>
         ) : null}
-        {completedAttempt ? (
+        {!asideCollapsed && completedAttempt ? (
           <CaseCompletionSummary attempt={completedAttempt} onFinish={onFinish} />
-        ) : (
+        ) : !asideCollapsed ? (
           <QuestionPanel
             vascCase={vascCase}
             attemptId={attemptId}
@@ -112,7 +229,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             bookmarks={vascCase.bookmarks ?? []}
             onJumpToBookmark={jumpToBookmark}
           />
-        )}
+        ) : null}
       </aside>
     </div>
   );

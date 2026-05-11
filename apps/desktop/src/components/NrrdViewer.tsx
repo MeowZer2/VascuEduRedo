@@ -22,7 +22,11 @@ import {
 } from '../lib/recentFiles';
 import {
   loadDisplayConvention,
+  loadViewerLayout,
+  loadViewerToolMode,
   saveDisplayConvention,
+  saveViewerLayout,
+  saveViewerToolMode,
 } from '../lib/viewerSettings';
 import { ViewportPane, type PaneSnapshot } from './ViewportPane';
 import {
@@ -198,10 +202,10 @@ export function NrrdViewer({
   const [volume, setVolume] = useState<VolumeInfo | null>(null);
   const [status, setStatus] = useState<ViewerStatus>('loading');
   const [error, setError] = useState<string | null>(null);
-  const [layout, setLayoutState] = useState<ViewerLayout>('1x1');
+  const [layout, setLayoutState] = useState<ViewerLayout>(() => loadViewerLayout());
   const [panes, setPanes] = useState<PaneSnapshot[]>([]);
   const [activePane, setActivePane] = useState(0);
-  const [toolMode, setToolMode] = useState<ViewerToolMode>('scroll');
+  const [toolMode, setToolModeState] = useState<ViewerToolMode>(() => loadViewerToolMode());
   const [sync, setSync] = useState<SyncFlags>({ slice: true, wl: true, zoom: true });
   const [displayConvention, setDisplayConventionState] =
     useState<DisplayConvention>(() => loadDisplayConvention());
@@ -213,6 +217,7 @@ export function NrrdViewer({
   const [dicomImportStatus, setDicomImportStatus] = useState<'idle' | 'scanning' | 'error'>('idle');
   const [dicomImportError, setDicomImportError] = useState<string | null>(null);
   const [metaOpen, setMetaOpen] = useState(false);
+  const [windowControlsOpen, setWindowControlsOpen] = useState(false);
   const [focusedPaneIndex, setFocusedPaneIndex] = useState<number | null>(null);
 
   // Whenever the case-supplied volumePath changes, snap back to it as the
@@ -225,6 +230,10 @@ export function NrrdViewer({
   const setDisplayConvention = useCallback((next: DisplayConvention) => {
     setDisplayConventionState(next);
     saveDisplayConvention(next);
+  }, []);
+  const setToolMode = useCallback((next: ViewerToolMode) => {
+    setToolModeState(next);
+    saveViewerToolMode(next);
   }, []);
   const [crosshair, setCrosshair] = useState<CrosshairVoxel | null>(null);
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
@@ -382,6 +391,7 @@ export function NrrdViewer({
       return target.isContentEditable;
     }
     function onKey(e: KeyboardEvent) {
+      if (isEditableTarget(e.target)) return;
       if (e.key === 'Escape') {
         // Escape priority: exit focus mode first so the user can step back
         // out of a maximized pane without losing in-progress points.
@@ -392,8 +402,58 @@ export function NrrdViewer({
         setPanes((current) => current.map((p) => ({ ...p, pendingPoints: [] })));
         return;
       }
+      const active = panes[activePane];
+      if ((e.key === 'ArrowUp' || e.key.toLowerCase() === 'k') && volume && active) {
+        e.preventDefault();
+        handleSliceChange(activePane, active.slice - 1);
+        return;
+      }
+      if ((e.key === 'ArrowDown' || e.key.toLowerCase() === 'j') && volume && active) {
+        e.preventDefault();
+        handleSliceChange(activePane, active.slice + 1);
+        return;
+      }
+      if (e.key === '1') {
+        e.preventDefault();
+        setLayout('1x1');
+        return;
+      }
+      if (e.key === '2') {
+        e.preventDefault();
+        setLayout('1x2');
+        return;
+      }
+      if (e.key === '3') {
+        e.preventDefault();
+        setLayout('1x3');
+        return;
+      }
+      if (e.key === '4') {
+        e.preventDefault();
+        setLayout('2x2');
+        return;
+      }
+      if (e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        setToolMode('scroll');
+        return;
+      }
+      if (e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        setToolMode('distance');
+        return;
+      }
+      if (e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        setToolMode('angle');
+        return;
+      }
+      if (e.key.toLowerCase() === 'w') {
+        e.preventDefault();
+        setWindowControlsOpen((open) => !open);
+        return;
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (isEditableTarget(e.target)) return;
         setPanes((current) => {
           const pane = current[activePane];
           if (!pane || !pane.selectedMeasurementId) return current;
@@ -412,7 +472,7 @@ export function NrrdViewer({
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [activePane, focusedPaneIndex]);
+  }, [activePane, focusedPaneIndex, panes, volume, setToolMode]);
 
   // Whenever the panes' measurements change, recompute the latest distance for quiz.
   useEffect(() => {
@@ -432,6 +492,7 @@ export function NrrdViewer({
   function setLayout(next: ViewerLayout) {
     if (!volume) {
       setLayoutState(next);
+      saveViewerLayout(next);
       return;
     }
     const targetCount = PANE_COUNT_BY_LAYOUT[next];
@@ -448,6 +509,7 @@ export function NrrdViewer({
       return [...current, ...additions];
     });
     setLayoutState(next);
+    saveViewerLayout(next);
     if (activePane >= targetCount) setActivePane(0);
     setFocusedPaneIndex(null);
   }
@@ -808,9 +870,13 @@ export function NrrdViewer({
 
   const activeWindow = panes[activePane] ?? null;
   const controlsDisabled = !volume || status !== 'ready' || panes.length === 0;
+  const activeSliceMeasurements =
+    activeWindow?.measurements.filter(
+      (m) => m.plane === activeWindow.plane && m.sliceIndex === activeWindow.slice,
+    ) ?? [];
 
   return (
-    <section className="viewer-card">
+    <section className={`viewer-card${focusedPaneIndex !== null ? ' viewer-card-focused' : ''}`}>
       <div className="viewer-header">
         <div>
           <h3>NRRD MPR Viewer</h3>
@@ -862,7 +928,7 @@ export function NrrdViewer({
           <span className="pill">{layout.toUpperCase()} · MPR</span>
         </div>
       </div>
-      <div className="viewer-source-row">
+      <div className="viewer-source-row viewer-secondary-chrome">
         <button
           type="button"
           className="secondary-button small"
@@ -1005,7 +1071,7 @@ export function NrrdViewer({
         </section>
       ) : null}
 
-      <div className="viewer-tool-row">
+      <div className="viewer-tool-row viewer-tool-row-primary">
         <div className="layout-tabs" role="group" aria-label="Viewer layout">
           {LAYOUT_OPTIONS.map((opt) => (
             <button
@@ -1054,7 +1120,9 @@ export function NrrdViewer({
             Angle
           </button>
         </div>
-        <div className="sync-tabs" role="group" aria-label="Manual orientation fallback">
+        <details className="viewer-advanced-tools">
+          <summary>Advanced</summary>
+          <div className="sync-tabs" role="group" aria-label="Manual orientation fallback">
           <button
             type="button"
             className={manualFlips.flipX ? 'tool-tab active' : 'tool-tab'}
@@ -1082,7 +1150,24 @@ export function NrrdViewer({
           >
             Reset orientation
           </button>
-        </div>
+          </div>
+          <button
+            type="button"
+            className="secondary-button small"
+            disabled={!volume}
+            onClick={() => setMetaOpen((open) => !open)}
+          >
+            {metaOpen ? 'Hide metadata' : 'Metadata'}
+          </button>
+          <button
+            type="button"
+            className="secondary-button small"
+            disabled={!activeWindow}
+            onClick={() => setWindowControlsOpen((open) => !open)}
+          >
+            {windowControlsOpen ? 'Hide W/L' : 'W/L controls'}
+          </button>
+        </details>
         <div className="sync-tabs" role="group" aria-label="Display convention">
           <button
             type="button"
@@ -1110,7 +1195,7 @@ export function NrrdViewer({
             disabled={controlsDisabled}
             onClick={() => setSync((s) => ({ ...s, slice: !s.slice }))}
           >
-            Sync slice
+            Slice
           </button>
           <button
             type="button"
@@ -1118,7 +1203,7 @@ export function NrrdViewer({
             disabled={controlsDisabled}
             onClick={() => setSync((s) => ({ ...s, wl: !s.wl }))}
           >
-            Sync W/L
+            W/L
           </button>
           <button
             type="button"
@@ -1126,7 +1211,7 @@ export function NrrdViewer({
             disabled={controlsDisabled}
             onClick={() => setSync((s) => ({ ...s, zoom: !s.zoom }))}
           >
-            Sync zoom
+            Zoom
           </button>
         </div>
         <div className="zoom-tools" aria-label="Zoom controls">
@@ -1136,7 +1221,7 @@ export function NrrdViewer({
             disabled={controlsDisabled}
             onClick={() => zoomActiveBy(1 / ZOOM_STEP)}
           >
-            Zoom -
+            -
           </button>
           <span>{activeWindow ? `${Math.round(activeWindow.zoom * 100)}%` : '—'}</span>
           <button
@@ -1145,7 +1230,7 @@ export function NrrdViewer({
             disabled={controlsDisabled}
             onClick={() => zoomActiveBy(ZOOM_STEP)}
           >
-            Zoom +
+            +
           </button>
         </div>
         <button
@@ -1154,7 +1239,15 @@ export function NrrdViewer({
           disabled={controlsDisabled}
           onClick={resetAllViews}
         >
-          Reset all views
+          Reset
+        </button>
+        <button
+          type="button"
+          className="secondary-button small"
+          disabled={controlsDisabled}
+          onClick={() => setFocusedPaneIndex((current) => (current === activePane ? null : activePane))}
+        >
+          {focusedPaneIndex !== null ? 'Exit focus' : 'Focus'}
         </button>
       </div>
 
@@ -1324,7 +1417,7 @@ export function NrrdViewer({
         </div>
       ) : null}
 
-      {activeWindow ? (
+      {activeWindow && activeSliceMeasurements.length > 0 && focusedPaneIndex === null ? (
         <MeasurementList
           pane={activeWindow}
           paneIndex={activePane}
@@ -1346,7 +1439,7 @@ export function NrrdViewer({
         </span>
       </div>
 
-      {activeWindow ? (
+      {activeWindow && windowControlsOpen && focusedPaneIndex === null ? (
         <div className="viewer-controls">
           <label>
             <span className="control-label-row">
@@ -1409,19 +1502,21 @@ export function NrrdViewer({
         </div>
       ) : null}
 
-      <div className="viewer-presets">
-        {WINDOW_PRESETS.map((preset) => (
-          <button
-            key={preset.label}
-            type="button"
-            className="secondary-button small"
-            disabled={controlsDisabled}
-            onClick={() => setPreset(preset.width, preset.level)}
-          >
-            {preset.label}
-          </button>
-        ))}
-      </div>
+      {windowControlsOpen && focusedPaneIndex === null ? (
+        <div className="viewer-presets">
+          {WINDOW_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className="secondary-button small"
+              disabled={controlsDisabled}
+              onClick={() => setPreset(preset.width, preset.level)}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
