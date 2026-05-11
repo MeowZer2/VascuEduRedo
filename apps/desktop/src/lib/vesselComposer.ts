@@ -159,6 +159,15 @@ export type ProceduralObjectType =
   | 'stentGraft';
 
 export type ProceduralObjectState = 'positioned' | 'undeployed' | 'deployed';
+export type ProceduralStepKind = 'baseline' | 'wire' | 'positioned' | 'post' | 'custom';
+
+export interface ProceduralStep {
+  id: string;
+  label: string;
+  kind: ProceduralStepKind;
+  orderIndex: number;
+  notes?: string;
+}
 
 export interface ProceduralObject {
   id: string;
@@ -167,9 +176,12 @@ export interface ProceduralObject {
   label: string;
   segmentId: string;
   t: number;
+  pathSegmentIds: string[];
+  branchSegmentId?: string | null;
   lengthMm: number;
   state: ProceduralObjectState;
   snapshot: 'pre' | 'positioned' | 'post';
+  stepId?: string | null;
   notes?: string;
   metadata?: Record<string, unknown>;
 }
@@ -201,6 +213,7 @@ export interface VesselCompositionData {
   devicePlacements: DevicePlacement[];
   treatmentMarkers: TreatmentMarker[];
   proceduralObjects: ProceduralObject[];
+  proceduralSteps: ProceduralStep[];
   viewport: {
     width: number;
     height: number;
@@ -269,6 +282,7 @@ export function emptyVesselCompositionData(): VesselCompositionData {
     devicePlacements: [],
     treatmentMarkers: [],
     proceduralObjects: [],
+    proceduralSteps: defaultProceduralSteps(),
     viewport: {
       width: 1000,
       height: 620,
@@ -374,7 +388,7 @@ export function makeOrientedSegmentFromPreset(
 export function createAnatomyTemplateData(
   templateId: AnatomyTemplate['id'],
   idFactory: (prefix: string) => string,
-): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects'> {
+): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects' | 'proceduralSteps'> {
   if (templateId === 'fem-pop') return createFemPopTemplate(idFactory);
   if (templateId === 'mesenteric-renal') return createMesentericRenalTemplate(idFactory);
   return createAortoiliacTemplate(idFactory);
@@ -404,6 +418,9 @@ export function normalizeVesselCompositionData(data: unknown): VesselComposition
   const proceduralObjects = Array.isArray(raw.proceduralObjects)
     ? raw.proceduralObjects.map((value) => normalizeProceduralObject(value, segmentIds)).filter(isProceduralObject)
     : [];
+  const proceduralSteps = Array.isArray(raw.proceduralSteps)
+    ? raw.proceduralSteps.map(normalizeProceduralStep).filter(isProceduralStep)
+    : defaultProceduralSteps();
 
   return {
     version: '0.14',
@@ -414,6 +431,7 @@ export function normalizeVesselCompositionData(data: unknown): VesselComposition
     devicePlacements,
     treatmentMarkers,
     proceduralObjects,
+    proceduralSteps,
     viewport: {
       width: finiteNumber(viewport.width, 1000),
       height: finiteNumber(viewport.height, 620),
@@ -515,6 +533,11 @@ export function validateVesselCompositionData(
     }
     if (!Number.isFinite(object.t) || object.t < 0 || object.t > 1) {
       issues.push(error(`proceduralObjects.${object.id}.t`, 'Procedural object position must be between 0 and 1 along the segment.'));
+    }
+    for (const pathSegmentId of object.pathSegmentIds) {
+      if (!segmentIds.has(pathSegmentId)) {
+        issues.push(error(`proceduralObjects.${object.id}.pathSegmentIds`, 'Procedural object path includes a missing vessel segment.'));
+      }
     }
     if (!Number.isFinite(object.lengthMm) || object.lengthMm <= 0 || object.lengthMm > 2000) {
       issues.push(error(`proceduralObjects.${object.id}.lengthMm`, 'Procedural object length must be between 1 and 2000 mm.'));
@@ -640,10 +663,22 @@ export function makeProceduralObject(
     label: option.label,
     segmentId,
     t: clamp(t, 0, 1),
+    pathSegmentIds: [segmentId],
+    branchSegmentId: null,
     lengthMm: option.defaultLengthMm,
     state: deployable ? 'undeployed' : 'positioned',
     snapshot: objectType === 'guidewire' || objectType === 'catheter' || objectType === 'sheath' ? 'positioned' : 'pre',
+    stepId: deployable ? 'device-positioned' : 'wire-crossed',
   };
+}
+
+export function defaultProceduralSteps(): ProceduralStep[] {
+  return [
+    { id: 'baseline', label: 'Baseline angiogram', kind: 'baseline', orderIndex: 0 },
+    { id: 'wire-crossed', label: 'Wire crossed lesion', kind: 'wire', orderIndex: 1 },
+    { id: 'device-positioned', label: 'Device positioned', kind: 'positioned', orderIndex: 2 },
+    { id: 'post-deployment', label: 'Post-deployment result', kind: 'post', orderIndex: 3 },
+  ];
 }
 
 export function assessDeviceFit(
@@ -760,7 +795,7 @@ function numbersFromText(text: string): number[] {
 
 function createAortoiliacTemplate(
   idFactory: (prefix: string) => string,
-): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects'> {
+): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects' | 'proceduralSteps'> {
   const aorta = templateSegment(idFactory, 'aorta', 'Infrarenal aorta', { x: 500, y: 90 }, { x: 500, y: 265 });
   const rightCommon = templateSegment(idFactory, 'common-iliac', 'Right common iliac', { x: 500, y: 265 }, { x: 650, y: 370 });
   const leftCommon = templateSegment(idFactory, 'common-iliac', 'Left common iliac', { x: 500, y: 265 }, { x: 350, y: 370 });
@@ -804,12 +839,13 @@ function createAortoiliacTemplate(
     devicePlacements: [],
     treatmentMarkers: [],
     proceduralObjects: [],
+    proceduralSteps: defaultProceduralSteps(),
   };
 }
 
 function createFemPopTemplate(
   idFactory: (prefix: string) => string,
-): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects'> {
+): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects' | 'proceduralSteps'> {
   const commonFemoral = templateSegment(idFactory, 'common-femoral', 'Common femoral artery', { x: 500, y: 90 }, { x: 500, y: 185 });
   const sfa = templateSegment(idFactory, 'superficial-femoral', 'Superficial femoral artery', { x: 500, y: 185 }, { x: 500, y: 425 });
   const profunda = templateSegment(idFactory, 'other', 'Profunda femoris', { x: 500, y: 185 }, { x: 660, y: 285 }, {
@@ -848,12 +884,13 @@ function createFemPopTemplate(
     devicePlacements: [],
     treatmentMarkers: [],
     proceduralObjects: [],
+    proceduralSteps: defaultProceduralSteps(),
   };
 }
 
 function createMesentericRenalTemplate(
   idFactory: (prefix: string) => string,
-): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects'> {
+): Pick<VesselCompositionData, 'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects' | 'proceduralSteps'> {
   const aorta = templateSegment(idFactory, 'aorta', 'Visceral abdominal aorta', { x: 500, y: 70 }, { x: 500, y: 560 });
   const celiac = templateSegment(idFactory, 'other', 'Celiac axis', { x: 500, y: 160 }, { x: 370, y: 135 }, {
     vesselType: 'celiac axis',
@@ -901,6 +938,7 @@ function createMesentericRenalTemplate(
     devicePlacements: [],
     treatmentMarkers: [],
     proceduralObjects: [],
+    proceduralSteps: defaultProceduralSteps(),
   };
 }
 
@@ -1112,6 +1150,9 @@ function normalizeProceduralObject(raw: unknown, segmentIds: Set<string>): Proce
   const option = PROCEDURAL_OBJECT_OPTIONS.find((item) => item.id === objectType) ?? PROCEDURAL_OBJECT_OPTIONS[0];
   const state = normalizeProceduralObjectState(obj.state, objectType);
   const snapshot = normalizeProceduralSnapshot(obj.snapshot, state);
+  const pathSegmentIds = Array.isArray(obj.pathSegmentIds)
+    ? obj.pathSegmentIds.filter((id): id is string => typeof id === 'string' && (!segmentIds.size || segmentIds.has(id)))
+    : [];
   const metadata = objectRecord(obj.metadata);
   return {
     id: obj.id,
@@ -1120,11 +1161,26 @@ function normalizeProceduralObject(raw: unknown, segmentIds: Set<string>): Proce
     label: stringValue(obj.label, option.label),
     segmentId,
     t: clamp(finiteNumber(obj.t, 0.5), 0, 1),
+    pathSegmentIds: pathSegmentIds.length > 0 ? Array.from(new Set(pathSegmentIds)) : [segmentId].filter(Boolean),
+    branchSegmentId: optionalString(obj.branchSegmentId) ?? null,
     lengthMm: sensibleNumber(obj.lengthMm, option.defaultLengthMm),
     state,
     snapshot,
+    stepId: optionalString(obj.stepId) ?? null,
     notes: optionalString(obj.notes),
     metadata: metadata ? { ...metadata } : undefined,
+  };
+}
+
+function normalizeProceduralStep(raw: unknown): ProceduralStep | null {
+  const obj = objectRecord(raw);
+  if (!obj || typeof obj.id !== 'string' || !obj.id) return null;
+  return {
+    id: obj.id,
+    label: stringValue(obj.label, 'Procedure step'),
+    kind: normalizeProceduralStepKind(obj.kind),
+    orderIndex: finiteNumber(obj.orderIndex, 0),
+    notes: optionalString(obj.notes),
   };
 }
 
@@ -1157,6 +1213,19 @@ function normalizeProceduralSnapshot(value: unknown, state: ProceduralObjectStat
   if (state === 'deployed') return 'post';
   if (state === 'positioned') return 'positioned';
   return 'pre';
+}
+
+function normalizeProceduralStepKind(value: unknown): ProceduralStepKind {
+  if (
+    value === 'baseline' ||
+    value === 'wire' ||
+    value === 'positioned' ||
+    value === 'post' ||
+    value === 'custom'
+  ) {
+    return value;
+  }
+  return 'custom';
 }
 
 function error(field: string, message: string): PlanValidationIssue {
@@ -1240,6 +1309,10 @@ function isTreatmentMarker(value: TreatmentMarker | null): value is TreatmentMar
 }
 
 function isProceduralObject(value: ProceduralObject | null): value is ProceduralObject {
+  return value !== null;
+}
+
+function isProceduralStep(value: ProceduralStep | null): value is ProceduralStep {
   return value !== null;
 }
 
