@@ -76,6 +76,7 @@ interface SliceRequestTarget {
   ww: number;
   wl: number;
   planeLabel: string;
+  desiredAtMs: number;
 }
 
 interface SliceSchedulerState {
@@ -312,6 +313,10 @@ export function ViewportPane({
     loadedContextRef.current = target.contextKey;
     schedulerRef.current.displayedKey = target.key;
     schedulerRef.current.displayedSlice = target.sliceIndex;
+    logSliceScheduler(pane.id, 'slice committed', {
+      displayedSlice: target.sliceIndex,
+      desiredToCommitMs: performance.now() - target.desiredAtMs,
+    });
   }
 
   function pumpSliceScheduler() {
@@ -352,6 +357,7 @@ export function ViewportPane({
     scheduler.lastRequestedSlice = request.sliceIndex;
     setError(null);
     setSlicePending(true);
+    const frontendRequestStarted = performance.now();
     logSliceScheduler(pane.id, 'request started', {
       sequence,
       requestedSlice: request.sliceIndex,
@@ -362,7 +368,10 @@ export function ViewportPane({
     loadVolumeSlice(request.handleId, request.plane, request.sliceIndex, request.ww, request.wl)
       .then((image) => {
         if (!mountedRef.current) return;
-        const gray = base64ToUint8Array(image.pixelsBase64);
+        const frontendReceiveMs = performance.now() - frontendRequestStarted;
+        const decodeStarted = performance.now();
+        const gray = image.pixels ?? base64ToUint8Array(image.pixelsBase64);
+        const frontendDecodeMs = performance.now() - decodeStarted;
         if (gray.length !== image.width * image.height) {
           throw new Error(
             `${request.planeLabel} slice returned ${gray.length} pixels for ${image.width} x ${image.height}.`,
@@ -390,6 +399,9 @@ export function ViewportPane({
           requestedSlice: request.sliceIndex,
           desiredSlice: latest?.sliceIndex,
           displayedSlice: schedulerRef.current.displayedSlice,
+          frontendReceiveMs,
+          frontendDecodeMs,
+          rust: image.timings,
         });
       })
       .catch((caught: unknown) => {
@@ -421,10 +433,16 @@ export function ViewportPane({
       ww: pane.ww,
       wl: pane.wl,
       planeLabel,
+      desiredAtMs: performance.now(),
     };
 
     const scheduler = schedulerRef.current;
     scheduler.desired = target;
+    logSliceScheduler(pane.id, 'request scheduled', {
+      desiredSlice: target.sliceIndex,
+      displayedSlice: scheduler.displayedSlice,
+      requestInFlight: scheduler.requestInFlight,
+    });
 
     if (loadedContextRef.current !== null && loadedContextRef.current !== target.contextKey) {
       setSlicePixels(null);
@@ -441,6 +459,7 @@ export function ViewportPane({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !slicePixels || !fitRect) return;
+    const drawStarted = performance.now();
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     canvas.width = Math.max(1, Math.round(fitRect.width * dpr));
     canvas.height = Math.max(1, Math.round(fitRect.height * dpr));
@@ -490,6 +509,10 @@ export function ViewportPane({
       fitRect.width,
       fitRect.height,
     );
+    logSliceScheduler(pane.id, 'canvas drawn', {
+      displayedSlice: schedulerRef.current.displayedSlice,
+      canvasDrawMs: performance.now() - drawStarted,
+    });
   }, [fitRect, slicePixels, flips]);
 
   // HU sample (debounced) when the user hovers a pixel.

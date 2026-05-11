@@ -9,8 +9,8 @@ use std::io::Read;
 use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::State;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tauri::{ipc::Response, State};
 
 const SAMPLE_AAA_NRRD: &[u8] =
     include_bytes!("../../../../content/aaa/volumes/sample-aaa-001.nrrd");
@@ -24,7 +24,6 @@ pub struct VolumeCache {
 struct Volume {
     id: String,
     source_path: String,
-    raw_dims: [usize; 3],
     width: usize,
     height: usize,
     depth: usize,
@@ -103,6 +102,31 @@ pub struct SliceImage {
     window_width: f32,
     window_level: f32,
     pixels_base64: String,
+    timings: SliceTimings,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SliceTimings {
+    command_total_ms: f64,
+    cache_lock_ms: f64,
+    validation_ms: f64,
+    orientation_mapping_ms: f64,
+    slice_extraction_ms: f64,
+    window_level_ms: f64,
+    payload_encode_ms: f64,
+}
+
+struct SlicePixelsResult {
+    handle_id: String,
+    plane: Plane,
+    slice_index: usize,
+    width: usize,
+    height: usize,
+    window_width: f32,
+    window_level: f32,
+    pixels: Vec<u8>,
+    timings: SliceTimings,
 }
 
 #[derive(Serialize)]
@@ -296,23 +320,67 @@ pub fn volume_slice(
     window_level: f32,
     cache: State<'_, VolumeCache>,
 ) -> Result<SliceImage, String> {
+    let command_started = Instant::now();
     let plane = Plane::parse(&plane)?;
+    let lock_started = Instant::now();
     let volumes = cache
         .volumes
         .lock()
         .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    let cache_lock_ms = elapsed_ms(lock_started);
     let volume = volumes
         .get(&handle_id)
         .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?;
 
-    render_slice(
+    let mut image = render_slice(
         volume,
         handle_id,
         plane,
         slice_index,
         window_width,
         window_level,
-    )
+    )?;
+    image.timings.cache_lock_ms = cache_lock_ms;
+    image.timings.command_total_ms = elapsed_ms(command_started);
+    Ok(image)
+}
+
+#[tauri::command]
+pub fn volume_slice_raw(
+    handle_id: String,
+    plane: String,
+    slice_index: usize,
+    window_width: f32,
+    window_level: f32,
+    cache: State<'_, VolumeCache>,
+) -> Result<Response, String> {
+    let command_started = Instant::now();
+    let plane = Plane::parse(&plane)?;
+    let lock_started = Instant::now();
+    let volumes = cache
+        .volumes
+        .lock()
+        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    let cache_lock_ms = elapsed_ms(lock_started);
+    let volume = volumes
+        .get(&handle_id)
+        .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?;
+    let mut slice = render_slice_pixels(
+        volume,
+        handle_id,
+        plane,
+        slice_index,
+        window_width,
+        window_level,
+    )?;
+    slice.timings.cache_lock_ms = cache_lock_ms;
+    let pack_started = Instant::now();
+    let mut payload = pack_slice_response(&slice)?;
+    slice.timings.payload_encode_ms = elapsed_ms(pack_started);
+    slice.timings.command_total_ms = elapsed_ms(command_started);
+    write_f64_le(&mut payload, 24, slice.timings.command_total_ms)?;
+    write_f64_le(&mut payload, 72, slice.timings.payload_encode_ms)?;
+    Ok(Response::new(payload))
 }
 
 #[tauri::command]
@@ -412,36 +480,11 @@ impl Volume {
                 self.width, self.height, self.depth
             ));
         }
-        let raw = self.orientation.canonical_to_raw([x, y, z], self.raw_dims)?;
-        self.raw_voxel(raw[0], raw[1], raw[2])
+        Ok(self.voxels[self.canonical_offset(x, y, z)])
     }
 
-    fn raw_voxel(&self, x: usize, y: usize, z: usize) -> Result<i16, String> {
-        if x >= self.raw_dims[0] || y >= self.raw_dims[1] || z >= self.raw_dims[2] {
-            return Err(format!(
-                "Raw voxel coordinate out of range: i={x}, j={y}, k={z} for volume {} x {} x {}",
-                self.raw_dims[0], self.raw_dims[1], self.raw_dims[2]
-            ));
-        }
-        let plane_size = self
-            .raw_dims[0]
-            .checked_mul(self.raw_dims[1])
-            .ok_or_else(|| "Volume plane dimensions are too large".to_string())?;
-        let z_offset = z
-            .checked_mul(plane_size)
-            .ok_or_else(|| "Volume Z offset is too large".to_string())?;
-        let y_offset = y
-            .checked_mul(self.raw_dims[0])
-            .ok_or_else(|| "Volume Y offset is too large".to_string())?;
-        let idx = z_offset
-            .checked_add(y_offset)
-            .and_then(|offset| offset.checked_add(x))
-            .ok_or_else(|| "Volume voxel offset is too large".to_string())?;
-
-        self.voxels
-            .get(idx)
-            .copied()
-            .ok_or_else(|| format!("Volume data is missing voxel at offset {idx}"))
+    fn canonical_offset(&self, x: usize, y: usize, z: usize) -> usize {
+        (z * self.height + y) * self.width + x
     }
 }
 
@@ -463,6 +506,39 @@ fn render_slice(
     window_width: f32,
     window_level: f32,
 ) -> Result<SliceImage, String> {
+    let mut slice = render_slice_pixels(
+        volume,
+        handle_id,
+        plane,
+        slice_index,
+        window_width,
+        window_level,
+    )?;
+    let encode_started = Instant::now();
+    let pixels_base64 = general_purpose::STANDARD.encode(slice.pixels);
+    slice.timings.payload_encode_ms = elapsed_ms(encode_started);
+    Ok(SliceImage {
+        handle_id: slice.handle_id,
+        plane: slice.plane.as_str().to_string(),
+        slice_index: slice.slice_index,
+        width: slice.width,
+        height: slice.height,
+        window_width: slice.window_width,
+        window_level: slice.window_level,
+        pixels_base64,
+        timings: slice.timings,
+    })
+}
+
+fn render_slice_pixels(
+    volume: &Volume,
+    handle_id: String,
+    plane: Plane,
+    slice_index: usize,
+    window_width: f32,
+    window_level: f32,
+) -> Result<SlicePixelsResult, String> {
+    let validation_started = Instant::now();
     validate_volume_dimensions(volume)?;
     validate_window(window_width, window_level)?;
 
@@ -474,33 +550,152 @@ fn render_slice(
             slice_count.saturating_sub(1)
         ));
     }
+    let validation_ms = elapsed_ms(validation_started);
 
     let (width, height) = plane.image_size(volume);
     let pixel_count = width
         .checked_mul(height)
         .ok_or_else(|| "MPR slice dimensions are too large".to_string())?;
-    let mut pixels = Vec::with_capacity(pixel_count);
 
-    for y in 0..height {
-        for x in 0..width {
-            pixels.push(window_voxel(
-                plane.sample_voxel(volume, slice_index, x, y)?,
-                window_width,
-                window_level,
-            ));
+    let extraction_started = Instant::now();
+    let mut intensities = Vec::with_capacity(pixel_count);
+    match plane {
+        Plane::Axial => {
+            let start = slice_index
+                .checked_mul(volume.width * volume.height)
+                .ok_or_else(|| "Axial slice offset is too large".to_string())?;
+            intensities.extend_from_slice(&volume.voxels[start..start + pixel_count]);
+        }
+        Plane::Coronal => {
+            for y in 0..height {
+                let z = volume.depth - 1 - y;
+                let row_start = (z * volume.height + slice_index) * volume.width;
+                intensities.extend_from_slice(&volume.voxels[row_start..row_start + width]);
+            }
+        }
+        Plane::Sagittal => {
+            for y in 0..height {
+                let z = volume.depth - 1 - y;
+                for x in 0..width {
+                    let offset = (z * volume.height + x) * volume.width + slice_index;
+                    intensities.push(volume.voxels[offset]);
+                }
+            }
         }
     }
+    let slice_extraction_ms = elapsed_ms(extraction_started);
 
-    Ok(SliceImage {
+    let wl_started = Instant::now();
+    let pixels: Vec<u8> = intensities
+        .into_iter()
+        .map(|voxel| window_voxel(voxel, window_width, window_level))
+        .collect();
+    let window_level_ms = elapsed_ms(wl_started);
+
+    Ok(SlicePixelsResult {
         handle_id,
-        plane: plane.as_str().to_string(),
+        plane,
         slice_index,
         width,
         height,
         window_width,
         window_level,
-        pixels_base64: general_purpose::STANDARD.encode(pixels),
+        pixels,
+        timings: SliceTimings {
+            command_total_ms: 0.0,
+            cache_lock_ms: 0.0,
+            validation_ms,
+            orientation_mapping_ms: 0.0,
+            slice_extraction_ms,
+            window_level_ms,
+            payload_encode_ms: 0.0,
+        },
     })
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
+fn pack_slice_response(slice: &SlicePixelsResult) -> Result<Vec<u8>, String> {
+    let pixel_len = slice
+        .width
+        .checked_mul(slice.height)
+        .ok_or_else(|| "MPR slice dimensions are too large".to_string())?;
+    if slice.pixels.len() != pixel_len {
+        return Err(format!(
+            "Slice payload has {} pixels but expected {pixel_len}.",
+            slice.pixels.len()
+        ));
+    }
+
+    let header_len = 4 + 4 * 3 + 4 * 2 + 8 * 7;
+    let mut out = Vec::with_capacity(header_len + slice.pixels.len());
+    out.extend_from_slice(b"VSL1");
+    out.extend_from_slice(&(slice.width as u32).to_le_bytes());
+    out.extend_from_slice(&(slice.height as u32).to_le_bytes());
+    out.extend_from_slice(&(slice.slice_index as u32).to_le_bytes());
+    out.extend_from_slice(&slice.window_width.to_le_bytes());
+    out.extend_from_slice(&slice.window_level.to_le_bytes());
+    for value in [
+        slice.timings.command_total_ms,
+        slice.timings.cache_lock_ms,
+        slice.timings.validation_ms,
+        slice.timings.orientation_mapping_ms,
+        slice.timings.slice_extraction_ms,
+        slice.timings.window_level_ms,
+        slice.timings.payload_encode_ms,
+    ] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out.extend_from_slice(&slice.pixels);
+    Ok(out)
+}
+
+fn write_f64_le(out: &mut [u8], offset: usize, value: f64) -> Result<(), String> {
+    let end = offset
+        .checked_add(8)
+        .ok_or_else(|| "Slice timing offset is too large".to_string())?;
+    let target = out
+        .get_mut(offset..end)
+        .ok_or_else(|| "Slice timing offset is out of range".to_string())?;
+    target.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn canonicalize_voxels(
+    raw_voxels: Vec<i16>,
+    raw_dims: [usize; 3],
+    canonical_dims: [usize; 3],
+    orientation: &OrientationTransform,
+) -> Result<Vec<i16>, String> {
+    let expected = checked_voxel_count(raw_dims)?;
+    if raw_voxels.len() != expected {
+        return Err(format!(
+            "Malformed volume: expected {expected} voxels but decoded {}.",
+            raw_voxels.len()
+        ));
+    }
+
+    let canonical_count = checked_voxel_count(canonical_dims)?;
+    let mut canonical = vec![0i16; canonical_count];
+    let raw_plane = raw_dims[0]
+        .checked_mul(raw_dims[1])
+        .ok_or_else(|| "Raw volume plane dimensions are too large".to_string())?;
+    for z in 0..canonical_dims[2] {
+        for y in 0..canonical_dims[1] {
+            for x in 0..canonical_dims[0] {
+                let raw = orientation.canonical_to_raw([x, y, z], raw_dims)?;
+                let raw_idx = (raw[2] * raw_dims[1] + raw[1]) * raw_dims[0] + raw[0];
+                let canonical_idx = (z * canonical_dims[1] + y) * canonical_dims[0] + x;
+                if raw_idx >= raw_plane * raw_dims[2] {
+                    return Err("Orientation mapping produced an out-of-range voxel".to_string());
+                }
+                canonical[canonical_idx] = raw_voxels[raw_idx];
+            }
+        }
+    }
+    Ok(canonical)
 }
 
 fn validate_volume_dimensions(volume: &Volume) -> Result<(), String> {
@@ -676,11 +871,11 @@ fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
     let orientation = build_orientation_transform(&fields, dims, raw_spacing)?;
     let canonical_dims = orientation.canonical_dims(dims);
     let spacing = orientation.canonical_spacing(raw_spacing);
+    let voxels = canonicalize_voxels(voxels, dims, canonical_dims, &orientation)?;
 
     Ok(Volume {
         id: String::new(),
         source_path,
-        raw_dims: dims,
         width: canonical_dims[0],
         height: canonical_dims[1],
         depth: canonical_dims[2],
@@ -881,6 +1076,15 @@ fn build_dicom_volume(folder_path: &str, series_instance_uid: &str) -> Result<Vo
     orientation_info.warnings.extend(dicom_series_warnings(first, &slices));
     orientation_info.warnings.sort();
     orientation_info.warnings.dedup();
+    let voxels = canonicalize_voxels(
+        voxels,
+        dims,
+        canonical_dims,
+        &OrientationTransform {
+            canonical_to_raw: orientation.canonical_to_raw,
+            info: orientation_info.clone(),
+        },
+    )?;
 
     Ok(Volume {
         id: String::new(),
@@ -889,7 +1093,6 @@ fn build_dicom_volume(folder_path: &str, series_instance_uid: &str) -> Result<Vo
             series_description.unwrap_or_else(|| "CT series".to_string()),
             folder.display()
         ),
-        raw_dims: dims,
         width: canonical_dims[0],
         height: canonical_dims[1],
         depth: canonical_dims[2],

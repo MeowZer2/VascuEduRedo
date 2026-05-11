@@ -16,7 +16,7 @@ use serde::Serialize;
 use tauri::Manager;
 use volume::{
     dicom_discover_folder, volume_load, volume_load_dicom_series, volume_release, volume_sample,
-    volume_slice, volume_slice_axial, VolumeCache,
+    volume_slice, volume_slice_axial, volume_slice_raw, VolumeCache,
 };
 
 #[derive(Serialize)]
@@ -60,6 +60,7 @@ fn main() {
             volume_load_dicom_series,
             volume_sample,
             volume_slice,
+            volume_slice_raw,
             volume_slice_axial,
             volume_release,
             list_cases,

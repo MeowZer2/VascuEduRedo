@@ -90,6 +90,18 @@ export interface SliceImage {
   windowWidth: number;
   windowLevel: number;
   pixelsBase64: string;
+  pixels?: Uint8Array;
+  timings?: SliceTimings;
+}
+
+export interface SliceTimings {
+  commandTotalMs: number;
+  cacheLockMs: number;
+  validationMs: number;
+  orientationMappingMs: number;
+  sliceExtractionMs: number;
+  windowLevelMs: number;
+  payloadEncodeMs: number;
 }
 
 export interface VolumeSample {
@@ -138,6 +150,17 @@ export async function loadVolumeSlice(
   windowWidth: number,
   windowLevel: number,
 ): Promise<SliceImage> {
+  const raw = await safeInvoke<unknown>('volume_slice_raw', {
+    handleId,
+    plane,
+    sliceIndex,
+    windowWidth,
+    windowLevel,
+  });
+  if (raw) {
+    return parseRawSliceImage(raw, handleId, plane);
+  }
+
   const result = await safeInvoke<SliceImage>('volume_slice', {
     handleId,
     plane,
@@ -182,4 +205,60 @@ export function base64ToUint8Array(base64: string): Uint8Array {
     output[index] = binary.charCodeAt(index);
   }
   return output;
+}
+
+function parseRawSliceImage(raw: unknown, handleId: string, plane: VolumePlane): SliceImage {
+  const bytes = rawToUint8Array(raw);
+  const headerLength = 80;
+  if (bytes.byteLength < headerLength) {
+    throw new Error(`Raw slice payload is too short: ${bytes.byteLength} bytes.`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+  if (magic !== 'VSL1') {
+    throw new Error(`Raw slice payload has invalid magic '${magic}'.`);
+  }
+  const width = view.getUint32(4, true);
+  const height = view.getUint32(8, true);
+  const sliceIndex = view.getUint32(12, true);
+  const windowWidth = view.getFloat32(16, true);
+  const windowLevel = view.getFloat32(20, true);
+  const timings: SliceTimings = {
+    commandTotalMs: view.getFloat64(24, true),
+    cacheLockMs: view.getFloat64(32, true),
+    validationMs: view.getFloat64(40, true),
+    orientationMappingMs: view.getFloat64(48, true),
+    sliceExtractionMs: view.getFloat64(56, true),
+    windowLevelMs: view.getFloat64(64, true),
+    payloadEncodeMs: view.getFloat64(72, true),
+  };
+  const expectedPixels = width * height;
+  const pixels = bytes.slice(headerLength);
+  if (pixels.byteLength !== expectedPixels) {
+    throw new Error(
+      `Raw slice payload has ${pixels.byteLength} pixels for ${width} x ${height}.`,
+    );
+  }
+  return {
+    handleId,
+    plane,
+    sliceIndex,
+    width,
+    height,
+    windowWidth,
+    windowLevel,
+    pixelsBase64: '',
+    pixels,
+    timings,
+  };
+}
+
+function rawToUint8Array(raw: unknown): Uint8Array {
+  if (raw instanceof Uint8Array) return raw;
+  if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+  if (ArrayBuffer.isView(raw)) {
+    return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+  }
+  if (Array.isArray(raw)) return Uint8Array.from(raw);
+  throw new Error('Raw slice payload was not returned as bytes.');
 }
