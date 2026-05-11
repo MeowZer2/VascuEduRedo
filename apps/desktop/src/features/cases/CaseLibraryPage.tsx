@@ -1,6 +1,8 @@
+import type { CSSProperties } from 'react';
 import { Tag } from '../../components/Tag';
 import { categories } from '../../data/sampleContent';
 import type { VascCase } from '../../types';
+import { getCategoryBackground } from './categoryBackgrounds';
 
 interface CaseLibraryPageProps {
   cases: VascCase[];
@@ -14,9 +16,9 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
       <header className="page-header">
         <div>
           <p className="eyebrow">Case library</p>
-          <h2>Browse known cases.</h2>
+          <h2>Explore vascular cases.</h2>
           <p className="muted">
-            Use the library to open a specific case, review its objectives, or launch it directly.
+            Open a case for reference, or start guided training when you are ready to practice.
           </p>
         </div>
       </header>
@@ -24,9 +26,16 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
       <section className="category-grid">
         {categories.map((category) => {
           const count = cases.filter((item) => item.categoryId === category.id).length;
+          const backgroundImage = getCategoryBackground(category.id);
+          const cardStyle = backgroundImage
+            ? ({ '--category-bg': `url(${backgroundImage})` } as CSSProperties)
+            : undefined;
           return (
-            <article className="category-card" key={category.id}>
-              <div className="category-emoji">{category.emoji}</div>
+            <article
+              className={backgroundImage ? 'category-card has-category-bg' : 'category-card'}
+              key={category.id}
+              style={cardStyle}
+            >
               <h3>{category.title}</h3>
               <p>{category.description}</p>
               <span>{count} case{count === 1 ? '' : 's'}</span>
@@ -37,7 +46,7 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
 
       <section className="content-card">
         <div className="section-title-row">
-          <h3>Case catalogue</h3>
+          <h3>Cases</h3>
           <span className="pill">{cases.length} total</span>
         </div>
         <div className="case-table">
