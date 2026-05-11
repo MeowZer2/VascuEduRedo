@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { NrrdViewer, type ViewerMeasurement } from '../../components/NrrdViewer';
 import { createAttempt } from '../../lib/attempts';
 import { saveAttempt } from '../../lib/progress';
-import type { AttemptResult, MeasurementQuestion, VascCase } from '../../types';
+import type { AttemptResult, CaseBookmark, MeasurementQuestion, VascCase } from '../../types';
 import { QuestionPanel, formatDuration } from './QuestionPanel';
 
 interface TrainingWorkspaceProps {
@@ -16,6 +16,8 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const [attemptId, setAttemptId] = useState<string | null>(null);
   const [completedAttempt, setCompletedAttempt] = useState<AttemptResult | null>(null);
+  const [activeBookmark, setActiveBookmark] = useState<CaseBookmark | null>(null);
+  const [jumpBookmark, setJumpBookmark] = useState<CaseBookmark | null>(null);
 
   // Create an attempt row in SQLite when the workspace opens. In browser mode this returns
   // null and we just track the attempt locally without persistent ids.
@@ -38,6 +40,11 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
   function handleComplete(attempt: AttemptResult) {
     saveAttempt(attempt);
     setCompletedAttempt(attempt);
+  }
+
+  function jumpToBookmark(bookmark: CaseBookmark) {
+    setActiveBookmark(bookmark);
+    setJumpBookmark({ ...bookmark });
   }
 
   return (
@@ -64,9 +71,35 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
           description={vascCase.volume.description}
           requestedTool={requestedTool}
           onLatestMeasurementChange={setLatestMeasurement}
+          jumpToBookmark={jumpBookmark}
+          activeBookmark={activeBookmark}
         />
       </section>
       <aside className="training-aside">
+        {vascCase.bookmarks && vascCase.bookmarks.length > 0 ? (
+          <section className="question-card key-findings-panel">
+            <h3>Key findings</h3>
+            <div className="key-finding-list">
+              {vascCase.bookmarks.map((bookmark) => (
+                <button
+                  key={bookmark.id}
+                  type="button"
+                  className={
+                    activeBookmark?.id === bookmark.id
+                      ? 'key-finding-row active'
+                      : 'key-finding-row'
+                  }
+                  onClick={() => jumpToBookmark(bookmark)}
+                >
+                  <strong>{bookmark.title}</strong>
+                  <span>
+                    {bookmark.plane} slice {bookmark.sliceIndex + 1}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
         {completedAttempt ? (
           <CaseCompletionSummary attempt={completedAttempt} onFinish={onFinish} />
         ) : (
@@ -76,6 +109,8 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             latestMeasurement={latestMeasurement}
             onComplete={handleComplete}
             onQuestionChange={setActiveQuestionIndex}
+            bookmarks={vascCase.bookmarks ?? []}
+            onJumpToBookmark={jumpToBookmark}
           />
         )}
       </aside>

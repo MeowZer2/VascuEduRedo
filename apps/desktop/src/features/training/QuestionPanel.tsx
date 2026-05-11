@@ -5,6 +5,7 @@ import { listDevices, type Device } from '../../lib/devices';
 import { evaluateAnswer, newAttemptId } from '../../lib/quiz';
 import type {
   AttemptResult,
+  CaseBookmark,
   DeviceSelectionQuestion,
   MeasurementQuestion,
   Question,
@@ -20,6 +21,8 @@ interface QuestionPanelProps {
   latestMeasurement: ViewerMeasurement | null;
   onComplete: (attempt: AttemptResult) => void;
   onQuestionChange: (index: number) => void;
+  bookmarks: CaseBookmark[];
+  onJumpToBookmark: (bookmark: CaseBookmark) => void;
 }
 
 function defaultAnswer(question: Question): UserAnswer {
@@ -30,7 +33,15 @@ function defaultAnswer(question: Question): UserAnswer {
   return '';
 }
 
-export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComplete, onQuestionChange }: QuestionPanelProps) {
+export function QuestionPanel({
+  vascCase,
+  attemptId,
+  latestMeasurement,
+  onComplete,
+  onQuestionChange,
+  bookmarks,
+  onJumpToBookmark,
+}: QuestionPanelProps) {
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState<UserAnswer>(defaultAnswer(vascCase.questions[0]));
   const [hintsUsed, setHintsUsed] = useState<Record<string, number>>({});
@@ -39,6 +50,9 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
   const [questionStartedAt, setQuestionStartedAt] = useState(() => Date.now());
 
   const question = vascCase.questions[index];
+  const referencedBookmark = question.bookmarkId
+    ? bookmarks.find((bookmark) => bookmark.id === question.bookmarkId) ?? null
+    : null;
   const shownHints = hintsUsed[question.id] ?? 0;
   const isLast = index === vascCase.questions.length - 1;
 
@@ -359,6 +373,15 @@ export function QuestionPanel({ vascCase, attemptId, latestMeasurement, onComple
         <strong>{question.points} point{question.points === 1 ? '' : 's'}</strong>
       </div>
       <h3>{question.prompt}</h3>
+      {referencedBookmark ? (
+        <button
+          type="button"
+          className="secondary-button small"
+          onClick={() => onJumpToBookmark(referencedBookmark)}
+        >
+          Jump to referenced finding
+        </button>
+      ) : null}
 
       {!submittedResult ? renderAnswerInput() : null}
 

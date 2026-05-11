@@ -74,3 +74,20 @@ CREATE TABLE IF NOT EXISTS vessel_compositions (
   updated_at TEXT NOT NULL,
   FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS case_bookmarks (
+  id TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL,
+  order_index INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  note TEXT NOT NULL,
+  plane TEXT NOT NULL,
+  slice_index INTEGER NOT NULL,
+  window_width REAL NOT NULL,
+  window_level REAL NOT NULL,
+  zoom REAL,
+  crosshair_json TEXT,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
+);

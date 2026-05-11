@@ -164,6 +164,23 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
             updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_vessel_compositions_case ON vessel_compositions(case_id);
+
+        CREATE TABLE IF NOT EXISTS case_bookmarks (
+            id TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            order_index INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            note TEXT NOT NULL,
+            plane TEXT NOT NULL,
+            slice_index INTEGER NOT NULL,
+            window_width REAL NOT NULL,
+            window_level REAL NOT NULL,
+            zoom REAL,
+            crosshair_json TEXT,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_bookmarks_case ON case_bookmarks(case_id, order_index);
         "#,
     )
     .map_err(|e| format!("Schema init failed: {e}"))?;
@@ -2456,6 +2473,46 @@ pub struct VesselCompositionInput {
     pub data: Value,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseBookmarkRow {
+    pub id: String,
+    pub case_id: String,
+    pub title: String,
+    pub note: String,
+    pub plane: String,
+    pub slice_index: i64,
+    pub window_width: f64,
+    pub window_level: f64,
+    pub zoom: Option<f64>,
+    pub crosshair_voxel: Option<[i64; 3]>,
+    pub tags: Vec<String>,
+    pub order_index: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseBookmarkInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub case_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub note: String,
+    pub plane: String,
+    pub slice_index: i64,
+    pub window_width: f64,
+    pub window_level: f64,
+    #[serde(default)]
+    pub zoom: Option<f64>,
+    #[serde(default)]
+    pub crosshair_voxel: Option<[i64; 3]>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub order_index: Option<i64>,
+}
+
 fn parse_vessel_composition_row(
     id: String,
     case_id: Option<String>,
@@ -2632,6 +2689,232 @@ pub fn save_vessel_composition(
 
     fetch_vessel_composition_row(&conn, &id)?
         .ok_or_else(|| "save_vessel_composition: saved row not found".to_string())
+}
+
+fn parse_case_bookmark_row(
+    id: String,
+    case_id: String,
+    order_index: i64,
+    title: String,
+    note: String,
+    plane: String,
+    slice_index: i64,
+    window_width: f64,
+    window_level: f64,
+    zoom: Option<f64>,
+    crosshair_json: Option<String>,
+    tags_json: String,
+) -> Result<CaseBookmarkRow, String> {
+    let crosshair_voxel = match crosshair_json {
+        Some(raw) if !raw.trim().is_empty() => Some(
+            serde_json::from_str::<[i64; 3]>(&raw)
+                .map_err(|e| format!("Cannot parse bookmark crosshair_json: {e}"))?,
+        ),
+        _ => None,
+    };
+    let tags = serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default();
+    Ok(CaseBookmarkRow {
+        id,
+        case_id,
+        title,
+        note,
+        plane,
+        slice_index,
+        window_width,
+        window_level,
+        zoom,
+        crosshair_voxel,
+        tags,
+        order_index,
+    })
+}
+
+fn fetch_case_bookmark_row(conn: &Connection, bookmark_id: &str) -> Result<Option<CaseBookmarkRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json FROM case_bookmarks WHERE id = ?1 LIMIT 1",
+        )
+        .map_err(|e| format!("fetch_case_bookmark_row prepare failed: {e}"))?;
+    let mut rows = stmt
+        .query(params![bookmark_id])
+        .map_err(|e| format!("fetch_case_bookmark_row query failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("fetch_case_bookmark_row next failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(parse_case_bookmark_row(
+        row.get(0).map_err(|e| e.to_string())?,
+        row.get(1).map_err(|e| e.to_string())?,
+        row.get(2).map_err(|e| e.to_string())?,
+        row.get(3).map_err(|e| e.to_string())?,
+        row.get(4).map_err(|e| e.to_string())?,
+        row.get(5).map_err(|e| e.to_string())?,
+        row.get(6).map_err(|e| e.to_string())?,
+        row.get(7).map_err(|e| e.to_string())?,
+        row.get(8).map_err(|e| e.to_string())?,
+        row.get(9).map_err(|e| e.to_string())?,
+        row.get(10).map_err(|e| e.to_string())?,
+        row.get(11).map_err(|e| e.to_string())?,
+    )?))
+}
+
+#[tauri::command]
+pub fn list_case_bookmarks(state: State<DbState>, case_id: String) -> Result<Vec<CaseBookmarkRow>, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json FROM case_bookmarks WHERE case_id = ?1 ORDER BY order_index, updated_at",
+        )
+        .map_err(|e| format!("list_case_bookmarks prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(params![case_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, f64>(7)?,
+                row.get::<_, f64>(8)?,
+                row.get::<_, Option<f64>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })
+        .map_err(|e| format!("list_case_bookmarks query failed: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json) =
+            row.map_err(|e| format!("list_case_bookmarks row failed: {e}"))?;
+        out.push(parse_case_bookmark_row(
+            id,
+            case_id,
+            order_index,
+            title,
+            note,
+            plane,
+            slice_index,
+            window_width,
+            window_level,
+            zoom,
+            crosshair_json,
+            tags_json,
+        )?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn save_case_bookmark(state: State<DbState>, input: CaseBookmarkInput) -> Result<CaseBookmarkRow, String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let title = input.title.trim();
+    if title.is_empty() {
+        return Err("Bookmark title is required.".into());
+    }
+    if !matches!(input.plane.as_str(), "axial" | "coronal" | "sagittal") {
+        return Err("Bookmark plane must be axial, coronal, or sagittal.".into());
+    }
+    let exists_case: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cases WHERE id = ?1", params![input.case_id], |r| r.get(0))
+        .map_err(|e| format!("save_case_bookmark case check failed: {e}"))?;
+    if exists_case == 0 {
+        return Err(format!("No case found with id {}", input.case_id));
+    }
+
+    let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let order_index = match input.order_index {
+        Some(index) => index,
+        None => conn
+            .query_row(
+                "SELECT COALESCE(MAX(order_index), -1) + 1 FROM case_bookmarks WHERE case_id = ?1",
+                params![input.case_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("save_case_bookmark order query failed: {e}"))?,
+    };
+    let updated_at = now_iso();
+    let tags_json = serde_json::to_string(&input.tags).unwrap_or_else(|_| "[]".to_string());
+    let crosshair_json = input
+        .crosshair_voxel
+        .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string()));
+    let existing: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM case_bookmarks WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("save_case_bookmark exists check failed: {e}"))?;
+    if existing > 0 {
+        conn.execute(
+            "UPDATE case_bookmarks SET title = ?1, note = ?2, plane = ?3, slice_index = ?4, window_width = ?5, window_level = ?6, zoom = ?7, crosshair_json = ?8, tags_json = ?9, order_index = ?10, updated_at = ?11 WHERE id = ?12",
+            params![
+                title,
+                input.note.trim(),
+                input.plane,
+                input.slice_index,
+                input.window_width,
+                input.window_level,
+                input.zoom,
+                crosshair_json,
+                tags_json,
+                order_index,
+                updated_at,
+                id,
+            ],
+        )
+        .map_err(|e| format!("save_case_bookmark update failed: {e}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO case_bookmarks (id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                id,
+                input.case_id,
+                order_index,
+                title,
+                input.note.trim(),
+                input.plane,
+                input.slice_index,
+                input.window_width,
+                input.window_level,
+                input.zoom,
+                crosshair_json,
+                tags_json,
+                updated_at,
+            ],
+        )
+        .map_err(|e| format!("save_case_bookmark insert failed: {e}"))?;
+    }
+    fetch_case_bookmark_row(&conn, &id)?
+        .ok_or_else(|| "save_case_bookmark: saved row not found".to_string())
+}
+
+#[tauri::command]
+pub fn delete_case_bookmark(state: State<DbState>, bookmark_id: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    conn.execute("DELETE FROM case_bookmarks WHERE id = ?1", params![bookmark_id])
+        .map_err(|e| format!("delete_case_bookmark failed: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reorder_case_bookmarks(
+    state: State<DbState>,
+    case_id: String,
+    ordered_bookmark_ids: Vec<String>,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    for (index, id) in ordered_bookmark_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE case_bookmarks SET order_index = ?1, updated_at = ?2 WHERE id = ?3 AND case_id = ?4",
+            params![index as i64, now_iso(), id, case_id],
+        )
+        .map_err(|e| format!("reorder_case_bookmarks update failed: {e}"))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { NrrdViewer, type ViewerBookmarkState } from '../../components/NrrdViewer';
 import {
   adminCreateCase,
   adminCreateQuestion,
@@ -18,7 +19,15 @@ import {
   type AdminQuestionRow,
   type ValidationReport,
 } from '../../lib/admin';
+import {
+  deleteCaseBookmark,
+  listCaseBookmarks,
+  reorderCaseBookmarks,
+  saveCaseBookmark,
+  type BookmarkInput,
+} from '../../lib/bookmarks';
 import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
+import type { CaseBookmark } from '../../types';
 import { AdminDevicesTab } from './AdminDevicesTab';
 import { CaseImportDialog } from './CaseImportDialog';
 import { ListEditor } from './ListEditor';
@@ -208,6 +217,11 @@ export function AdminContentPage({
   const [healthReport, setHealthReport] = useState<ValidationReport | null>(null);
   const [section, setSection] = useState<AdminSection>('cases');
   const [selectedCasePlans, setSelectedCasePlans] = useState<VesselCompositionRow[]>([]);
+  const [bookmarks, setBookmarks] = useState<CaseBookmark[]>([]);
+  const [selectedBookmarkId, setSelectedBookmarkId] = useState<string | null>(null);
+  const [viewerBookmarkState, setViewerBookmarkState] = useState<ViewerBookmarkState | null>(null);
+  const [jumpBookmark, setJumpBookmark] = useState<CaseBookmark | null>(null);
+  const [bookmarkDraft, setBookmarkDraft] = useState({ title: '', note: '', tags: '' });
 
   const flashStatus = useCallback((msg: string) => {
     setStatusMsg(msg);
@@ -255,6 +269,8 @@ export function AdminContentPage({
           setQuestionDraft(null);
           setOriginalCase(null);
           setHealthReport(null);
+          setBookmarks([]);
+          setSelectedBookmarkId(null);
           return;
         }
         setOriginalCase(detail);
@@ -268,6 +284,15 @@ export function AdminContentPage({
           setSelectedQuestionId(null);
           setQuestionDraft(null);
         }
+        const bookmarkRows = await listCaseBookmarks(caseId);
+        setBookmarks(bookmarkRows);
+        setSelectedBookmarkId(bookmarkRows[0]?.id ?? null);
+        const firstBookmark = bookmarkRows[0];
+        setBookmarkDraft({
+          title: firstBookmark?.title ?? '',
+          note: firstBookmark?.note ?? '',
+          tags: (firstBookmark?.tags ?? []).join(', '),
+        });
         await refreshHealth(caseId);
       } catch (e) {
         flashError(`Failed to load case: ${e instanceof Error ? e.message : String(e)}`);
@@ -316,6 +341,9 @@ export function AdminContentPage({
     setSelectedQuestionId(null);
     setQuestionDraft(null);
     setHealthReport(null);
+    setBookmarks([]);
+    setSelectedBookmarkId(null);
+    setBookmarkDraft({ title: '', note: '', tags: '' });
   }
 
   function selectCase(id: string) {
@@ -377,6 +405,8 @@ export function AdminContentPage({
         setSelectedQuestionId(null);
         setQuestionDraft(null);
         setHealthReport(null);
+        setBookmarks([]);
+        setSelectedBookmarkId(null);
       }
       onCasesChanged();
     } catch (e) {
@@ -417,6 +447,7 @@ export function AdminContentPage({
       explanation: '',
       points: 1,
       hints: [],
+      bookmarkId: '',
       choices: [
         { id: 'a', label: '' },
         { id: 'b', label: '' },
@@ -433,6 +464,130 @@ export function AdminContentPage({
       allowedCategory: '',
       correctDeviceId: '',
     });
+  }
+
+  function selectBookmark(bookmark: CaseBookmark) {
+    setSelectedBookmarkId(bookmark.id);
+    setBookmarkDraft({
+      title: bookmark.title,
+      note: bookmark.note,
+      tags: (bookmark.tags ?? []).join(', '),
+    });
+    setJumpBookmark({ ...bookmark });
+  }
+
+  async function saveBookmarkFromViewer() {
+    if (!selectedCaseId || !viewerBookmarkState) {
+      flashError('Open a saved case volume before saving a key image.');
+      return;
+    }
+    const input: BookmarkInput = {
+      caseId: selectedCaseId,
+      title: bookmarkDraft.title.trim() || `Key image ${bookmarks.length + 1}`,
+      note: bookmarkDraft.note,
+      plane: viewerBookmarkState.plane,
+      sliceIndex: viewerBookmarkState.sliceIndex,
+      windowWidth: viewerBookmarkState.windowWidth,
+      windowLevel: viewerBookmarkState.windowLevel,
+      zoom: viewerBookmarkState.zoom,
+      crosshairVoxel: viewerBookmarkState.crosshairVoxel,
+      tags: bookmarkDraft.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+    };
+    setBusy(true);
+    try {
+      const saved = await saveCaseBookmark(input);
+      const rows = await listCaseBookmarks(selectedCaseId);
+      setBookmarks(rows);
+      setSelectedBookmarkId(saved.id);
+      setBookmarkDraft({
+        title: saved.title,
+        note: saved.note,
+        tags: (saved.tags ?? []).join(', '),
+      });
+      flashStatus('Key image saved.');
+      onCasesChanged();
+    } catch (e) {
+      flashError(`Key image save failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateSelectedBookmark() {
+    if (!selectedCaseId || !selectedBookmarkId) return;
+    const bookmark = bookmarks.find((item) => item.id === selectedBookmarkId);
+    if (!bookmark) return;
+    const input: BookmarkInput = {
+      id: bookmark.id,
+      caseId: selectedCaseId,
+      title: bookmarkDraft.title.trim() || bookmark.title,
+      note: bookmarkDraft.note,
+      plane: bookmark.plane,
+      sliceIndex: bookmark.sliceIndex,
+      windowWidth: bookmark.windowWidth,
+      windowLevel: bookmark.windowLevel,
+      zoom: bookmark.zoom,
+      crosshairVoxel: bookmark.crosshairVoxel,
+      tags: bookmarkDraft.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      orderIndex: bookmark.orderIndex ?? 0,
+    };
+    setBusy(true);
+    try {
+      const saved = await saveCaseBookmark(input);
+      const rows = await listCaseBookmarks(selectedCaseId);
+      setBookmarks(rows);
+      setSelectedBookmarkId(saved.id);
+      flashStatus('Key image updated.');
+      onCasesChanged();
+    } catch (e) {
+      flashError(`Key image update failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteSelectedBookmark() {
+    if (!selectedCaseId || !selectedBookmarkId) return;
+    if (!window.confirm('Delete this key image?')) return;
+    setBusy(true);
+    try {
+      await deleteCaseBookmark(selectedBookmarkId);
+      const rows = await listCaseBookmarks(selectedCaseId);
+      setBookmarks(rows);
+      setSelectedBookmarkId(rows[0]?.id ?? null);
+      flashStatus('Key image deleted.');
+      onCasesChanged();
+    } catch (e) {
+      flashError(`Key image delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function moveBookmark(bookmarkId: string, direction: -1 | 1) {
+    if (!selectedCaseId) return;
+    const idx = bookmarks.findIndex((bookmark) => bookmark.id === bookmarkId);
+    const swap = idx + direction;
+    if (idx < 0 || swap < 0 || swap >= bookmarks.length) return;
+    const reordered = [...bookmarks];
+    [reordered[idx], reordered[swap]] = [reordered[swap], reordered[idx]];
+    setBookmarks(reordered);
+    setBusy(true);
+    try {
+      await reorderCaseBookmarks(
+        selectedCaseId,
+        reordered.map((bookmark) => bookmark.id),
+      );
+      const rows = await listCaseBookmarks(selectedCaseId);
+      setBookmarks(rows);
+      setSelectedBookmarkId(bookmarkId);
+      flashStatus('Key images reordered.');
+      onCasesChanged();
+    } catch (e) {
+      flashError(`Key image reorder failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   function selectQuestion(id: string) {
@@ -508,6 +663,9 @@ export function AdminContentPage({
     () => (selectedCaseId ? cases.find((c) => c.id === selectedCaseId) ?? null : null),
     [selectedCaseId, cases],
   );
+  const selectedBookmark = selectedBookmarkId
+    ? bookmarks.find((bookmark) => bookmark.id === selectedBookmarkId) ?? null
+    : null;
 
   if (!available) {
     return (
@@ -873,6 +1031,120 @@ export function AdminContentPage({
             <ContentHealthCard report={healthReport} questionRows={questions} onJumpToQuestion={selectQuestion} />
           )}
 
+          {!creatingNewCase && selectedCase && (
+            <section className="content-card admin-bookmarks-panel">
+              <header className="admin-panel-header">
+                <h3>Key images</h3>
+                <button
+                  type="button"
+                  className="secondary-button small"
+                  onClick={() => void saveBookmarkFromViewer()}
+                  disabled={busy || !viewerBookmarkState}
+                >
+                  Save current view
+                </button>
+              </header>
+              <div className="admin-bookmarks-grid">
+                <div className="admin-bookmark-viewer">
+                  <NrrdViewer
+                    volumePath={caseDraft.volumePath || 'sample'}
+                    description={caseDraft.summary || 'Author key images from the current viewer state.'}
+                    onViewerStateChange={setViewerBookmarkState}
+                    jumpToBookmark={jumpBookmark}
+                    activeBookmark={selectedBookmark}
+                  />
+                </div>
+                <div className="admin-bookmark-editor">
+                  <div className="key-finding-list">
+                    {bookmarks.map((bookmark, idx) => (
+                      <div
+                        key={bookmark.id}
+                        className={
+                          bookmark.id === selectedBookmarkId
+                            ? 'key-finding-row active admin-key-finding-row'
+                            : 'key-finding-row admin-key-finding-row'
+                        }
+                      >
+                        <button type="button" onClick={() => selectBookmark(bookmark)}>
+                          <strong>{bookmark.title}</strong>
+                          <span>
+                            {bookmark.plane} slice {bookmark.sliceIndex + 1}
+                          </span>
+                        </button>
+                        <div className="admin-question-row-actions">
+                          <button
+                            type="button"
+                            className="secondary-button small"
+                            onClick={() => void moveBookmark(bookmark.id, -1)}
+                            disabled={busy || idx === 0}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button small"
+                            onClick={() => void moveBookmark(bookmark.id, 1)}
+                            disabled={busy || idx === bookmarks.length - 1}
+                          >
+                            ↓
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {bookmarks.length === 0 ? (
+                      <p className="muted small">No key images yet. Position the viewer, then save the current view.</p>
+                    ) : null}
+                  </div>
+                  <label className="field-label">
+                    <span>Title</span>
+                    <input
+                      className="text-input"
+                      value={bookmarkDraft.title}
+                      onChange={(e) => setBookmarkDraft((draft) => ({ ...draft, title: e.target.value }))}
+                      placeholder="Finding title"
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span>Note</span>
+                    <textarea
+                      className="text-input textarea"
+                      value={bookmarkDraft.note}
+                      onChange={(e) => setBookmarkDraft((draft) => ({ ...draft, note: e.target.value }))}
+                      placeholder="Teaching note for this view"
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span>Tags</span>
+                    <input
+                      className="text-input"
+                      value={bookmarkDraft.tags}
+                      onChange={(e) => setBookmarkDraft((draft) => ({ ...draft, tags: e.target.value }))}
+                      placeholder="aneurysm, landing zone"
+                    />
+                  </label>
+                  <div className="admin-form-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => void updateSelectedBookmark()}
+                      disabled={busy || !selectedBookmark}
+                    >
+                      Update selected
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => void deleteSelectedBookmark()}
+                      disabled={busy || !selectedBookmark}
+                    >
+                      Delete selected
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
           <section className="content-card admin-questions-panel">
             <header className="admin-panel-header">
               <h3>Questions</h3>
@@ -977,6 +1249,7 @@ export function AdminContentPage({
                     }}
                     onDelete={questionDraft.id ? () => void deleteQuestion() : undefined}
                     busy={busy}
+                    bookmarks={bookmarks}
                   />
                 ) : (
                   <p className="muted">Pick a question on the left, or hit <em>+ Question</em>.</p>

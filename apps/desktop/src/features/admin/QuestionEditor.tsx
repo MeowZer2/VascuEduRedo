@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { type AdminQuestionInput, type AdminQuestionRow } from '../../lib/admin';
 import { listDeviceCategories, listDevices, type Device } from '../../lib/devices';
-import type { QuestionType } from '../../types';
+import type { CaseBookmark, QuestionType } from '../../types';
 
 const QUESTION_TYPES: { value: QuestionType; label: string }[] = [
   { value: 'multipleChoice', label: 'Multiple choice' },
@@ -24,6 +24,7 @@ export interface QuestionDraft {
   /** Stored as string while editing so an empty box doesn't coerce to 0. */
   points: number | string;
   hints: string[];
+  bookmarkId: string;
   // multipleChoice / multiSelect
   choices: { id: string; label: string }[];
   correctChoiceId: string;
@@ -52,6 +53,7 @@ function emptyDraft(type: QuestionType = 'multipleChoice'): QuestionDraft {
     explanation: '',
     points: 1,
     hints: [],
+    bookmarkId: '',
     choices: [
       { id: 'a', label: '' },
       { id: 'b', label: '' },
@@ -84,6 +86,7 @@ export function questionRowToDraft(row: AdminQuestionRow): QuestionDraft {
     explanation: (get<string>('explanation') ?? '') as string,
     points: (get<number>('points') ?? 1) as number,
     hints: ((get<string[]>('hints') ?? []) as string[]).slice(),
+    bookmarkId: (get<string>('bookmarkId') ?? '') as string,
     choices: ((get<{ id: string; label: string }[]>('choices') ?? base.choices) as {
       id: string;
       label: string;
@@ -136,6 +139,7 @@ export function draftToQuestionInput(draft: QuestionDraft): DraftConversion {
     points: points ?? 1,
   };
   if (hints.length > 0) data.hints = hints;
+  if (draft.bookmarkId.trim()) data.bookmarkId = draft.bookmarkId.trim();
 
   switch (draft.type) {
     case 'multipleChoice': {
@@ -231,6 +235,7 @@ export interface QuestionEditorProps {
   onCancel: () => void;
   onDelete?: () => void;
   busy: boolean;
+  bookmarks?: CaseBookmark[];
 }
 
 export function QuestionEditor({
@@ -240,6 +245,7 @@ export function QuestionEditor({
   onCancel,
   onDelete,
   busy,
+  bookmarks = [],
 }: QuestionEditorProps) {
   function patch<K extends keyof QuestionDraft>(key: K, value: QuestionDraft[K]) {
     onChange({ ...draft, [key]: value });
@@ -256,6 +262,7 @@ export function QuestionEditor({
       explanation: draft.explanation,
       points: draft.points,
       hints: draft.hints,
+      bookmarkId: draft.bookmarkId,
     });
   }
 
@@ -366,6 +373,22 @@ export function QuestionEditor({
             )
           }
         />
+      </label>
+
+      <label className="field-label">
+        <span>Referenced key finding (optional)</span>
+        <select
+          className="text-input"
+          value={draft.bookmarkId}
+          onChange={(e) => patch('bookmarkId', e.target.value)}
+        >
+          <option value="">No referenced finding</option>
+          {bookmarks.map((bookmark) => (
+            <option key={bookmark.id} value={bookmark.id}>
+              {bookmark.title}
+            </option>
+          ))}
+        </select>
       </label>
 
       <div className="admin-form-actions">

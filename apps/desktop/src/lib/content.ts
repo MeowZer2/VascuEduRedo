@@ -1,5 +1,6 @@
 import { cases as sampleCases } from '../data/sampleContent';
 import type { Question, VascCase } from '../types';
+import { listCaseBookmarks } from './bookmarks';
 import { isTauriDesktop, safeInvoke } from './tauri';
 
 interface CaseRow {
@@ -25,7 +26,7 @@ interface QuestionRow {
  * Reconstruct a `VascCase` from a SQLite row + its questions. The `data` blob mirrors the
  * extra fields of the original `VascCase` shape (patient, learning objectives, tags, etc.).
  */
-function rowToVascCase(row: CaseRow, questions: Question[]): VascCase {
+function rowToVascCase(row: CaseRow, questions: Question[], bookmarks: VascCase['bookmarks'] = []): VascCase {
   const extra = row.data ?? {};
   const patient = (extra as Record<string, unknown>).patient as VascCase['patient'] | undefined;
   const volume = (extra as Record<string, unknown>).volume as VascCase['volume'] | undefined;
@@ -55,6 +56,7 @@ function rowToVascCase(row: CaseRow, questions: Question[]): VascCase {
       path: row.volumePath ?? undefined,
       description: '',
     },
+    bookmarks,
     questions,
   };
 }
@@ -80,7 +82,8 @@ export async function loadCases(): Promise<VascCase[]> {
     const result: VascCase[] = [];
     for (const row of rows) {
       const questionRows = (await safeInvoke<QuestionRow[]>('get_case_questions', { caseId: row.id })) ?? [];
-      result.push(rowToVascCase(row, questionRows.map(rowToQuestion)));
+      const bookmarks = await listCaseBookmarks(row.id);
+      result.push(rowToVascCase(row, questionRows.map(rowToQuestion), bookmarks));
     }
     return result;
   } catch (error) {
@@ -97,7 +100,8 @@ export async function loadCaseById(caseId: string): Promise<VascCase | undefined
     const row = await safeInvoke<CaseRow | null>('get_case', { identifier: caseId });
     if (!row) return sampleCases.find((c) => c.id === caseId);
     const questionRows = (await safeInvoke<QuestionRow[]>('get_case_questions', { caseId: row.id })) ?? [];
-    return rowToVascCase(row, questionRows.map(rowToQuestion));
+    const bookmarks = await listCaseBookmarks(row.id);
+    return rowToVascCase(row, questionRows.map(rowToQuestion), bookmarks);
   } catch (error) {
     console.error('loadCaseById failed, falling back to sample data:', error);
     return sampleCases.find((c) => c.id === caseId);

@@ -58,6 +58,7 @@ import {
   NO_MANUAL_FLIPS,
   manualFlipsActive,
 } from './viewerShared';
+import type { CaseBookmark } from '../types';
 
 type ViewerStatus = 'browser' | 'loading' | 'ready' | 'error';
 
@@ -72,12 +73,24 @@ interface NrrdViewerProps {
   requestedTool?: ViewerToolMode;
   /** Called whenever the most recently completed measurement changes or is cleared. */
   onLatestMeasurementChange?: (measurement: ViewerMeasurement | null) => void;
+  onViewerStateChange?: (state: ViewerBookmarkState | null) => void;
+  jumpToBookmark?: CaseBookmark | null;
+  activeBookmark?: CaseBookmark | null;
 }
 
 interface SyncFlags {
   slice: boolean;
   wl: boolean;
   zoom: boolean;
+}
+
+export interface ViewerBookmarkState {
+  plane: VolumePlane;
+  sliceIndex: number;
+  windowWidth: number;
+  windowLevel: number;
+  zoom: number;
+  crosshairVoxel: [number, number, number] | null;
 }
 
 const LAYOUT_OPTIONS: Array<{ value: ViewerLayout; label: string }> = [
@@ -178,6 +191,9 @@ export function NrrdViewer({
   description,
   requestedTool,
   onLatestMeasurementChange,
+  onViewerStateChange,
+  jumpToBookmark,
+  activeBookmark,
 }: NrrdViewerProps) {
   const [volume, setVolume] = useState<VolumeInfo | null>(null);
   const [status, setStatus] = useState<ViewerStatus>('loading');
@@ -197,6 +213,7 @@ export function NrrdViewer({
   const [dicomImportStatus, setDicomImportStatus] = useState<'idle' | 'scanning' | 'error'>('idle');
   const [dicomImportError, setDicomImportError] = useState<string | null>(null);
   const [metaOpen, setMetaOpen] = useState(false);
+  const [focusedPaneIndex, setFocusedPaneIndex] = useState<number | null>(null);
 
   // Whenever the case-supplied volumePath changes, snap back to it as the
   // active source. The user can still override via "Open NRRD…" afterwards.
@@ -216,6 +233,8 @@ export function NrrdViewer({
 
   const onLatestMeasurementChangeRef = useRef(onLatestMeasurementChange);
   onLatestMeasurementChangeRef.current = onLatestMeasurementChange;
+  const onViewerStateChangeRef = useRef(onViewerStateChange);
+  onViewerStateChangeRef.current = onViewerStateChange;
 
   // Load the volume whenever the selected source changes. Slice loading happens inside each pane.
   useEffect(() => {
@@ -230,6 +249,7 @@ export function NrrdViewer({
     setLatestMeasurement(null);
     setActivePane(0);
     setManualFlips(NO_MANUAL_FLIPS);
+    setFocusedPaneIndex(null);
 
     if (!isTauriDesktop()) {
       setStatus('browser');
@@ -284,6 +304,67 @@ export function NrrdViewer({
     onLatestMeasurementChangeRef.current?.(latestMeasurement);
   }, [latestMeasurement]);
 
+  useEffect(() => {
+    const pane = panes[activePane];
+    if (!volume || status !== 'ready' || !pane) {
+      onViewerStateChangeRef.current?.(null);
+      return;
+    }
+    onViewerStateChangeRef.current?.({
+      plane: pane.plane,
+      sliceIndex: pane.slice,
+      windowWidth: pane.ww,
+      windowLevel: pane.wl,
+      zoom: pane.zoom,
+      crosshairVoxel: crosshair ? [crosshair.x, crosshair.y, crosshair.z] : null,
+    });
+  }, [activePane, crosshair, panes, status, volume]);
+
+  useEffect(() => {
+    if (!jumpToBookmark || !volume || status !== 'ready') return;
+    const plane = jumpToBookmark.plane;
+    const safeSlice = sanitizeSliceIndex(
+      jumpToBookmark.sliceIndex,
+      volume.planeSliceRanges[plane].count,
+    );
+    setActivePane(0);
+    setPanes((current) => {
+      if (current.length === 0) return current;
+      return current.map((pane, index) =>
+        index === 0
+          ? {
+              ...pane,
+              plane,
+              slice: safeSlice,
+              ww: jumpToBookmark.windowWidth,
+              wl: jumpToBookmark.windowLevel,
+              zoom: jumpToBookmark.zoom ?? pane.zoom,
+              pendingPoints: [],
+              selectedMeasurementId: null,
+            }
+          : pane,
+      );
+    });
+    if (jumpToBookmark.crosshairVoxel) {
+      const [x, y, z] = jumpToBookmark.crosshairVoxel;
+      setCrosshair({
+        x: clamp(Math.round(x), 0, volume.dims[0] - 1),
+        y: clamp(Math.round(y), 0, volume.dims[1] - 1),
+        z: clamp(Math.round(z), 0, volume.dims[2] - 1),
+      });
+    } else {
+      setCrosshair((current) => {
+        const previous =
+          current ?? {
+            x: midpoint(volume.dims[0]),
+            y: midpoint(volume.dims[1]),
+            z: midpoint(volume.dims[2]),
+          };
+        return voxelWithSlice(previous, plane, safeSlice);
+      });
+    }
+  }, [jumpToBookmark?.id, status, volume]);
+
   // Switching tools clears any in-progress points so we never mix points from
   // different tool flows.
   useEffect(() => {
@@ -302,6 +383,12 @@ export function NrrdViewer({
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
+        // Escape priority: exit focus mode first so the user can step back
+        // out of a maximized pane without losing in-progress points.
+        if (focusedPaneIndex !== null) {
+          setFocusedPaneIndex(null);
+          return;
+        }
         setPanes((current) => current.map((p) => ({ ...p, pendingPoints: [] })));
         return;
       }
@@ -325,7 +412,7 @@ export function NrrdViewer({
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [activePane]);
+  }, [activePane, focusedPaneIndex]);
 
   // Whenever the panes' measurements change, recompute the latest distance for quiz.
   useEffect(() => {
@@ -362,6 +449,7 @@ export function NrrdViewer({
     });
     setLayoutState(next);
     if (activePane >= targetCount) setActivePane(0);
+    setFocusedPaneIndex(null);
   }
 
   // -- pane handlers ---------------------------------------------------------------
@@ -748,6 +836,12 @@ export function NrrdViewer({
                 <li key={idx}>{warning}</li>
               ))}
             </ul>
+          ) : null}
+          {activeBookmark ? (
+            <div className="viewer-bookmark-note" aria-live="polite">
+              <strong>{activeBookmark.title}</strong>
+              {activeBookmark.note ? <span>{activeBookmark.note}</span> : null}
+            </div>
           ) : null}
         </div>
         <div className="viewer-header-meta">
@@ -1138,7 +1232,8 @@ export function NrrdViewer({
       ) : null}
 
       {status === 'loading' ? (
-        <div className="viewer-state viewer-state-info">
+        <div className="viewer-state viewer-state-info viewer-state-loading" role="status" aria-live="polite">
+          <span className="viewer-loading-spinner" aria-hidden="true" />
           <strong>Loading {currentVolumeName || 'volume'}…</strong>
           <span>Reading volume metadata, decoding voxels, and preparing MPR slices.</span>
         </div>
@@ -1175,37 +1270,57 @@ export function NrrdViewer({
       ) : null}
 
       {volume && status === 'ready' && panes.length > 0 ? (
-        <div className={`viewer-grid layout-${layout}`}>
-          {panes.map((pane, idx) => (
-            <ViewportPane
-              key={pane.id}
-              volume={volume}
-              pane={pane}
-              index={idx}
-              toolMode={toolMode}
-              displayConvention={displayConvention}
-              manualFlips={manualFlips}
-              crosshairVoxel={crosshair}
-              showCrosshair
-              active={idx === activePane}
-              isLatestMeasurementOwner={
-                latestMeasurement
-                  ? pane.measurements.some((m) => m.id === latestMeasurement.id)
-                  : false
-              }
-              latestMeasurementId={latestMeasurement?.id ?? null}
-              onActivate={() => setActivePane(idx)}
-              onPlaneChange={(plane) => handlePlaneChange(idx, plane)}
-              onSliceChange={(slice) => handleSliceChange(idx, slice)}
-              onZoomChange={(zoom) => handleZoomChange(idx, zoom)}
-              onPanChange={(pan) => handlePanChange(idx, pan)}
-              onCrosshairFromPane={(point) => handleCrosshairFromPane(idx, point)}
-              onPendingPointsChange={(points) => handlePendingPointsChange(idx, points)}
-              onAddMeasurement={(m) => handleAddMeasurement(idx, m)}
-              onClearMeasurements={() => handleClearMeasurements(idx)}
-              onSelectMeasurement={(id) => handleSelectMeasurement(idx, id)}
-            />
-          ))}
+        <div
+          className={`viewer-grid layout-${
+            focusedPaneIndex !== null ? '1x1' : layout
+          }${focusedPaneIndex !== null ? ' viewer-grid-focused' : ''}`}
+        >
+          {panes.map((pane, idx) => {
+            if (focusedPaneIndex !== null && idx !== focusedPaneIndex) return null;
+            return (
+              <ViewportPane
+                key={pane.id}
+                volume={volume}
+                pane={pane}
+                index={idx}
+                toolMode={toolMode}
+                displayConvention={displayConvention}
+                manualFlips={manualFlips}
+                crosshairVoxel={crosshair}
+                showCrosshair
+                active={idx === activePane}
+                isLatestMeasurementOwner={
+                  latestMeasurement
+                    ? pane.measurements.some((m) => m.id === latestMeasurement.id)
+                    : false
+                }
+                latestMeasurementId={latestMeasurement?.id ?? null}
+                onActivate={() => setActivePane(idx)}
+                onPaneDoubleClick={() =>
+                  setFocusedPaneIndex((current) => (current === idx ? null : idx))
+                }
+                onPlaneChange={(plane) => handlePlaneChange(idx, plane)}
+                onSliceChange={(slice) => handleSliceChange(idx, slice)}
+                onZoomChange={(zoom) => handleZoomChange(idx, zoom)}
+                onPanChange={(pan) => handlePanChange(idx, pan)}
+                onCrosshairFromPane={(point) => handleCrosshairFromPane(idx, point)}
+                onPendingPointsChange={(points) => handlePendingPointsChange(idx, points)}
+                onAddMeasurement={(m) => handleAddMeasurement(idx, m)}
+                onClearMeasurements={() => handleClearMeasurements(idx)}
+                onSelectMeasurement={(id) => handleSelectMeasurement(idx, id)}
+              />
+            );
+          })}
+          {focusedPaneIndex !== null ? (
+            <button
+              type="button"
+              className="focus-exit-button"
+              onClick={() => setFocusedPaneIndex(null)}
+              title="Exit focus mode (Esc)"
+            >
+              ⤢ Exit focus
+            </button>
+          ) : null}
         </div>
       ) : null}
 

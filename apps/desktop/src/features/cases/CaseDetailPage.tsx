@@ -149,6 +149,24 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
         </section>
       )}
 
+      {vascCase.bookmarks && vascCase.bookmarks.length > 0 ? (
+        <section className="content-card">
+          <h3>Key findings</h3>
+          <div className="key-finding-list">
+            {vascCase.bookmarks.map((bookmark) => (
+              <div key={bookmark.id} className="key-finding-row">
+                <strong>{bookmark.title}</strong>
+                <span>
+                  {bookmark.plane} slice {bookmark.sliceIndex + 1}
+                  {bookmark.tags && bookmark.tags.length > 0 ? ` · ${bookmark.tags.join(', ')}` : ''}
+                </span>
+                {bookmark.note ? <span className="muted small">{bookmark.note}</span> : null}
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <section className="content-card">
         <h3>Imaging</h3>
         <p>{vascCase.volume.description || 'No imaging description provided.'}</p>

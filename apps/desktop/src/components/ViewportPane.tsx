@@ -11,7 +11,6 @@ import {
   ZOOM_STEP,
   angleDeg,
   clamp,
-  clearCanvas,
   composeFlips,
   displayToImagePoint,
   distanceMm,
@@ -43,6 +42,21 @@ interface PanDragState {
   panStart: DisplayPoint;
 }
 
+interface ScrollDragState {
+  pointerId: number;
+  startY: number;
+  startX: number;
+  startSlice: number;
+  startPoint: ImagePoint;
+  /** True once we've moved past the click/drag threshold. */
+  locked: boolean;
+}
+
+const SCROLL_DRAG_PX_PER_SLICE = 8;
+const SCROLL_DRAG_THRESHOLD_PX = 4;
+const SLICE_CACHE_LIMIT = 24;
+const SLICE_SCHEDULER_DEBUG_FLAG = 'vascuedu.sliceSchedulerDebug';
+
 interface HuReadout {
   x: number;
   y: number;
@@ -51,6 +65,27 @@ interface HuReadout {
 
 interface SlicePixels extends ImageSize {
   pixels: Uint8Array;
+}
+
+interface SliceRequestTarget {
+  key: string;
+  contextKey: string;
+  handleId: string;
+  plane: VolumePlane;
+  sliceIndex: number;
+  ww: number;
+  wl: number;
+  planeLabel: string;
+}
+
+interface SliceSchedulerState {
+  desired: SliceRequestTarget | null;
+  displayedKey: string | null;
+  displayedSlice: number | null;
+  requestInFlight: boolean;
+  lastRequestedKey: string | null;
+  lastRequestedSlice: number | null;
+  sequence: number;
 }
 
 export interface PaneSnapshot {
@@ -86,6 +121,8 @@ export interface ViewportPaneProps {
   isLatestMeasurementOwner: boolean;
   latestMeasurementId: string | null;
   onActivate: () => void;
+  /** Optional: fired when the user double-clicks the pane (used for focus mode). */
+  onPaneDoubleClick?: () => void;
   onPlaneChange: (plane: VolumePlane) => void;
   onSliceChange: (slice: number) => void;
   onZoomChange: (zoom: number) => void;
@@ -95,6 +132,54 @@ export interface ViewportPaneProps {
   onAddMeasurement: (measurement: Measurement) => void;
   onClearMeasurements: () => void;
   onSelectMeasurement: (id: string | null) => void;
+}
+
+function makeSliceKey(
+  handleId: string,
+  plane: VolumePlane,
+  sliceIndex: number,
+  ww: number,
+  wl: number,
+): string {
+  return `${handleId}:${plane}:${sliceIndex}:ww${ww}:wl${wl}`;
+}
+
+function makeSliceContextKey(handleId: string, plane: VolumePlane): string {
+  return `${handleId}:${plane}`;
+}
+
+function getCachedSlice(
+  cache: Map<string, SlicePixels>,
+  key: string,
+): SlicePixels | null {
+  const cached = cache.get(key);
+  if (!cached) return null;
+  cache.delete(key);
+  cache.set(key, cached);
+  return cached;
+}
+
+function rememberCachedSlice(cache: Map<string, SlicePixels>, key: string, pixels: SlicePixels) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, pixels);
+  while (cache.size > SLICE_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
+}
+
+function logSliceScheduler(
+  paneId: string,
+  event: string,
+  detail: Record<string, unknown>,
+) {
+  try {
+    if (window.localStorage.getItem(SLICE_SCHEDULER_DEBUG_FLAG) !== '1') return;
+  } catch {
+    return;
+  }
+  console.debug(`[slice-scheduler:${paneId}] ${event}`, detail);
 }
 
 /**
@@ -115,6 +200,7 @@ export function ViewportPane({
   isLatestMeasurementOwner,
   latestMeasurementId,
   onActivate,
+  onPaneDoubleClick,
   onPlaneChange,
   onSliceChange,
   onZoomChange,
@@ -132,9 +218,26 @@ export function ViewportPane({
   const [slicePixels, setSlicePixels] = useState<SlicePixels | null>(null);
   const [panelSize, setPanelSize] = useState<ImageSize>({ width: 0, height: 0 });
   const [panDrag, setPanDrag] = useState<PanDragState | null>(null);
+  const [scrollDrag, setScrollDrag] = useState<ScrollDragState | null>(null);
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
   const [huReadout, setHuReadout] = useState<HuReadout | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [slicePending, setSlicePending] = useState(false);
+  const sliceCacheRef = useRef(new Map<string, SlicePixels>());
+  const mountedRef = useRef(false);
+  const schedulerRef = useRef<SliceSchedulerState>({
+    desired: null,
+    displayedKey: null,
+    displayedSlice: null,
+    requestInFlight: false,
+    lastRequestedKey: null,
+    lastRequestedSlice: null,
+    sequence: 0,
+  });
+  const loadedContextRef = useRef<string | null>(null);
+  const scrollDragDesiredSliceRef = useRef<number | null>(null);
+  const scrollDragPendingSliceRef = useRef<number | null>(null);
+  const scrollDragRafRef = useRef<number | null>(null);
 
   const range = volume.planeSliceRanges[pane.plane];
   const totalSlices = range.count;
@@ -164,6 +267,17 @@ export function ViewportPane({
     [volume, pane.plane, flips],
   );
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (scrollDragRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollDragRafRef.current);
+        scrollDragRafRef.current = null;
+      }
+    };
+  }, []);
+
   // Track pane size with ResizeObserver so the canvas refits on layout changes.
   useEffect(() => {
     const observed = panelRef.current;
@@ -189,33 +303,138 @@ export function ViewportPane({
     setPanDrag(null);
   }, [pane.plane, sliceIndex]);
 
-  // Slice load: every time the displayed (plane, slice, ww, wl) changes, request a fresh slice.
-  useEffect(() => {
-    let cancelled = false;
-    setImageSize(null);
-    setSlicePixels(null);
-    clearCanvas(canvasRef.current);
-    setError(null);
+  // Slice scheduler. `pane.slice` is the desired target; request/displayed
+  // state is owned here so rapid browsing cannot flood the backend with stale
+  // decodes. The old frame stays painted while the next request resolves.
+  function commitSlice(target: SliceRequestTarget, pixels: SlicePixels) {
+    setImageSize({ width: pixels.width, height: pixels.height });
+    setSlicePixels(pixels);
+    loadedContextRef.current = target.contextKey;
+    schedulerRef.current.displayedKey = target.key;
+    schedulerRef.current.displayedSlice = target.sliceIndex;
+  }
 
-    loadVolumeSlice(volume.handleId, pane.plane, sliceIndex, pane.ww, pane.wl)
+  function pumpSliceScheduler() {
+    const scheduler = schedulerRef.current;
+    const desired = scheduler.desired;
+    if (!desired) return;
+
+    if (scheduler.displayedKey === desired.key) {
+      setSlicePending(false);
+      return;
+    }
+
+    const cached = getCachedSlice(sliceCacheRef.current, desired.key);
+    if (cached) {
+      logSliceScheduler(pane.id, 'cache hit', {
+        desiredSlice: desired.sliceIndex,
+        displayedSlice: scheduler.displayedSlice,
+      });
+      setError(null);
+      commitSlice(desired, cached);
+      if (!scheduler.requestInFlight) setSlicePending(false);
+      return;
+    }
+
+    logSliceScheduler(pane.id, 'cache miss', {
+      desiredSlice: desired.sliceIndex,
+      displayedSlice: scheduler.displayedSlice,
+      requestInFlight: scheduler.requestInFlight,
+    });
+
+    if (scheduler.requestInFlight) return;
+
+    const request = desired;
+    const sequence = scheduler.sequence + 1;
+    scheduler.sequence = sequence;
+    scheduler.requestInFlight = true;
+    scheduler.lastRequestedKey = request.key;
+    scheduler.lastRequestedSlice = request.sliceIndex;
+    setError(null);
+    setSlicePending(true);
+    logSliceScheduler(pane.id, 'request started', {
+      sequence,
+      requestedSlice: request.sliceIndex,
+      desiredSlice: scheduler.desired?.sliceIndex,
+      displayedSlice: scheduler.displayedSlice,
+    });
+
+    loadVolumeSlice(request.handleId, request.plane, request.sliceIndex, request.ww, request.wl)
       .then((image) => {
-        if (cancelled) return;
+        if (!mountedRef.current) return;
         const gray = base64ToUint8Array(image.pixelsBase64);
         if (gray.length !== image.width * image.height) {
           throw new Error(
-            `${planeLabel} slice returned ${gray.length} pixels for ${image.width} x ${image.height}.`,
+            `${request.planeLabel} slice returned ${gray.length} pixels for ${image.width} x ${image.height}.`,
           );
         }
-        setImageSize({ width: image.width, height: image.height });
-        setSlicePixels({ width: image.width, height: image.height, pixels: gray });
+        const pixels = { width: image.width, height: image.height, pixels: gray };
+        rememberCachedSlice(sliceCacheRef.current, request.key, pixels);
+
+        const latest = schedulerRef.current.desired;
+        const canCommit =
+          latest?.key === request.key ||
+          (schedulerRef.current.displayedKey === null && latest?.contextKey === request.contextKey);
+        if (canCommit) {
+          commitSlice(request, pixels);
+        } else {
+          logSliceScheduler(pane.id, 'request skipped', {
+            sequence,
+            requestedSlice: request.sliceIndex,
+            desiredSlice: latest?.sliceIndex,
+            displayedSlice: schedulerRef.current.displayedSlice,
+          });
+        }
+        logSliceScheduler(pane.id, 'request completed', {
+          sequence,
+          requestedSlice: request.sliceIndex,
+          desiredSlice: latest?.sliceIndex,
+          displayedSlice: schedulerRef.current.displayedSlice,
+        });
       })
       .catch((caught: unknown) => {
-        if (cancelled) return;
-        setError(caught instanceof Error ? caught.message : String(caught));
+        if (!mountedRef.current) return;
+        const latest = schedulerRef.current.desired;
+        if (latest?.key === request.key) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
+      })
+      .finally(() => {
+        if (!mountedRef.current) return;
+        schedulerRef.current.requestInFlight = false;
+        const latest = schedulerRef.current.desired;
+        const hasOutstanding = Boolean(latest && schedulerRef.current.displayedKey !== latest.key);
+        setSlicePending(hasOutstanding);
+        if (hasOutstanding) {
+          window.setTimeout(pumpSliceScheduler, 0);
+        }
       });
-    return () => {
-      cancelled = true;
+  }
+
+  useEffect(() => {
+    const target: SliceRequestTarget = {
+      key: makeSliceKey(volume.handleId, pane.plane, sliceIndex, pane.ww, pane.wl),
+      contextKey: makeSliceContextKey(volume.handleId, pane.plane),
+      handleId: volume.handleId,
+      plane: pane.plane,
+      sliceIndex,
+      ww: pane.ww,
+      wl: pane.wl,
+      planeLabel,
     };
+
+    const scheduler = schedulerRef.current;
+    scheduler.desired = target;
+
+    if (loadedContextRef.current !== null && loadedContextRef.current !== target.contextKey) {
+      setSlicePixels(null);
+      setImageSize(null);
+      scheduler.displayedKey = null;
+      scheduler.displayedSlice = null;
+    }
+
+    setError(null);
+    pumpSliceScheduler();
   }, [volume.handleId, pane.plane, sliceIndex, pane.ww, pane.wl, planeLabel]);
 
   // Render the slice into the (DPR-scaled) canvas whenever pixels or fit change.
@@ -255,7 +474,11 @@ export function ViewportPane({
       ctx.translate(0, fitRect.height);
       ctx.scale(1, -1);
     }
-    ctx.imageSmoothingEnabled = false;
+    // Bilinear / high-quality scaling so zoomed CT looks continuous rather
+    // than blocky. The underlying voxel data and the source rawCanvas pixels
+    // are unchanged — smoothing only affects the upscale during drawImage.
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(
       rawCanvas,
       0,
@@ -346,6 +569,41 @@ export function ViewportPane({
     return displayToImagePoint(display, imageSize, fitRect, flips);
   }
 
+  function sliceFromScrollDrag(
+    event: PointerEvent<HTMLDivElement>,
+    drag: ScrollDragState,
+  ): number | null {
+    const display = displayPointFromPointer(event);
+    if (!display) return null;
+    const dy = display.y - drag.startY;
+    const sliceDelta = Math.round(dy / SCROLL_DRAG_PX_PER_SLICE);
+    return sanitizeSliceIndex(drag.startSlice + sliceDelta, range.count);
+  }
+
+  function emitScrubSlice(slice: number) {
+    scrollDragDesiredSliceRef.current = slice;
+    scrollDragPendingSliceRef.current = slice;
+    if (scrollDragRafRef.current !== null) return;
+    scrollDragRafRef.current = window.requestAnimationFrame(() => {
+      scrollDragRafRef.current = null;
+      const pending = scrollDragPendingSliceRef.current;
+      scrollDragPendingSliceRef.current = null;
+      if (pending !== null) onSliceChange(pending);
+    });
+  }
+
+  function flushScrubSlice(slice: number) {
+    if (scrollDragRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollDragRafRef.current);
+      scrollDragRafRef.current = null;
+    }
+    scrollDragPendingSliceRef.current = null;
+    if (scrollDragDesiredSliceRef.current !== slice || slice !== sliceIndex) {
+      scrollDragDesiredSliceRef.current = slice;
+      onSliceChange(slice);
+    }
+  }
+
   function newMeasurementId(prefix: string): string {
     measurementCounterRef.current += 1;
     return `${pane.id}-${prefix}-${Date.now()}-${measurementCounterRef.current}`;
@@ -418,9 +676,26 @@ export function ViewportPane({
     }
 
     if (toolMode === 'scroll') {
-      // Default click behaviour: relocate the crosshair to the picked voxel.
+      // Defer the action until pointerup so the same press can either
+      // (a) relocate the crosshair on a quick click, or
+      // (b) scrub slices on a vertical drag (see handlePointerMove).
       event.preventDefault();
-      onCrosshairFromPane(point);
+      const display = displayPointFromPointer(event);
+      if (!display) {
+        onCrosshairFromPane(point);
+        return;
+      }
+      event.currentTarget.setPointerCapture(event.pointerId);
+      scrollDragDesiredSliceRef.current = sliceIndex;
+      scrollDragPendingSliceRef.current = null;
+      setScrollDrag({
+        pointerId: event.pointerId,
+        startY: display.y,
+        startX: display.x,
+        startSlice: sliceIndex,
+        startPoint: point,
+        locked: false,
+      });
     }
   }
 
@@ -435,6 +710,26 @@ export function ViewportPane({
       });
       return;
     }
+    if (scrollDrag && scrollDrag.pointerId === event.pointerId) {
+      const display = displayPointFromPointer(event);
+      if (!display) return;
+      const dy = display.y - scrollDrag.startY;
+      const dx = display.x - scrollDrag.startX;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (!scrollDrag.locked && dist < SCROLL_DRAG_THRESHOLD_PX) {
+        // Still within the click "dead zone" — don't scrub yet.
+        return;
+      }
+      event.preventDefault();
+      if (!scrollDrag.locked) {
+        setScrollDrag({ ...scrollDrag, locked: true });
+      }
+      const nextSlice = sliceFromScrollDrag(event, scrollDrag);
+      if (nextSlice !== null && nextSlice !== scrollDragDesiredSliceRef.current) {
+        emitScrubSlice(nextSlice);
+      }
+      return;
+    }
     setHoverPoint(imagePointFromPointer(event));
   }
 
@@ -445,10 +740,25 @@ export function ViewportPane({
       }
       setPanDrag(null);
     }
+    if (scrollDrag?.pointerId === event.pointerId) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      if (!scrollDrag.locked) {
+        // No real drag happened — treat it as a click: relocate the crosshair.
+        onCrosshairFromPane(scrollDrag.startPoint);
+      } else {
+        const finalSlice = sliceFromScrollDrag(event, scrollDrag);
+        if (finalSlice !== null) flushScrubSlice(finalSlice);
+      }
+      scrollDragDesiredSliceRef.current = null;
+      scrollDragPendingSliceRef.current = null;
+      setScrollDrag(null);
+    }
   }
 
   function handlePointerLeave() {
-    if (!panDrag) {
+    if (!panDrag && !scrollDrag) {
       setHoverPoint(null);
       setHuReadout(null);
     }
@@ -517,12 +827,13 @@ export function ViewportPane({
 
       <div
         ref={panelRef}
-        className={`canvas-wrap nrrd-canvas-wrap ${toolMode === 'distance' || toolMode === 'angle' ? 'measuring' : ''} ${toolMode === 'pan' ? 'panning' : ''}`}
+        className={`canvas-wrap nrrd-canvas-wrap ${toolMode === 'distance' || toolMode === 'angle' ? 'measuring' : ''} ${toolMode === 'pan' ? 'panning' : ''} ${toolMode === 'scroll' ? 'scrolling' : ''}${scrollDrag?.locked ? ' is-scrubbing' : ''}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={endPanDrag}
         onPointerCancel={endPanDrag}
         onPointerLeave={handlePointerLeave}
+        onDoubleClick={onPaneDoubleClick}
         onContextMenu={(event) => event.preventDefault()}
       >
         {error ? (
@@ -633,6 +944,11 @@ export function ViewportPane({
             </>
           ) : null}
         </div>
+        {slicePending ? (
+          <div className="slice-pending-indicator" aria-hidden="true">
+            <span />
+          </div>
+        ) : null}
         <div
           className="orientation-overlay"
           aria-hidden="true"

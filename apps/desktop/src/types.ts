@@ -40,7 +40,23 @@ export interface VascCase {
     path?: string;
     description: string;
   };
+  bookmarks?: CaseBookmark[];
   questions: Question[];
+}
+
+export interface CaseBookmark {
+  id: string;
+  caseId: string;
+  title: string;
+  note: string;
+  plane: 'axial' | 'coronal' | 'sagittal';
+  sliceIndex: number;
+  windowWidth: number;
+  windowLevel: number;
+  zoom?: number;
+  crosshairVoxel?: [number, number, number] | null;
+  tags?: string[];
+  orderIndex?: number;
 }
 
 export type QuestionType =
@@ -60,6 +76,7 @@ export interface QuestionBase {
   points: number;
   hints?: string[];
   learningObjectiveId?: string;
+  bookmarkId?: string;
 }
 
 export interface Choice {
