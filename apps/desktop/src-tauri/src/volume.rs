@@ -3,21 +3,29 @@ use dicom_object::{open_file as open_dicom_file, DefaultDicomObject};
 use flate2::read::GzDecoder;
 use serde::Serialize;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{ipc::Response, State};
 
 const SAMPLE_AAA_NRRD: &[u8] =
     include_bytes!("../../../../content/aaa/volumes/sample-aaa-001.nrrd");
+const PREPARED_VOLUME_CACHE_CAPACITY: usize = 3;
 
 #[derive(Default)]
 pub struct VolumeCache {
-    volumes: Mutex<HashMap<String, Volume>>,
+    inner: Mutex<VolumeCacheInner>,
+}
+
+#[derive(Default)]
+struct VolumeCacheInner {
+    handles: HashMap<String, Arc<Volume>>,
+    prepared: HashMap<String, Arc<Volume>>,
+    lru: VecDeque<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +49,8 @@ struct Volume {
 pub struct VolumeInfo {
     handle_id: String,
     source_path: String,
+    cache_status: String,
+    cache_key: String,
     dims: [usize; 3],
     spacing: [f32; 3],
     orientation: VolumeOrientationInfo,
@@ -127,6 +137,17 @@ struct SlicePixelsResult {
     window_level: f32,
     pixels: Vec<u8>,
     timings: SliceTimings,
+}
+
+struct NrrdVolumeSource {
+    bytes: Vec<u8>,
+    source_path: String,
+    cache_key: String,
+}
+
+struct DicomVolumeSource {
+    folder: PathBuf,
+    cache_key: String,
 }
 
 #[derive(Serialize)]
@@ -273,18 +294,15 @@ impl Plane {
 
 #[tauri::command]
 pub fn volume_load(path: String, cache: State<'_, VolumeCache>) -> Result<VolumeInfo, String> {
-    let bytes = read_volume_bytes(&path)?;
-    let mut volume = parse_nrrd(&bytes, path.clone())?;
-    let id = make_volume_id();
-    volume.id = id.clone();
+    let source = resolve_nrrd_source(&path)?;
+    if let Some(info) = attach_cached_volume(&cache, &source.cache_key)? {
+        return Ok(info);
+    }
 
-    let info = volume.info();
-    let mut volumes = cache
-        .volumes
-        .lock()
-        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
-    volumes.insert(id, volume);
-    Ok(info)
+    let mut volume = parse_nrrd(&source.bytes, source.source_path)?;
+    volume.id = String::new();
+    let volume = Arc::new(volume);
+    insert_prepared_volume(&cache, source.cache_key, volume, "cold")
 }
 
 #[tauri::command]
@@ -298,17 +316,15 @@ pub fn volume_load_dicom_series(
     series_instance_uid: String,
     cache: State<'_, VolumeCache>,
 ) -> Result<VolumeInfo, String> {
-    let mut volume = build_dicom_volume(&folder_path, &series_instance_uid)?;
-    let id = make_volume_id();
-    volume.id = id.clone();
+    let source = resolve_dicom_source(&folder_path, &series_instance_uid)?;
+    if let Some(info) = attach_cached_volume(&cache, &source.cache_key)? {
+        return Ok(info);
+    }
 
-    let info = volume.info();
-    let mut volumes = cache
-        .volumes
-        .lock()
-        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
-    volumes.insert(id, volume);
-    Ok(info)
+    let mut volume = build_dicom_volume_from_folder(source.folder, &series_instance_uid)?;
+    volume.id = String::new();
+    let volume = Arc::new(volume);
+    insert_prepared_volume(&cache, source.cache_key, volume, "cold")
 }
 
 #[tauri::command]
@@ -323,17 +339,21 @@ pub fn volume_slice(
     let command_started = Instant::now();
     let plane = Plane::parse(&plane)?;
     let lock_started = Instant::now();
-    let volumes = cache
-        .volumes
-        .lock()
-        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    let volume = {
+        let inner = cache
+            .inner
+            .lock()
+            .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+        inner
+            .handles
+            .get(&handle_id)
+            .cloned()
+            .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?
+    };
     let cache_lock_ms = elapsed_ms(lock_started);
-    let volume = volumes
-        .get(&handle_id)
-        .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?;
 
     let mut image = render_slice(
-        volume,
+        &volume,
         handle_id,
         plane,
         slice_index,
@@ -357,16 +377,20 @@ pub fn volume_slice_raw(
     let command_started = Instant::now();
     let plane = Plane::parse(&plane)?;
     let lock_started = Instant::now();
-    let volumes = cache
-        .volumes
-        .lock()
-        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    let volume = {
+        let inner = cache
+            .inner
+            .lock()
+            .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+        inner
+            .handles
+            .get(&handle_id)
+            .cloned()
+            .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?
+    };
     let cache_lock_ms = elapsed_ms(lock_started);
-    let volume = volumes
-        .get(&handle_id)
-        .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?;
     let mut slice = render_slice_pixels(
-        volume,
+        &volume,
         handle_id,
         plane,
         slice_index,
@@ -411,16 +435,20 @@ pub fn volume_sample(
     cache: State<'_, VolumeCache>,
 ) -> Result<VolumeSample, String> {
     let plane = Plane::parse(&plane)?;
-    let volumes = cache
-        .volumes
-        .lock()
-        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
-    let volume = volumes
-        .get(&handle_id)
-        .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?;
+    let volume = {
+        let inner = cache
+            .inner
+            .lock()
+            .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+        inner
+            .handles
+            .get(&handle_id)
+            .cloned()
+            .ok_or_else(|| format!("Volume handle not found: {handle_id}"))?
+    };
 
-    validate_volume_dimensions(volume)?;
-    let slice_count = plane.slice_count(volume);
+    validate_volume_dimensions(&volume)?;
+    let slice_count = plane.slice_count(&volume);
     if slice_index >= slice_count {
         return Err(format!(
             "{} slice index {slice_index} is out of range. Valid range is 0 to {}.",
@@ -429,10 +457,10 @@ pub fn volume_sample(
         ));
     }
 
-    let (image_width, image_height) = plane.image_size(volume);
+    let (image_width, image_height) = plane.image_size(&volume);
     let x_index = image_coordinate_to_index(x, image_width, "x")?;
     let y_index = image_coordinate_to_index(y, image_height, "y")?;
-    let intensity = plane.sample_voxel(volume, slice_index, x_index, y_index)?;
+    let intensity = plane.sample_voxel(&volume, slice_index, x_index, y_index)?;
 
     Ok(VolumeSample {
         handle_id,
@@ -446,18 +474,20 @@ pub fn volume_sample(
 
 #[tauri::command]
 pub fn volume_release(handle_id: String, cache: State<'_, VolumeCache>) -> Result<bool, String> {
-    let mut volumes = cache
-        .volumes
+    let mut inner = cache
+        .inner
         .lock()
         .map_err(|_| "Volume cache lock was poisoned".to_string())?;
-    Ok(volumes.remove(&handle_id).is_some())
+    Ok(inner.handles.remove(&handle_id).is_some())
 }
 
 impl Volume {
-    fn info(&self) -> VolumeInfo {
+    fn info(&self, handle_id: String, cache_key: String, cache_status: &str) -> VolumeInfo {
         VolumeInfo {
-            handle_id: self.id.clone(),
+            handle_id,
             source_path: self.source_path.clone(),
+            cache_status: cache_status.to_string(),
+            cache_key,
             dims: [self.width, self.height, self.depth],
             spacing: self.spacing,
             orientation: self.orientation.info.clone(),
@@ -753,36 +783,181 @@ fn make_volume_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
-    format!("vol-{millis}")
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or_default();
+    format!("vol-{millis}-{nanos}")
 }
 
-fn read_volume_bytes(path: &str) -> Result<Vec<u8>, String> {
+fn attach_cached_volume(
+    cache: &State<'_, VolumeCache>,
+    cache_key: &str,
+) -> Result<Option<VolumeInfo>, String> {
+    let mut inner = cache
+        .inner
+        .lock()
+        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    let Some(volume) = inner.prepared.get(cache_key).cloned() else {
+        return Ok(None);
+    };
+    touch_lru(&mut inner.lru, cache_key);
+    let handle_id = make_volume_id();
+    inner.handles.insert(handle_id.clone(), volume.clone());
+    Ok(Some(volume.info(handle_id, cache_key.to_string(), "warm")))
+}
+
+fn insert_prepared_volume(
+    cache: &State<'_, VolumeCache>,
+    cache_key: String,
+    volume: Arc<Volume>,
+    cache_status: &str,
+) -> Result<VolumeInfo, String> {
+    let handle_id = make_volume_id();
+    let info = volume.info(handle_id.clone(), cache_key.clone(), cache_status);
+    let mut inner = cache
+        .inner
+        .lock()
+        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    inner.handles.insert(handle_id, volume.clone());
+    inner.prepared.insert(cache_key.clone(), volume);
+    touch_lru(&mut inner.lru, &cache_key);
+    evict_prepared_volumes(&mut inner);
+    Ok(info)
+}
+
+fn touch_lru(lru: &mut VecDeque<String>, cache_key: &str) {
+    if let Some(index) = lru.iter().position(|item| item == cache_key) {
+        lru.remove(index);
+    }
+    lru.push_back(cache_key.to_string());
+}
+
+fn evict_prepared_volumes(inner: &mut VolumeCacheInner) {
+    while inner.prepared.len() > PREPARED_VOLUME_CACHE_CAPACITY {
+        let Some(candidate) = inner.lru.pop_front() else {
+            break;
+        };
+        let is_active = inner
+            .handles
+            .values()
+            .any(|volume| inner.prepared.get(&candidate).is_some_and(|cached| Arc::ptr_eq(cached, volume)));
+        if is_active {
+            inner.lru.push_back(candidate);
+            if inner.lru.len() <= inner.prepared.len() {
+                break;
+            }
+            continue;
+        }
+        inner.prepared.remove(&candidate);
+    }
+}
+
+fn resolve_nrrd_source(path: &str) -> Result<NrrdVolumeSource, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "sample" || trimmed.ends_with("sample-aaa-001.nrrd") {
         if !trimmed.is_empty() && trimmed != "sample" {
             if let Some(candidate) = resolve_path(trimmed) {
-                return fs::read(&candidate)
-                    .map_err(|error| format!("Failed to read {}: {error}", candidate.display()));
+                let bytes = fs::read(&candidate)
+                    .map_err(|error| format!("Failed to read {}: {error}", candidate.display()))?;
+                let cache_key = file_cache_key("nrrd", &candidate)?;
+                return Ok(NrrdVolumeSource {
+                    bytes,
+                    source_path: candidate.display().to_string(),
+                    cache_key,
+                });
             }
         }
         if trimmed == "sample" {
-            return Ok(SAMPLE_AAA_NRRD.to_vec());
+            return Ok(NrrdVolumeSource {
+                bytes: SAMPLE_AAA_NRRD.to_vec(),
+                source_path: "sample".to_string(),
+                cache_key: format!("nrrd:embedded-sample:{}", SAMPLE_AAA_NRRD.len()),
+            });
         }
         if let Some(candidate) = resolve_path("content/aaa/volumes/sample-aaa-001.nrrd") {
-            return fs::read(&candidate)
-                .map_err(|error| format!("Failed to read {}: {error}", candidate.display()));
+            let bytes = fs::read(&candidate)
+                .map_err(|error| format!("Failed to read {}: {error}", candidate.display()))?;
+            let cache_key = file_cache_key("nrrd", &candidate)?;
+            return Ok(NrrdVolumeSource {
+                bytes,
+                source_path: candidate.display().to_string(),
+                cache_key,
+            });
         }
-        return Ok(SAMPLE_AAA_NRRD.to_vec());
+        return Ok(NrrdVolumeSource {
+            bytes: SAMPLE_AAA_NRRD.to_vec(),
+            source_path: "sample-aaa-001.nrrd".to_string(),
+            cache_key: format!("nrrd:embedded-sample:{}", SAMPLE_AAA_NRRD.len()),
+        });
     }
 
     if let Some(candidate) = resolve_path(trimmed) {
-        return fs::read(&candidate)
-            .map_err(|error| format!("Failed to read {}: {error}", candidate.display()));
+        let bytes = fs::read(&candidate)
+            .map_err(|error| format!("Failed to read {}: {error}", candidate.display()))?;
+        let cache_key = file_cache_key("nrrd", &candidate)?;
+        return Ok(NrrdVolumeSource {
+            bytes,
+            source_path: candidate.display().to_string(),
+            cache_key,
+        });
     }
 
     Err(format!(
         "NRRD file not found: {trimmed}. Use an absolute path, a path relative to the project root, or 'sample'."
     ))
+}
+
+fn resolve_dicom_source(folder_path: &str, series_instance_uid: &str) -> Result<DicomVolumeSource, String> {
+    let folder = resolve_existing_folder(folder_path)?;
+    let cache_key = dicom_folder_cache_key(&folder, series_instance_uid)?;
+    Ok(DicomVolumeSource { folder, cache_key })
+}
+
+fn file_cache_key(prefix: &str, path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+    let modified = metadata_modified_millis(&metadata);
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    Ok(format!(
+        "{prefix}:{}:{}:{}",
+        canonical.display(),
+        metadata.len(),
+        modified
+    ))
+}
+
+fn dicom_folder_cache_key(folder: &Path, series_instance_uid: &str) -> Result<String, String> {
+    let mut warnings = Vec::new();
+    let (files, unreadable_count) = collect_files_recursive(folder, &mut warnings)?;
+    let mut latest_modified = 0_u128;
+    let mut total_len = 0_u64;
+    let mut inspected = 0_usize;
+    for file in files {
+        if let Ok(metadata) = fs::metadata(&file) {
+            inspected += 1;
+            total_len = total_len.saturating_add(metadata.len());
+            latest_modified = latest_modified.max(metadata_modified_millis(&metadata));
+        }
+    }
+    let canonical = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    Ok(format!(
+        "dicom:{}:{}:{}:{}:{}",
+        canonical.display(),
+        series_instance_uid,
+        inspected,
+        total_len,
+        latest_modified.max(unreadable_count as u128)
+    ))
+}
+
+fn metadata_modified_millis(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 fn resolve_path(input: &str) -> Option<PathBuf> {
@@ -1009,8 +1184,7 @@ fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, Stri
     })
 }
 
-fn build_dicom_volume(folder_path: &str, series_instance_uid: &str) -> Result<Volume, String> {
-    let folder = resolve_existing_folder(folder_path)?;
+fn build_dicom_volume_from_folder(folder: PathBuf, series_instance_uid: &str) -> Result<Volume, String> {
     let mut slices = Vec::new();
     let mut skipped_same_folder_dicom = 0usize;
     let mut series_description = None;

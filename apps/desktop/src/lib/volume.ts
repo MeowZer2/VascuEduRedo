@@ -49,6 +49,8 @@ export interface VolumeOrientationInfo {
 export interface VolumeInfo {
   handleId: string;
   sourcePath: string;
+  cacheStatus?: 'cold' | 'warm';
+  cacheKey?: string;
   dims: [number, number, number];
   spacing: [number, number, number];
   orientation: VolumeOrientationInfo;

@@ -278,6 +278,11 @@ export function NrrdViewer({
           void releaseVolume(info.handleId);
           return;
         }
+        if (info.cacheStatus) {
+          console.debug(
+            `[volume-cache] ${info.cacheStatus === 'warm' ? 'warm cache hit' : 'cold load'} for ${info.sourcePath}`,
+          );
+        }
         loadedHandle = info.handleId;
         setVolume(info);
         setPanes(
@@ -1421,7 +1426,7 @@ export function NrrdViewer({
         <div className="viewer-state viewer-state-info viewer-state-loading" role="status" aria-live="polite">
           <span className="viewer-loading-spinner" aria-hidden="true" />
           <strong>Loading {currentVolumeName || 'volume'}…</strong>
-          <span>Preparing the imaging workspace.</span>
+          <span>Checking for a warm session cache before preparing the imaging workspace.</span>
         </div>
       ) : null}
       {status === 'browser' ? (
