@@ -30,7 +30,9 @@ export type TreatmentMarkerType =
   | 'distalLandingZone'
   | 'lesionStart'
   | 'lesionEnd'
-  | 'sealZone';
+  | 'sealZone'
+  | 'targetLesion'
+  | 'branchAtRisk';
 
 export interface AnatomyTemplate {
   id: 'aortoiliac' | 'fem-pop' | 'mesenteric-renal';
@@ -90,6 +92,8 @@ export const TREATMENT_MARKER_OPTIONS: Array<{ id: TreatmentMarkerType; label: s
   { id: 'lesionStart', label: 'Lesion start' },
   { id: 'lesionEnd', label: 'Lesion end' },
   { id: 'sealZone', label: 'Seal zone' },
+  { id: 'targetLesion', label: 'Target lesion' },
+  { id: 'branchAtRisk', label: 'Branch at risk' },
 ];
 
 export interface VesselSegment {

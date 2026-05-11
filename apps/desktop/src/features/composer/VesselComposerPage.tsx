@@ -193,9 +193,23 @@ export function VesselComposerPage({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (target?.closest('input, textarea, select')) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSelectedId(null);
+        setTool('select');
+        setPendingSegmentStart(null);
+        setDrag(null);
+        return;
+      }
+      if (event.key.toLowerCase() === 'd') {
+        if (!selectedId) return;
+        event.preventDefault();
+        duplicateSelected();
+        return;
+      }
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       if (!selectedId) return;
       event.preventDefault();
       deleteSelected();
@@ -203,7 +217,7 @@ export function VesselComposerPage({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, selectedObject]);
+  }, [selectedId, selectedObject, segments, bifurcations, devicePlacements, treatmentMarkers]);
 
   useEffect(() => {
     return () => setComposerDragSelectionSuppressed(false);
@@ -574,23 +588,70 @@ export function VesselComposerPage({
     setError(null);
   }
 
-  function duplicateSelectedSegment() {
-    if (!selectedObject || selectedObject.type !== 'segment') return;
-    const source = selectedObject;
-    const id = makeId('segment');
-    const duplicate: VesselSegment = {
-      ...source,
-      id,
-      label: `${source.label} copy`,
-      start: translatePoint(source.start, 28, 28),
-      end: translatePoint(source.end, 28, 28),
-      metadata: source.metadata ? { ...source.metadata } : undefined,
-    };
-    setSegments((current) => [...current, duplicate]);
-    setSelectedId(id);
+  function duplicateSelected() {
+    if (!selectedObject) return;
+    const offset = 28;
+    if (selectedObject.type === 'segment') {
+      const source = selectedObject;
+      const id = makeId('segment');
+      setSegments((current) => [
+        ...current,
+        {
+          ...source,
+          id,
+          label: `${source.label} copy`,
+          start: translatePoint(source.start, offset, offset),
+          end: translatePoint(source.end, offset, offset),
+          metadata: source.metadata ? { ...source.metadata } : undefined,
+        },
+      ]);
+      setSelectedId(id);
+    } else if (selectedObject.type === 'devicePlacement') {
+      const source = selectedObject;
+      const id = makeId('device');
+      setDevicePlacements((current) => [
+        ...current,
+        {
+          ...source,
+          id,
+          label: `${source.label} copy`,
+          t: clamp(source.t + 0.06, 0, 1),
+          metadata: source.metadata ? { ...source.metadata } : undefined,
+        },
+      ]);
+      setSelectedId(id);
+    } else if (selectedObject.type === 'treatmentMarker') {
+      const source = selectedObject;
+      const id = makeId('marker');
+      setTreatmentMarkers((current) => [
+        ...current,
+        {
+          ...source,
+          id,
+          label: `${source.label} copy`,
+          t: clamp(source.t + 0.06, 0, 1),
+          metadata: source.metadata ? { ...source.metadata } : undefined,
+        },
+      ]);
+      setSelectedId(id);
+    } else {
+      const source = selectedObject;
+      const id = makeId('bifurcation');
+      setBifurcations((current) => [
+        ...current,
+        {
+          ...source,
+          id,
+          label: `${source.label} copy`,
+          position: translatePoint(source.position, offset, offset),
+          metadata: source.metadata ? { ...source.metadata } : undefined,
+        },
+      ]);
+      setSelectedId(id);
+    }
     setTool('select');
     setPendingSegmentStart(null);
-    setStatus(`${source.label} duplicated.`);
+    setStatus(`${selectedObject.label} duplicated.`);
     setError(null);
   }
 
@@ -601,6 +662,9 @@ export function VesselComposerPage({
         const next = { ...segment, ...patch };
         if (patch.lengthMm !== undefined && patch.start === undefined && patch.end === undefined) {
           return resizeSegmentToLength(next, patch.lengthMm);
+        }
+        if (patch.start !== undefined || patch.end !== undefined) {
+          return { ...next, lengthMm: Number(distance(next.start, next.end).toFixed(1)) };
         }
         return next;
       }),
@@ -780,10 +844,10 @@ export function VesselComposerPage({
         <button
           type="button"
           className="secondary-button small"
-          onClick={duplicateSelectedSegment}
-          disabled={!selectedObject || selectedObject.type !== 'segment' || busy}
+          onClick={duplicateSelected}
+          disabled={!selectedObject || busy}
         >
-          Duplicate Segment
+          Duplicate
         </button>
         <button
           type="button"
@@ -1057,6 +1121,17 @@ function PlanSummaryPanel({
         <p className="muted small">
           <strong>Case:</strong> {linkedCaseTitle ?? 'Unlinked'}
         </p>
+        <SummaryBlock title="Main segments">
+          {segments.length === 0 ? (
+            <span className="muted small">No vessel segments drawn.</span>
+          ) : (
+            segments.slice(0, 6).map((segment) => (
+              <span key={segment.id}>
+                {segment.label}: {segment.proximalDiameterMm}/{segment.distalDiameterMm} mm, {segment.lengthMm} mm
+              </span>
+            ))
+          )}
+        </SummaryBlock>
         <SummaryBlock title="Pathology">
           {pathologicSegments.length === 0 ? (
             <span className="muted small">No pathology marked.</span>
@@ -1156,6 +1231,7 @@ function PropertyEditor({
   onToggleBifurcationChild: (node: BifurcationNode, segmentId: string) => void;
 }) {
   if (selected.type === 'segment') {
+    const angleDeg = segmentAngleDeg(selected);
     return (
       <div className="composer-selection-card">
         <span className="measurement-type-pill">vessel segment</span>
@@ -1212,6 +1288,49 @@ function PropertyEditor({
             if (value !== '') onPatchSegment(selected.id, { lengthMm: value });
           }}
         />
+        <NumberField
+          label="Angle degrees"
+          value={angleDeg}
+          onChange={(value) => {
+            if (value !== '') onPatchSegment(selected.id, rotateSegmentToAngle(selected, value));
+          }}
+        />
+        <div className="composer-field-grid">
+          <NumberField
+            label="Start X"
+            value={Number(selected.start.x.toFixed(1))}
+            step={0.5}
+            onChange={(value) => {
+              if (value !== '') onPatchSegment(selected.id, { start: { ...selected.start, x: value } });
+            }}
+          />
+          <NumberField
+            label="Start Y"
+            value={Number(selected.start.y.toFixed(1))}
+            step={0.5}
+            onChange={(value) => {
+              if (value !== '') onPatchSegment(selected.id, { start: { ...selected.start, y: value } });
+            }}
+          />
+        </div>
+        <div className="composer-field-grid">
+          <NumberField
+            label="End X"
+            value={Number(selected.end.x.toFixed(1))}
+            step={0.5}
+            onChange={(value) => {
+              if (value !== '') onPatchSegment(selected.id, { end: { ...selected.end, x: value } });
+            }}
+          />
+          <NumberField
+            label="End Y"
+            value={Number(selected.end.y.toFixed(1))}
+            step={0.5}
+            onChange={(value) => {
+              if (value !== '') onPatchSegment(selected.id, { end: { ...selected.end, y: value } });
+            }}
+          />
+        </div>
         <label className="field-label">
           <span>Pathology</span>
           <select
@@ -1576,6 +1695,23 @@ function SegmentSvg({
         y2={segment.end.y}
         strokeWidth={strokeWidth}
       />
+      {segment.pathologyType === 'stenosis' ? (
+        <circle className="composer-pathology-glyph stenosis" cx={labelPoint.x} cy={labelPoint.y - 2} r="9" />
+      ) : null}
+      {segment.pathologyType === 'occlusion' ? (
+        <line
+          className="composer-pathology-glyph occlusion"
+          x1={labelPoint.x - 11}
+          y1={labelPoint.y - 11}
+          x2={labelPoint.x + 11}
+          y2={labelPoint.y + 11}
+        />
+      ) : null}
+      {segment.pathologyType === 'dissection' || segment.pathologyType === 'thrombus' ? (
+        <text className="composer-pathology-text" x={labelPoint.x} y={labelPoint.y - 26} textAnchor={labelPoint.anchor}>
+          {segment.pathologyType}
+        </text>
+      ) : null}
       <line
         className="composer-centerline"
         x1={segment.start.x}
@@ -1701,7 +1837,11 @@ function TreatmentMarkerSvg({
 }) {
   return (
     <g
-      className={selected ? 'composer-treatment-marker selected' : 'composer-treatment-marker'}
+      className={
+        selected
+          ? `composer-treatment-marker marker-${marker.markerType} selected`
+          : `composer-treatment-marker marker-${marker.markerType}`
+      }
       transform={`translate(${point.x} ${point.y})`}
       onPointerDown={(event) => onPointerDown(event, marker.id)}
     >
@@ -1738,6 +1878,25 @@ function resizeSegmentToLength(segment: VesselSegment, lengthMm: number): Vessel
       x: segment.start.x + unit.x * lengthMm,
       y: segment.start.y + unit.y * lengthMm,
     },
+  };
+}
+
+function segmentAngleDeg(segment: VesselSegment): number {
+  const radians = Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
+  const degrees = (radians * 180) / Math.PI;
+  return Number(degrees.toFixed(1));
+}
+
+function rotateSegmentToAngle(segment: VesselSegment, angleDeg: number): Partial<VesselSegment> {
+  if (!Number.isFinite(angleDeg)) return {};
+  const radians = (angleDeg * Math.PI) / 180;
+  const length = segment.lengthMm > 0 ? segment.lengthMm : distance(segment.start, segment.end);
+  return {
+    end: {
+      x: segment.start.x + Math.cos(radians) * length,
+      y: segment.start.y + Math.sin(radians) * length,
+    },
+    lengthMm: Number(length.toFixed(1)),
   };
 }
 
