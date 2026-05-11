@@ -18,3 +18,5 @@ flate2 = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+dicom-object = "0.9.1"
+num-traits = "0.2.19"

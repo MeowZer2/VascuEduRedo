@@ -15,7 +15,8 @@ use db::{
 use serde::Serialize;
 use tauri::Manager;
 use volume::{
-    volume_load, volume_release, volume_sample, volume_slice, volume_slice_axial, VolumeCache,
+    dicom_discover_folder, volume_load, volume_load_dicom_series, volume_release, volume_sample,
+    volume_slice, volume_slice_axial, VolumeCache,
 };
 
 #[derive(Serialize)]
@@ -54,7 +55,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             validate_content_pack,
+            dicom_discover_folder,
             volume_load,
+            volume_load_dicom_series,
             volume_sample,
             volume_slice,
             volume_slice_axial,

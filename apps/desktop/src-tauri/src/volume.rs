@@ -1,9 +1,12 @@
 use base64::{engine::general_purpose, Engine as _};
+use dicom_object::{open_file as open_dicom_file, DefaultDicomObject};
 use flate2::read::GzDecoder;
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
+use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,6 +50,30 @@ pub struct VolumeInfo {
     intensity_min: i16,
     intensity_max: i16,
     plane_slice_ranges: PlaneSliceRanges,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DicomSeriesInfo {
+    series_instance_uid: String,
+    folder_path: String,
+    series_folder_path: Option<String>,
+    series_description: Option<String>,
+    modality: Option<String>,
+    study_description: Option<String>,
+    slice_count: usize,
+    warnings: Vec<String>,
+    unsupported_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DicomDiscoveryResult {
+    folder_path: String,
+    dicom_file_count: usize,
+    ignored_file_count: usize,
+    series: Vec<DicomSeriesInfo>,
+    warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -224,6 +251,30 @@ impl Plane {
 pub fn volume_load(path: String, cache: State<'_, VolumeCache>) -> Result<VolumeInfo, String> {
     let bytes = read_volume_bytes(&path)?;
     let mut volume = parse_nrrd(&bytes, path.clone())?;
+    let id = make_volume_id();
+    volume.id = id.clone();
+
+    let info = volume.info();
+    let mut volumes = cache
+        .volumes
+        .lock()
+        .map_err(|_| "Volume cache lock was poisoned".to_string())?;
+    volumes.insert(id, volume);
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn dicom_discover_folder(folder_path: String) -> Result<DicomDiscoveryResult, String> {
+    discover_dicom_folder(&folder_path)
+}
+
+#[tauri::command]
+pub fn volume_load_dicom_series(
+    folder_path: String,
+    series_instance_uid: String,
+    cache: State<'_, VolumeCache>,
+) -> Result<VolumeInfo, String> {
+    let mut volume = build_dicom_volume(&folder_path, &series_instance_uid)?;
     let id = make_volume_id();
     volume.id = id.clone();
 
@@ -641,6 +692,624 @@ fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
         max_hu,
         voxels,
     })
+}
+
+#[derive(Debug, Clone)]
+struct DicomSeriesAccumulator {
+    series_instance_uid: String,
+    folder_path: String,
+    series_folder_path: Option<String>,
+    series_description: Option<String>,
+    modality: Option<String>,
+    study_description: Option<String>,
+    files: Vec<PathBuf>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DicomSlice {
+    path: PathBuf,
+    rows: usize,
+    cols: usize,
+    position: Option<[f32; 3]>,
+    orientation: Option<[[f32; 3]; 2]>,
+    pixel_spacing: Option<[f32; 2]>,
+    instance_number: Option<i32>,
+    rescale_slope: f32,
+    rescale_intercept: f32,
+    voxels: Vec<i16>,
+}
+
+fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, String> {
+    let folder = resolve_existing_folder(folder_path)?;
+    let mut grouped: HashMap<String, DicomSeriesAccumulator> = HashMap::new();
+    let mut dicom_file_count = 0usize;
+    let mut ignored_file_count = 0usize;
+    let mut warnings = Vec::new();
+    let (candidate_files, unreadable_count) = collect_files_recursive(&folder, &mut warnings)?;
+    ignored_file_count += unreadable_count;
+
+    for path in candidate_files {
+        let object = match open_dicom_file(&path) {
+            Ok(object) => object,
+            Err(_) => {
+                ignored_file_count += 1;
+                continue;
+            }
+        };
+
+        let Some(series_instance_uid) = dicom_string_opt(&object, "SeriesInstanceUID") else {
+            warnings.push(format!(
+                "Ignored {} because it has no SeriesInstanceUID.",
+                display_name(&path)
+            ));
+            ignored_file_count += 1;
+            continue;
+        };
+
+        dicom_file_count += 1;
+        let entry = grouped
+            .entry(series_instance_uid.clone())
+            .or_insert_with(|| DicomSeriesAccumulator {
+                series_instance_uid: series_instance_uid.clone(),
+                folder_path: folder.display().to_string(),
+                series_folder_path: path.parent().map(|parent| parent.display().to_string()),
+                series_description: dicom_string_opt(&object, "SeriesDescription"),
+                modality: dicom_string_opt(&object, "Modality"),
+                study_description: dicom_string_opt(&object, "StudyDescription"),
+                files: Vec::new(),
+                warnings: Vec::new(),
+            });
+
+        merge_optional_string(&mut entry.series_description, dicom_string_opt(&object, "SeriesDescription"));
+        merge_optional_string(&mut entry.modality, dicom_string_opt(&object, "Modality"));
+        merge_optional_string(&mut entry.study_description, dicom_string_opt(&object, "StudyDescription"));
+        entry.files.push(path);
+    }
+
+    let mut series: Vec<DicomSeriesInfo> = grouped
+        .into_values()
+        .map(|mut acc| {
+            acc.files.sort();
+            let modality = acc.modality.clone();
+            let unsupported_reason = match modality.as_deref() {
+                Some("CT") => None,
+                Some(other) => Some(format!("Only CT series are supported in this import pass; modality is {other}.")),
+                None => Some("Only CT series are supported, and this series has no Modality tag.".to_string()),
+            };
+            DicomSeriesInfo {
+                series_instance_uid: acc.series_instance_uid,
+                folder_path: acc.folder_path,
+                series_folder_path: acc.series_folder_path,
+                series_description: acc.series_description,
+                modality,
+                study_description: acc.study_description,
+                slice_count: acc.files.len(),
+                warnings: acc.warnings,
+                unsupported_reason,
+            }
+        })
+        .collect();
+
+    series.sort_by(|a, b| {
+        a.modality
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.modality.as_deref().unwrap_or(""))
+            .then_with(|| b.slice_count.cmp(&a.slice_count))
+            .then_with(|| {
+                a.series_description
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(b.series_description.as_deref().unwrap_or(""))
+            })
+    });
+
+    Ok(DicomDiscoveryResult {
+        folder_path: folder.display().to_string(),
+        dicom_file_count,
+        ignored_file_count,
+        series,
+        warnings,
+    })
+}
+
+fn build_dicom_volume(folder_path: &str, series_instance_uid: &str) -> Result<Volume, String> {
+    let folder = resolve_existing_folder(folder_path)?;
+    let mut slices = Vec::new();
+    let mut skipped_same_folder_dicom = 0usize;
+    let mut series_description = None;
+    let mut warnings = Vec::new();
+    let (candidate_files, _) = collect_files_recursive(&folder, &mut warnings)?;
+
+    for path in candidate_files {
+        let object = match open_dicom_file(&path) {
+            Ok(object) => object,
+            Err(_) => continue,
+        };
+
+        if dicom_string_opt(&object, "SeriesInstanceUID").as_deref() != Some(series_instance_uid) {
+            skipped_same_folder_dicom += 1;
+            continue;
+        }
+
+        let modality = dicom_string_opt(&object, "Modality")
+            .ok_or_else(|| format!("{} is missing Modality; CT import cannot continue.", display_name(&path)))?;
+        if modality != "CT" {
+            return Err(format!(
+                "Unsupported DICOM modality '{modality}'. v0.18 imports CT series only."
+            ));
+        }
+        merge_optional_string(&mut series_description, dicom_string_opt(&object, "SeriesDescription"));
+        slices.push(parse_dicom_slice(&object, path)?);
+    }
+
+    if slices.is_empty() {
+        return Err("No DICOM slices from the selected series were found in that folder.".to_string());
+    }
+
+    validate_and_sort_dicom_slices(&mut slices, &mut warnings)?;
+    let first = slices
+        .first()
+        .ok_or_else(|| "Selected DICOM series has no slices.".to_string())?;
+    let dims = [first.cols, first.rows, slices.len()];
+    let voxel_count = checked_voxel_count(dims)?;
+    let mut voxels = Vec::with_capacity(voxel_count);
+    for slice in &slices {
+        voxels.extend_from_slice(&slice.voxels);
+    }
+
+    if voxels.len() != voxel_count {
+        return Err(format!(
+            "Malformed DICOM series: expected {voxel_count} voxels but decoded {}.",
+            voxels.len()
+        ));
+    }
+
+    if skipped_same_folder_dicom > 0 {
+        warnings.push(format!(
+            "Ignored {skipped_same_folder_dicom} DICOM file(s) from other series in the selected folder."
+        ));
+    }
+
+    let raw_spacing = dicom_spacing(first, &slices, &mut warnings);
+    let orientation = dicom_orientation(first, raw_spacing, &mut warnings)?;
+    let canonical_dims = orientation.canonical_dims(dims);
+    let spacing = orientation.canonical_spacing(raw_spacing);
+    let (min_hu, max_hu) = intensity_range(&voxels)?;
+    let mut orientation_info = orientation.info.clone();
+    orientation_info.warnings.extend(dicom_series_warnings(first, &slices));
+    orientation_info.warnings.sort();
+    orientation_info.warnings.dedup();
+
+    Ok(Volume {
+        id: String::new(),
+        source_path: format!(
+            "DICOM: {} ({})",
+            series_description.unwrap_or_else(|| "CT series".to_string()),
+            folder.display()
+        ),
+        raw_dims: dims,
+        width: canonical_dims[0],
+        height: canonical_dims[1],
+        depth: canonical_dims[2],
+        spacing,
+        orientation: OrientationTransform {
+            canonical_to_raw: orientation.canonical_to_raw,
+            info: orientation_info,
+        },
+        encoding: "dicom-import".to_string(),
+        nrrd_type: "ct-int16-hu".to_string(),
+        min_hu,
+        max_hu,
+        voxels,
+    })
+}
+
+fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<DicomSlice, String> {
+    let transfer_syntax = object.meta().transfer_syntax().trim_end_matches('\0');
+    if !is_supported_transfer_syntax(transfer_syntax) {
+        return Err(format!(
+            "{} uses transfer syntax {transfer_syntax}. v0.18 DICOM import currently supports uncompressed little-endian CT pixel data only.",
+            display_name(&path)
+        ));
+    }
+
+    let rows = dicom_int::<u16>(object, "Rows", &path)? as usize;
+    let cols = dicom_int::<u16>(object, "Columns", &path)? as usize;
+    if rows == 0 || cols == 0 {
+        return Err(format!("{} has invalid zero Rows/Columns.", display_name(&path)));
+    }
+    let samples_per_pixel = dicom_int_opt::<u16>(object, "SamplesPerPixel").unwrap_or(1);
+    if samples_per_pixel != 1 {
+        return Err(format!(
+            "{} has SamplesPerPixel={samples_per_pixel}; CT grayscale slices only are supported.",
+            display_name(&path)
+        ));
+    }
+    let bits_allocated = dicom_int::<u16>(object, "BitsAllocated", &path)?;
+    let bits_stored = dicom_int_opt::<u16>(object, "BitsStored").unwrap_or(bits_allocated);
+    if bits_allocated != 16 || bits_stored > 16 {
+        return Err(format!(
+            "{} has BitsAllocated={bits_allocated}, BitsStored={bits_stored}; only 16-bit CT pixels are supported.",
+            display_name(&path)
+        ));
+    }
+
+    let pixel_representation = dicom_int_opt::<u16>(object, "PixelRepresentation").unwrap_or(0);
+    let frame_count = dicom_string_opt(object, "NumberOfFrames")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
+    if frame_count != 1 {
+        return Err(format!(
+            "{} is multi-frame ({frame_count} frames); v0.18 imports single-frame CT series only.",
+            display_name(&path)
+        ));
+    }
+
+    let pixel_bytes = object
+        .element_by_name("PixelData")
+        .map_err(|_| format!("{} is missing PixelData.", display_name(&path)))?
+        .to_bytes()
+        .map_err(|error| format!("Could not read PixelData from {}: {error}", display_name(&path)))?;
+    let expected_bytes = rows
+        .checked_mul(cols)
+        .and_then(|count| count.checked_mul(2))
+        .ok_or_else(|| format!("{} has pixel dimensions that are too large.", display_name(&path)))?;
+    if pixel_bytes.len() < expected_bytes {
+        return Err(format!(
+            "{} has incomplete PixelData: expected at least {expected_bytes} bytes, found {}.",
+            display_name(&path),
+            pixel_bytes.len()
+        ));
+    }
+
+    let slope = dicom_float_opt(object, "RescaleSlope").unwrap_or(1.0);
+    let intercept = dicom_float_opt(object, "RescaleIntercept").unwrap_or(0.0);
+    let mut voxels = Vec::with_capacity(rows * cols);
+    for chunk in pixel_bytes.chunks_exact(2).take(rows * cols) {
+        let raw = if pixel_representation == 0 {
+            u16::from_le_bytes([chunk[0], chunk[1]]) as f32
+        } else {
+            i16::from_le_bytes([chunk[0], chunk[1]]) as f32
+        };
+        voxels.push((raw * slope + intercept).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+    }
+
+    Ok(DicomSlice {
+        path,
+        rows,
+        cols,
+        position: dicom_float_vec(object, "ImagePositionPatient").and_then(|v| array3(&v)),
+        orientation: dicom_float_vec(object, "ImageOrientationPatient").and_then(|v| {
+            if v.len() == 6 {
+                Some([[v[0], v[1], v[2]], [v[3], v[4], v[5]]])
+            } else {
+                None
+            }
+        }),
+        pixel_spacing: dicom_float_vec(object, "PixelSpacing").and_then(|v| {
+            if v.len() >= 2 {
+                Some([v[0], v[1]])
+            } else {
+                None
+            }
+        }),
+        instance_number: dicom_int_opt::<i32>(object, "InstanceNumber"),
+        rescale_slope: slope,
+        rescale_intercept: intercept,
+        voxels,
+    })
+}
+
+fn validate_and_sort_dicom_slices(
+    slices: &mut [DicomSlice],
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let first = slices
+        .first()
+        .ok_or_else(|| "Selected DICOM series has no slices.".to_string())?;
+    for slice in slices.iter() {
+        if slice.rows != first.rows || slice.cols != first.cols {
+            return Err(format!(
+                "Malformed DICOM series: {} has dimensions {} x {}, expected {} x {}.",
+                display_name(&slice.path),
+                slice.cols,
+                slice.rows,
+                first.cols,
+                first.rows
+            ));
+        }
+        if slice.pixel_spacing != first.pixel_spacing {
+            warnings.push("PixelSpacing varies across slices; measurements may be approximate.".to_string());
+        }
+        if slice.orientation != first.orientation {
+            warnings.push("ImageOrientationPatient varies across slices; orientation may be approximate.".to_string());
+        }
+        if (slice.rescale_slope - first.rescale_slope).abs() > 0.001
+            || (slice.rescale_intercept - first.rescale_intercept).abs() > 0.001
+        {
+            warnings.push("Rescale slope/intercept varies across slices; HU conversion was applied per slice.".to_string());
+        }
+    }
+    warnings.sort();
+    warnings.dedup();
+
+    let normal = first.orientation.map(|orientation| cross(orientation[0], orientation[1]));
+    if let Some(normal) = normal {
+        if slices.iter().all(|slice| slice.position.is_some()) {
+            slices.sort_by(|a, b| {
+                let ad = dot(a.position.unwrap_or([0.0, 0.0, 0.0]), normal);
+                let bd = dot(b.position.unwrap_or([0.0, 0.0, 0.0]), normal);
+                ad.partial_cmp(&bd).unwrap_or(Ordering::Equal)
+            });
+            return Ok(());
+        }
+    }
+
+    if slices.iter().all(|slice| slice.instance_number.is_some()) {
+        warnings.push(
+            "Image position/orientation metadata is incomplete; sorted slices by InstanceNumber.".to_string(),
+        );
+        slices.sort_by_key(|slice| slice.instance_number.unwrap_or_default());
+        return Ok(());
+    }
+
+    Err("Malformed DICOM series: cannot sort slices safely because ImagePositionPatient/ImageOrientationPatient and InstanceNumber are incomplete.".to_string())
+}
+
+fn dicom_spacing(first: &DicomSlice, slices: &[DicomSlice], warnings: &mut Vec<String>) -> [f32; 3] {
+    let [row_spacing, col_spacing] = match first.pixel_spacing {
+        Some(spacing) if spacing[0].is_finite() && spacing[0] > 0.0 && spacing[1].is_finite() && spacing[1] > 0.0 => spacing,
+        _ => {
+            warnings.push("PixelSpacing is missing or invalid; using 1.0 mm in-plane spacing.".to_string());
+            [1.0, 1.0]
+        }
+    };
+
+    let slice_spacing = estimate_slice_spacing(first, slices).unwrap_or_else(|| {
+        warnings.push("Slice spacing metadata is incomplete; using 1.0 mm between slices.".to_string());
+        1.0
+    });
+
+    [col_spacing, row_spacing, slice_spacing]
+}
+
+fn estimate_slice_spacing(first: &DicomSlice, slices: &[DicomSlice]) -> Option<f32> {
+    if slices.len() < 2 {
+        return Some(1.0);
+    }
+    let normal = first.orientation.map(|orientation| cross(orientation[0], orientation[1]))?;
+    let mut positions: Vec<f32> = slices
+        .iter()
+        .filter_map(|slice| slice.position.map(|position| dot(position, normal)))
+        .collect();
+    if positions.len() < 2 {
+        return None;
+    }
+    positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let mut gaps: Vec<f32> = positions
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .filter(|gap| gap.is_finite() && *gap > 0.0)
+        .collect();
+    if gaps.is_empty() {
+        return None;
+    }
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    Some(gaps[gaps.len() / 2])
+}
+
+fn dicom_orientation(
+    first: &DicomSlice,
+    raw_spacing: [f32; 3],
+    warnings: &mut Vec<String>,
+) -> Result<OrientationTransform, String> {
+    let mut fields = HashMap::new();
+    fields.insert("space".to_string(), "left-posterior-superior".to_string());
+    fields.insert("kinds".to_string(), "domain domain domain".to_string());
+
+    if let Some(origin) = first.position {
+        fields.insert(
+            "space origin".to_string(),
+            format!("({},{},{})", origin[0], origin[1], origin[2]),
+        );
+    } else {
+        warnings.push("ImagePositionPatient is missing; origin is approximate.".to_string());
+    }
+
+    if let Some(orientation) = first.orientation {
+        let normal = cross(orientation[0], orientation[1]);
+        let col = scale(orientation[0], raw_spacing[0]);
+        let row = scale(orientation[1], raw_spacing[1]);
+        let slice = scale(normal, raw_spacing[2]);
+        fields.insert(
+            "space directions".to_string(),
+            format!(
+                "({},{},{}) ({},{},{}) ({},{},{})",
+                col[0], col[1], col[2], row[0], row[1], row[2], slice[0], slice[1], slice[2]
+            ),
+        );
+    } else {
+        warnings.push(
+            "ImageOrientationPatient is missing; assuming raw DICOM pixel axes approximate RAS.".to_string(),
+        );
+    }
+
+    let mut orientation = build_orientation_transform(&fields, [first.cols, first.rows, 1], raw_spacing)?;
+    orientation.info.warnings.extend(warnings.clone());
+    orientation.info.warnings.sort();
+    orientation.info.warnings.dedup();
+    Ok(orientation)
+}
+
+fn dicom_series_warnings(first: &DicomSlice, slices: &[DicomSlice]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if first.position.is_none() {
+        warnings.push("ImagePositionPatient is missing; origin is approximate.".to_string());
+    }
+    if first.orientation.is_none() {
+        warnings.push("ImageOrientationPatient is missing; orientation labels are approximate.".to_string());
+    }
+    if first.pixel_spacing.is_none() {
+        warnings.push("PixelSpacing is missing; measurement spacing uses a fallback.".to_string());
+    }
+    if slices.len() < 2 {
+        warnings.push("Series contains one slice; MPR depth is limited.".to_string());
+    }
+    warnings
+}
+
+fn resolve_existing_folder(input: &str) -> Result<PathBuf, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("No DICOM folder was selected.".to_string());
+    }
+    let folder = resolve_path(trimmed).unwrap_or_else(|| PathBuf::from(trimmed));
+    if !folder.exists() {
+        return Err(format!("DICOM folder not found: {}", folder.display()));
+    }
+    if !folder.is_dir() {
+        return Err(format!("DICOM import expects a folder, not a file: {}", folder.display()));
+    }
+    Ok(folder)
+}
+
+fn collect_files_recursive(root: &Path, warnings: &mut Vec<String>) -> Result<(Vec<PathBuf>, usize), String> {
+    let mut files = Vec::new();
+    let mut unreadable_count = 0usize;
+    collect_files_recursive_inner(root, &mut files, &mut unreadable_count, warnings)?;
+    files.sort();
+    Ok((files, unreadable_count))
+}
+
+fn collect_files_recursive_inner(
+    folder: &Path,
+    files: &mut Vec<PathBuf>,
+    unreadable_count: &mut usize,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(folder)
+        .map_err(|error| format!("Failed to read DICOM folder {}: {error}", folder.display()))?;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!("A folder entry could not be read: {error}"));
+                *unreadable_count += 1;
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                warnings.push(format!("Could not inspect {}: {error}", path.display()));
+                *unreadable_count += 1;
+                continue;
+            }
+        };
+        if file_type.is_dir() {
+            if let Err(error) = collect_files_recursive_inner(&path, files, unreadable_count, warnings) {
+                warnings.push(error);
+                *unreadable_count += 1;
+            }
+        } else if file_type.is_file() {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_supported_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        uid,
+        "1.2.840.10008.1.2" | "1.2.840.10008.1.2.1" | "1.2.840.10008.1.2.1.99"
+    )
+}
+
+fn dicom_string_opt(object: &DefaultDicomObject, name: &str) -> Option<String> {
+    object
+        .element_by_name(name)
+        .ok()
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.trim_matches(char::from(0)).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn dicom_int<T>(object: &DefaultDicomObject, name: &str, path: &Path) -> Result<T, String>
+where
+    T: num_traits::NumCast,
+    T: std::str::FromStr<Err = ParseIntError>,
+    T: Copy,
+{
+    object
+        .element_by_name(name)
+        .map_err(|_| format!("{} is missing required DICOM tag {name}.", display_name(path)))?
+        .to_int::<T>()
+        .map_err(|error| format!("Could not read DICOM tag {name} from {}: {error}", display_name(path)))
+}
+
+fn dicom_int_opt<T>(object: &DefaultDicomObject, name: &str) -> Option<T>
+where
+    T: num_traits::NumCast,
+    T: std::str::FromStr<Err = ParseIntError>,
+    T: Copy,
+{
+    object.element_by_name(name).ok()?.to_int::<T>().ok()
+}
+
+fn dicom_float_opt(object: &DefaultDicomObject, name: &str) -> Option<f32> {
+    object
+        .element_by_name(name)
+        .ok()?
+        .to_multi_float32()
+        .ok()?
+        .first()
+        .copied()
+}
+
+fn dicom_float_vec(object: &DefaultDicomObject, name: &str) -> Option<Vec<f32>> {
+    object.element_by_name(name).ok()?.to_multi_float32().ok()
+}
+
+fn merge_optional_string(target: &mut Option<String>, candidate: Option<String>) {
+    if target.is_none() && candidate.is_some() {
+        *target = candidate;
+    }
+}
+
+fn array3(values: &[f32]) -> Option<[f32; 3]> {
+    if values.len() >= 3 {
+        Some([values[0], values[1], values[2]])
+    } else {
+        None
+    }
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn scale(v: [f32; 3], factor: f32) -> [f32; 3] {
+    [v[0] * factor, v[1] * factor, v[2] * factor]
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {

@@ -2,16 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { isTauriDesktop, TAURI_DESKTOP_REQUIRED_MESSAGE } from '../lib/tauri';
 import {
+  discoverDicomFolder,
+  loadDicomSeries,
   loadVolume,
   releaseVolume,
+  type DicomDiscoveryResult,
+  type DicomSeriesInfo,
   type VolumeInfo,
   type VolumePlane,
 } from '../lib/volume';
 import {
+  addRecentDicomSeries,
   addRecentFile,
   basenameFromPath,
   loadRecentFiles,
   removeRecentFile,
+  recentKey,
   type RecentVolumeEntry,
 } from '../lib/recentFiles';
 import {
@@ -54,6 +60,10 @@ import {
 } from './viewerShared';
 
 type ViewerStatus = 'browser' | 'loading' | 'ready' | 'error';
+
+type VolumeSource =
+  | { kind: 'nrrd'; path: string }
+  | { kind: 'dicom'; folderPath: string; seriesInstanceUid: string; label: string };
 
 interface NrrdViewerProps {
   volumePath: string;
@@ -132,6 +142,19 @@ function describeErrorTitle(error: string | null): string {
   return 'Unable to load NRRD volume';
 }
 
+function sourceDisplayName(source: VolumeSource): string {
+  return source.kind === 'dicom'
+    ? source.label || basenameFromPath(source.folderPath) || 'DICOM series'
+    : basenameFromPath(source.path) || '(sample)';
+}
+
+function describeDicomSeries(series: DicomSeriesInfo): string {
+  return (
+    series.seriesDescription ||
+    [series.modality ?? 'DICOM', `${series.sliceCount} slices`].join(' ')
+  );
+}
+
 function findLatestDistance(panes: PaneSnapshot[]): ViewerMeasurement | null {
   let best: { m: Measurement; createdAt: number } | null = null;
   for (const pane of panes) {
@@ -167,15 +190,18 @@ export function NrrdViewer({
   const [displayConvention, setDisplayConventionState] =
     useState<DisplayConvention>(() => loadDisplayConvention());
   const [manualFlips, setManualFlips] = useState<DisplayFlips>(NO_MANUAL_FLIPS);
-  const [currentVolumePath, setCurrentVolumePath] = useState<string>(volumePath);
+  const [currentSource, setCurrentSource] = useState<VolumeSource>({ kind: 'nrrd', path: volumePath });
   const [recentFiles, setRecentFiles] = useState<RecentVolumeEntry[]>(() => loadRecentFiles());
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
+  const [dicomDiscovery, setDicomDiscovery] = useState<DicomDiscoveryResult | null>(null);
+  const [dicomImportStatus, setDicomImportStatus] = useState<'idle' | 'scanning' | 'error'>('idle');
+  const [dicomImportError, setDicomImportError] = useState<string | null>(null);
   const [metaOpen, setMetaOpen] = useState(false);
 
   // Whenever the case-supplied volumePath changes, snap back to it as the
   // active source. The user can still override via "Open NRRD…" afterwards.
   useEffect(() => {
-    setCurrentVolumePath(volumePath);
+    setCurrentSource({ kind: 'nrrd', path: volumePath });
   }, [volumePath]);
 
   // Persist the display convention choice across app restarts.
@@ -191,7 +217,7 @@ export function NrrdViewer({
   const onLatestMeasurementChangeRef = useRef(onLatestMeasurementChange);
   onLatestMeasurementChangeRef.current = onLatestMeasurementChange;
 
-  // Load the volume whenever `currentVolumePath` changes. Slice loading happens inside each pane.
+  // Load the volume whenever the selected source changes. Slice loading happens inside each pane.
   useEffect(() => {
     let cancelled = false;
     let loadedHandle: string | null = null;
@@ -211,7 +237,12 @@ export function NrrdViewer({
       return;
     }
 
-    loadVolume(currentVolumePath)
+    const load =
+      currentSource.kind === 'dicom'
+        ? loadDicomSeries(currentSource.folderPath, currentSource.seriesInstanceUid)
+        : loadVolume(currentSource.path);
+
+    load
       .then((info) => {
         if (cancelled) {
           void releaseVolume(info.handleId);
@@ -239,7 +270,7 @@ export function NrrdViewer({
       cancelled = true;
       if (loadedHandle) void releaseVolume(loadedHandle);
     };
-  }, [currentVolumePath]);
+  }, [currentSource]);
 
   // Apply a suggested tool mode from the parent (e.g. measurement question) when ready.
   useEffect(() => {
@@ -571,10 +602,10 @@ export function NrrdViewer({
         : orientationStatus === 'trusted'
           ? { label: 'Trusted metadata', tone: 'trusted' }
           : { label: 'Orientation uncertain', tone: 'uncertain' };
-  const isShowingCaseVolume = currentVolumePath === volumePath;
+  const isShowingCaseVolume = currentSource.kind === 'nrrd' && currentSource.path === volumePath;
   const currentVolumeName = useMemo(
-    () => basenameFromPath(volume?.sourcePath ?? currentVolumePath ?? '') || '(sample)',
-    [volume?.sourcePath, currentVolumePath],
+    () => sourceDisplayName(currentSource),
+    [currentSource],
   );
 
   async function handleOpenLocalFile() {
@@ -594,25 +625,86 @@ export function NrrdViewer({
       });
       if (typeof selected === 'string' && selected.length > 0) {
         setRecentFiles(addRecentFile(selected));
-        setCurrentVolumePath(selected);
+        setCurrentSource({ kind: 'nrrd', path: selected });
+        setDicomDiscovery(null);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
 
-  function handleOpenRecent(path: string) {
-    setRecentMenuOpen(false);
-    setRecentFiles(addRecentFile(path));
-    setCurrentVolumePath(path);
+  async function handleOpenDicomFolder() {
+    if (!isTauriDesktop()) {
+      setError(TAURI_DESKTOP_REQUIRED_MESSAGE);
+      return;
+    }
+    try {
+      setRecentMenuOpen(false);
+      setDicomImportStatus('idle');
+      setDicomImportError(null);
+      const selected = await openDialog({
+        multiple: false,
+        directory: true,
+        title: 'Open DICOM folder',
+      });
+      if (typeof selected !== 'string' || selected.length === 0) return;
+      setDicomImportStatus('scanning');
+      const discovery = await discoverDicomFolder(selected);
+      setDicomDiscovery(discovery);
+      setDicomImportStatus('idle');
+      if (discovery.series.length === 0) {
+        setDicomImportStatus('error');
+        setDicomImportError('No DICOM series were found in the selected folder.');
+      }
+    } catch (caught) {
+      setDicomImportStatus('error');
+      setDicomImportError(caught instanceof Error ? caught.message : String(caught));
+    }
   }
 
-  function handleRemoveRecent(path: string) {
-    setRecentFiles(removeRecentFile(path));
+  function handleSelectDicomSeries(series: DicomSeriesInfo) {
+    if (series.unsupportedReason) {
+      setDicomImportStatus('error');
+      setDicomImportError(series.unsupportedReason);
+      return;
+    }
+    const label = describeDicomSeries(series);
+    setRecentFiles(addRecentDicomSeries(series.folderPath, series.seriesInstanceUid, label));
+    setCurrentSource({
+      kind: 'dicom',
+      folderPath: series.folderPath,
+      seriesInstanceUid: series.seriesInstanceUid,
+      label,
+    });
+    setDicomImportStatus('idle');
+    setDicomImportError(null);
+  }
+
+  function handleOpenRecent(entry: RecentVolumeEntry) {
+    setRecentMenuOpen(false);
+    if (entry.kind === 'dicom' && entry.seriesInstanceUid) {
+      setRecentFiles(addRecentDicomSeries(entry.path, entry.seriesInstanceUid, entry.name));
+      setCurrentSource({
+        kind: 'dicom',
+        folderPath: entry.path,
+        seriesInstanceUid: entry.seriesInstanceUid,
+        label: entry.name,
+      });
+      return;
+    }
+    setRecentFiles(addRecentFile(entry.path));
+    setCurrentSource({ kind: 'nrrd', path: entry.path });
+  }
+
+  function handleRemoveRecent(entry: RecentVolumeEntry) {
+    setRecentFiles(removeRecentFile(recentKey(entry)));
   }
 
   function handleUseCaseVolume() {
-    if (currentVolumePath !== volumePath) setCurrentVolumePath(volumePath);
+    if (!isShowingCaseVolume) {
+      setCurrentSource({ kind: 'nrrd', path: volumePath });
+      setDicomDiscovery(null);
+    }
   }
 
   function toggleManualFlip(axis: 'x' | 'y') {
@@ -690,6 +782,19 @@ export function NrrdViewer({
         >
           Open NRRD…
         </button>
+        <button
+          type="button"
+          className="secondary-button small"
+          onClick={handleOpenDicomFolder}
+          disabled={!isTauriDesktop() || dicomImportStatus === 'scanning'}
+          title={
+            isTauriDesktop()
+              ? 'Import a CT DICOM series from a local folder'
+              : 'Native folder picker requires the desktop build'
+          }
+        >
+          {dicomImportStatus === 'scanning' ? 'Scanning DICOM...' : 'Import DICOM folder...'}
+        </button>
         <div className="recent-menu">
           <button
             type="button"
@@ -704,20 +809,22 @@ export function NrrdViewer({
           {recentMenuOpen && recentFiles.length > 0 ? (
             <ul className="recent-menu-list" role="listbox">
               {recentFiles.map((entry) => (
-                <li key={entry.path} className="recent-menu-row">
+                <li key={recentKey(entry)} className="recent-menu-row">
                   <button
                     type="button"
                     className="recent-menu-button"
-                    onClick={() => handleOpenRecent(entry.path)}
+                    onClick={() => handleOpenRecent(entry)}
                     title={entry.path}
                   >
                     <strong>{entry.name}</strong>
-                    <span className="muted small">{entry.path}</span>
+                    <span className="muted small">
+                      {entry.kind === 'dicom' ? 'DICOM folder' : 'NRRD'} · {entry.path}
+                    </span>
                   </button>
                   <button
                     type="button"
                     className="recent-menu-remove"
-                    onClick={() => handleRemoveRecent(entry.path)}
+                    onClick={() => handleRemoveRecent(entry)}
                     aria-label={`Remove ${entry.name} from recent list`}
                   >
                     ×
@@ -736,6 +843,73 @@ export function NrrdViewer({
           {metaOpen ? 'Hide details' : 'Show details'}
         </button>
       </div>
+
+      {dicomImportError ? (
+        <div className="viewer-state-inline viewer-state-error">
+          <strong>DICOM import issue</strong>
+          <span>{dicomImportError}</span>
+        </div>
+      ) : null}
+
+      {dicomDiscovery ? (
+        <section className="dicom-series-panel" aria-label="Discovered DICOM series">
+          <header className="dicom-series-header">
+            <div>
+              <h4>DICOM series</h4>
+              <p className="muted small">
+                {dicomDiscovery.dicomFileCount} DICOM file(s), {dicomDiscovery.ignoredFileCount} ignored
+              </p>
+            </div>
+            <button
+              type="button"
+              className="secondary-button small"
+              onClick={() => {
+                setDicomDiscovery(null);
+                setDicomImportError(null);
+                setDicomImportStatus('idle');
+              }}
+            >
+              Close
+            </button>
+          </header>
+          {dicomDiscovery.warnings.length > 0 ? (
+            <ul className="viewer-orientation-warnings" aria-label="DICOM discovery warnings">
+              {dicomDiscovery.warnings.map((warning, idx) => (
+                <li key={idx}>{warning}</li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="dicom-series-list">
+            {dicomDiscovery.series.map((series) => (
+              <button
+                key={series.seriesInstanceUid}
+                type="button"
+                className={
+                  series.unsupportedReason
+                    ? 'dicom-series-row unsupported'
+                    : 'dicom-series-row'
+                }
+                onClick={() => handleSelectDicomSeries(series)}
+              >
+                <span>
+                  <strong>{describeDicomSeries(series)}</strong>
+                  <span className="muted small">
+                    {series.studyDescription ? `${series.studyDescription} · ` : ''}
+                    {series.modality ?? 'Unknown modality'} · {series.sliceCount} slice(s)
+                  </span>
+                  {series.seriesFolderPath ? (
+                    <span className="muted small mono">{series.seriesFolderPath}</span>
+                  ) : null}
+                  {series.unsupportedReason ? (
+                    <span className="dicom-series-warning">{series.unsupportedReason}</span>
+                  ) : null}
+                </span>
+                <span className="pill">{series.modality === 'CT' ? 'Open CT' : 'Unsupported'}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <div className="viewer-tool-row">
         <div className="layout-tabs" role="group" aria-label="Viewer layout">
@@ -965,8 +1139,8 @@ export function NrrdViewer({
 
       {status === 'loading' ? (
         <div className="viewer-state viewer-state-info">
-          <strong>Loading {basenameFromPath(currentVolumePath) || 'volume'}…</strong>
-          <span>Reading NRRD header, decoding voxels, and preparing MPR slices.</span>
+          <strong>Loading {currentVolumeName || 'volume'}…</strong>
+          <span>Reading volume metadata, decoding voxels, and preparing MPR slices.</span>
         </div>
       ) : null}
       {status === 'browser' ? (
@@ -980,7 +1154,7 @@ export function NrrdViewer({
           <strong>{describeErrorTitle(error)}</strong>
           <span>{error}</span>
           <span className="muted small">
-            File: {basenameFromPath(currentVolumePath) || currentVolumePath}
+            Source: {currentVolumeName}
           </span>
           <div className="viewer-state-actions">
             {!isShowingCaseVolume ? (

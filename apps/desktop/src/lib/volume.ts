@@ -61,6 +61,26 @@ export interface VolumeInfo {
   planeSliceRanges: PlaneSliceRanges;
 }
 
+export interface DicomSeriesInfo {
+  seriesInstanceUid: string;
+  folderPath: string;
+  seriesFolderPath: string | null;
+  seriesDescription: string | null;
+  modality: string | null;
+  studyDescription: string | null;
+  sliceCount: number;
+  warnings: string[];
+  unsupportedReason: string | null;
+}
+
+export interface DicomDiscoveryResult {
+  folderPath: string;
+  dicomFileCount: number;
+  ignoredFileCount: number;
+  series: DicomSeriesInfo[];
+  warnings: string[];
+}
+
 export interface SliceImage {
   handleId: string;
   plane: VolumePlane;
@@ -83,6 +103,28 @@ export interface VolumeSample {
 
 export async function loadVolume(path: string): Promise<VolumeInfo> {
   const result = await safeInvoke<VolumeInfo>('volume_load', { path });
+  if (!result) {
+    throw new Error(TAURI_DESKTOP_REQUIRED_MESSAGE);
+  }
+  return result;
+}
+
+export async function discoverDicomFolder(folderPath: string): Promise<DicomDiscoveryResult> {
+  const result = await safeInvoke<DicomDiscoveryResult>('dicom_discover_folder', { folderPath });
+  if (!result) {
+    throw new Error(TAURI_DESKTOP_REQUIRED_MESSAGE);
+  }
+  return result;
+}
+
+export async function loadDicomSeries(
+  folderPath: string,
+  seriesInstanceUid: string,
+): Promise<VolumeInfo> {
+  const result = await safeInvoke<VolumeInfo>('volume_load_dicom_series', {
+    folderPath,
+    seriesInstanceUid,
+  });
   if (!result) {
     throw new Error(TAURI_DESKTOP_REQUIRED_MESSAGE);
   }

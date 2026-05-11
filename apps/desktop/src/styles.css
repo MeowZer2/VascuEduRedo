@@ -180,6 +180,22 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .viewer-state-info { gap: 8px; color: #d8e6ff; }
 .viewer-state-error span { color: var(--muted); max-width: 620px; line-height: 1.45; }
 .viewer-state-info span { color: var(--muted); max-width: 520px; line-height: 1.45; }
+.viewer-state-inline { margin: 8px 0 12px; padding: 10px 12px; border-radius: 12px; display: grid; gap: 4px; border: 1px solid var(--border); background: rgba(0,0,0,0.18); }
+.viewer-state-inline.viewer-state-error { color: #ffd0d5; border-color: rgba(255,109,122,0.32); background: rgba(255,109,122,0.08); }
+.viewer-state-inline span { color: var(--muted); line-height: 1.4; }
+.dicom-series-panel { margin: 8px 0 12px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: rgba(0,0,0,0.18); display: grid; gap: 10px; }
+.dicom-series-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.dicom-series-header h4 { margin: 0 0 2px; font-size: 0.96rem; }
+.dicom-series-header p { margin: 0; }
+.dicom-series-list { display: grid; gap: 8px; }
+.dicom-series-row { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,0.045); color: var(--text); text-align: left; cursor: pointer; }
+.dicom-series-row:hover { border-color: rgba(120,166,255,0.55); background: rgba(120,166,255,0.08); }
+.dicom-series-row > span:first-child { display: grid; gap: 3px; min-width: 0; }
+.dicom-series-row strong { font-size: 0.9rem; }
+.dicom-series-row .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.dicom-series-row.unsupported { cursor: default; opacity: 0.76; }
+.dicom-series-row.unsupported:hover { border-color: var(--border); background: rgba(255,255,255,0.045); }
+.dicom-series-warning { color: #ffe6a3; font-size: 0.78rem; line-height: 1.35; }
 .viewer-status-row { display: flex; align-items: center; gap: 8px; min-height: 22px; margin-top: 12px; color: var(--muted); font-size: 0.84rem; }
 .viewer-readout { min-height: 22px; margin-top: 6px; color: #c3d4ee; font-size: 0.84rem; }
 .viewer-status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 999px; background: var(--muted); box-shadow: 0 0 0 4px rgba(154,168,189,0.12); }
