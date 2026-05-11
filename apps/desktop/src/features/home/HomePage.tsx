@@ -20,11 +20,11 @@ export function HomePage({ cases, onStart, onOpenCases }: HomePageProps) {
           <h2>Vascular imaging practice for clinical decision-making.</h2>
           <p>
             Build confidence reading CTA, making measurements, selecting devices, and reviewing
-            feedback in a focused training workspace.
+            feedback in focused practice sessions.
           </p>
           <div className="hero-actions">
             <button className="primary-button" onClick={onStart}>Start guided practice</button>
-            <button className="secondary-button" onClick={onOpenCases}>Browse case library</button>
+            <button className="secondary-button" onClick={onOpenCases}>Browse cases</button>
           </div>
         </div>
         <div className="hero-card">
@@ -43,8 +43,8 @@ export function HomePage({ cases, onStart, onOpenCases }: HomePageProps) {
       <section className="content-card">
         <h3>Designed for focused review</h3>
         <p>
-          Use the case library when you know exactly what you want to open. Use guided practice
-          when you want a session by topic, level, or learning mode.
+          Use Cases when you want to open a specific scenario. Use Practice when you want a guided
+          session by topic, level, or learning mode.
         </p>
       </section>
     </div>

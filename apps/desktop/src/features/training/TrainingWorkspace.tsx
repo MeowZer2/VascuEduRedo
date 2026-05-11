@@ -138,7 +138,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
       <section className="training-main">
         <div className="workspace-header">
           <div>
-            <p className="eyebrow">Training workspace</p>
+            <p className="eyebrow">Guided practice</p>
             <h2>{vascCase.title}</h2>
           </div>
           <button className="secondary-button" onClick={onChooseCase}>Change case</button>

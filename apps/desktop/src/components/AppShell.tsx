@@ -10,7 +10,7 @@ interface AppShellProps {
 const navItems: Array<{ id: Screen; label: string }> = [
   { id: 'home', label: 'Home' },
   { id: 'training', label: 'Practice' },
-  { id: 'cases', label: 'Case Library' },
+  { id: 'cases', label: 'Cases' },
   { id: 'vessel-composer', label: 'Planning' },
   { id: 'devices', label: 'Devices' },
   { id: 'progress', label: 'Progress' },
@@ -44,8 +44,8 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
         </nav>
 
         <div className="sidebar-note">
-          <strong>Practice workspace</strong>
-          <span>Imaging cases, measurements, and feedback</span>
+          <strong>Guided practice</strong>
+          <span>Cases, measurements, and feedback</span>
         </div>
       </aside>
 

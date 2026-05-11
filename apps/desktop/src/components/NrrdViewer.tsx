@@ -728,19 +728,6 @@ export function NrrdViewer({
 
   // -- derived values --------------------------------------------------------------
 
-  const metadata = useMemo(() => {
-    if (!volume) return null;
-    const [width, height, depth] = volume.dims;
-    const [sx, sy, sz] = volume.spacing;
-    const orientationTag =
-      volume.orientation?.status === 'trusted'
-        ? `RAS canonical (${volume.orientation.space ?? 'inferred'})`
-        : 'orientation uncertain';
-    return `${width} x ${height} x ${depth} voxels | ${sx.toFixed(2)} / ${sy.toFixed(2)} / ${sz.toFixed(
-      2,
-    )} mm | intensity ${volume.intensityMin} to ${volume.intensityMax} | ${orientationTag}`;
-  }, [volume]);
-
   const orientationWarnings = volume?.orientation?.warnings ?? [];
   const orientationStatus = volume?.orientation?.status ?? null;
   const manualOverrideActive = manualFlipsActive(manualFlips);
@@ -767,9 +754,9 @@ export function NrrdViewer({
       setRecentMenuOpen(false);
       const selected = await openDialog({
         multiple: false,
-        title: 'Open local study',
+        title: 'Open scan',
         filters: [
-          { name: 'NRRD volumes', extensions: ['nrrd', 'nhdr'] },
+          { name: 'Scan files', extensions: ['nrrd', 'nhdr'] },
           { name: 'All files', extensions: ['*'] },
         ],
       });
@@ -795,7 +782,7 @@ export function NrrdViewer({
       const selected = await openDialog({
         multiple: false,
         directory: true,
-        title: 'Open DICOM folder',
+        title: 'Import study',
       });
       if (typeof selected !== 'string' || selected.length === 0) return;
       setDicomImportStatus('scanning');
@@ -804,7 +791,7 @@ export function NrrdViewer({
       setDicomImportStatus('idle');
       if (discovery.series.length === 0) {
         setDicomImportStatus('error');
-        setDicomImportError('No DICOM series were found in the selected folder.');
+        setDicomImportError('No compatible imaging series were found in the selected folder.');
       }
     } catch (caught) {
       setDicomImportStatus('error');
@@ -879,20 +866,19 @@ export function NrrdViewer({
     <section className={`viewer-card${focusedPaneIndex !== null ? ' viewer-card-focused' : ''}`}>
       <div className="viewer-header">
         <div>
-          <h3>Imaging viewer</h3>
+          <h3>Scan viewer</h3>
           <p>{description}</p>
-          {metadata && metaOpen ? <p className="viewer-metadata">{metadata}</p> : null}
           <p className="viewer-source-line viewer-advanced-source-line">
-            <span className="viewer-source-label">File:</span>
+            <span className="viewer-source-label">Study:</span>
             <strong>{currentVolumeName}</strong>
             {!isShowingCaseVolume ? (
               <button
                 type="button"
                 className="link-button small"
                 onClick={handleUseCaseVolume}
-                title="Reload the volume that came with this case"
+                title="Return to the study that came with this case"
               >
-                Use case volume
+                Use case study
               </button>
             ) : null}
           </p>
@@ -936,11 +922,11 @@ export function NrrdViewer({
           disabled={!isTauriDesktop()}
           title={
             isTauriDesktop()
-              ? 'Open a local NRRD or NHDR volume'
+              ? 'Open a local scan file'
               : 'Native file picker requires the desktop build'
           }
         >
-          Open local study
+          Open scan
         </button>
         <button
           type="button"
@@ -1120,33 +1106,46 @@ export function NrrdViewer({
             Angle
           </button>
         </div>
+        <div className="viewer-presets viewer-presets-inline" role="group" aria-label="Window presets">
+          {WINDOW_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className="secondary-button small"
+              disabled={controlsDisabled}
+              onClick={() => setPreset(preset.width, preset.level)}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
         <details className="viewer-advanced-tools">
           <summary>Advanced</summary>
-          <div className="sync-tabs" role="group" aria-label="Manual orientation fallback">
+          <div className="sync-tabs" role="group" aria-label="Display orientation">
           <button
             type="button"
             className={manualFlips.flipX ? 'tool-tab active' : 'tool-tab'}
             disabled={controlsDisabled}
             onClick={() => toggleManualFlip('x')}
-            title="Flip the displayed image horizontally (display-only)"
+            title="Mirror the displayed image horizontally"
           >
-            Flip H
+            Mirror H
           </button>
           <button
             type="button"
             className={manualFlips.flipY ? 'tool-tab active' : 'tool-tab'}
             disabled={controlsDisabled}
             onClick={() => toggleManualFlip('y')}
-            title="Flip the displayed image vertically (display-only)"
+            title="Mirror the displayed image vertically"
           >
-            Flip V
+            Mirror V
           </button>
           <button
             type="button"
             className="tool-tab"
             disabled={controlsDisabled || !manualOverrideActive}
             onClick={resetDisplayOrientation}
-            title="Clear manual flips and return to metadata-derived orientation"
+            title="Return to the default display orientation"
           >
             Reset orientation
           </button>
@@ -1165,7 +1164,7 @@ export function NrrdViewer({
             disabled={!activeWindow}
             onClick={() => setWindowControlsOpen((open) => !open)}
           >
-            {windowControlsOpen ? 'Hide W/L' : 'W/L controls'}
+            {windowControlsOpen ? 'Hide fine tuning' : 'Fine tune contrast'}
           </button>
           <div className="sync-tabs" role="group" aria-label="Display convention">
             <button
@@ -1182,14 +1181,14 @@ export function NrrdViewer({
               className={displayConvention === 'canonical' ? 'tool-tab active' : 'tool-tab'}
               disabled={controlsDisabled}
               onClick={() => setDisplayConvention('canonical')}
-              title="Technical coordinate display"
+              title="Coordinate display for troubleshooting"
             >
-              Technical
+              Coordinates
             </button>
           </div>
           <div className="viewer-source-row">
             <button type="button" className="secondary-button small" onClick={handleOpenLocalFile} disabled={!isTauriDesktop()}>
-              Open local study
+              Open scan
             </button>
             <button
               type="button"
@@ -1197,7 +1196,7 @@ export function NrrdViewer({
               onClick={handleOpenDicomFolder}
               disabled={!isTauriDesktop() || dicomImportStatus === 'scanning'}
             >
-              {dicomImportStatus === 'scanning' ? 'Scanning...' : 'Import study'}
+              {dicomImportStatus === 'scanning' ? 'Importing...' : 'Import study'}
             </button>
             <div className="recent-menu">
               <button
@@ -1241,6 +1240,51 @@ export function NrrdViewer({
                 Restore case study
               </button>
             ) : null}
+          </div>
+          <div className="sync-tabs" role="group" aria-label="Linked view settings">
+            <button
+              type="button"
+              className={sync.slice ? 'tool-tab active' : 'tool-tab'}
+              disabled={controlsDisabled}
+              onClick={() => setSync((s) => ({ ...s, slice: !s.slice }))}
+            >
+              Link slices
+            </button>
+            <button
+              type="button"
+              className={sync.wl ? 'tool-tab active' : 'tool-tab'}
+              disabled={controlsDisabled}
+              onClick={() => setSync((s) => ({ ...s, wl: !s.wl }))}
+            >
+              Link contrast
+            </button>
+            <button
+              type="button"
+              className={sync.zoom ? 'tool-tab active' : 'tool-tab'}
+              disabled={controlsDisabled}
+              onClick={() => setSync((s) => ({ ...s, zoom: !s.zoom }))}
+            >
+              Link zoom
+            </button>
+          </div>
+          <div className="zoom-tools" aria-label="Zoom controls">
+            <button
+              type="button"
+              className="tool-tab"
+              disabled={controlsDisabled}
+              onClick={() => zoomActiveBy(1 / ZOOM_STEP)}
+            >
+              -
+            </button>
+            <span>{activeWindow ? `${Math.round(activeWindow.zoom * 100)}%` : '-'}</span>
+            <button
+              type="button"
+              className="tool-tab"
+              disabled={controlsDisabled}
+              onClick={() => zoomActiveBy(ZOOM_STEP)}
+            >
+              +
+            </button>
           </div>
         </details>
         <div className="sync-tabs viewer-display-convention-tools" role="group" aria-label="Display convention">
@@ -1343,10 +1387,6 @@ export function NrrdViewer({
           <div>
             <dt>File</dt>
             <dd title={volume.sourcePath}>{currentVolumeName}</dd>
-          </div>
-          <div>
-            <dt>Path</dt>
-            <dd className="muted small mono">{volume.sourcePath}</dd>
           </div>
           <div>
             <dt>Dimensions</dt>

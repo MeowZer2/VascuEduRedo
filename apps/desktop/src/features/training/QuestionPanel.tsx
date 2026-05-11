@@ -299,9 +299,8 @@ export function QuestionPanel({
         if (deviceOptions.length === 0) {
           return (
             <p className="muted">
-              No matching devices in the catalog
-              {deviceQuestion?.allowedCategory ? ` for category "${deviceQuestion.allowedCategory}"` : ''}.
-              Add devices in the Admin → Devices tab.
+              No matching devices are available
+              {deviceQuestion?.allowedCategory ? ' for this category' : ''}.
             </p>
           );
         }

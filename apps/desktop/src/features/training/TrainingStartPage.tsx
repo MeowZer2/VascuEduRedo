@@ -58,8 +58,8 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
           <p className="eyebrow">Guided practice</p>
           <h2>Build a focused imaging session.</h2>
           <p>
-            Choose a topic and session style. VascEdu will open an appropriate case and keep the
-            viewer centered on the learning task.
+            Choose a topic and session style. VascEdu will select a case and keep the scan centered
+            on the learning task.
           </p>
         </div>
         <div className="training-entry-actions">
@@ -72,7 +72,7 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
             Start practice
           </button>
           <button type="button" className="secondary-button" onClick={onBrowseCases}>
-            Browse library
+            Browse cases
           </button>
         </div>
       </section>
