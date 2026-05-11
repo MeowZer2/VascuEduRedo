@@ -14,7 +14,10 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
       <header className="page-header">
         <div>
           <p className="eyebrow">Case library</p>
-          <h2>Choose a vascular module</h2>
+          <h2>Browse known cases.</h2>
+          <p className="muted">
+            Use the library to open a specific case, review its objectives, or launch it directly.
+          </p>
         </div>
       </header>
 
@@ -34,7 +37,7 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
 
       <section className="content-card">
         <div className="section-title-row">
-          <h3>Cases</h3>
+          <h3>Case catalogue</h3>
           <span className="pill">{cases.length} total</span>
         </div>
         <div className="case-table">

@@ -49,7 +49,7 @@ export const cases: VascCase[] = [
     volume: {
       type: 'nrrd',
       path: 'content/aaa/volumes/sample-aaa-001.nrrd',
-      description: 'Synthetic NRRD CTA volume loaded by the Rust/Tauri backend for the axial viewer spike.',
+      description: 'Synthetic CTA study for abdominal aneurysm measurement practice.',
     },
     questions: [
       {
@@ -126,7 +126,7 @@ export const cases: VascCase[] = [
           'Place the two endpoints at the outer walls of the aortic lumen at its widest point.',
         ],
         explanation:
-          'The maximal transverse diameter on axial CTA is a key EVAR planning measurement. The synthetic NRRD volume in this case represents an approximately 61 mm AAA. Measurements within ±8 mm are accepted to account for section choice and caliper placement variation.',
+          'The maximal transverse diameter on axial CTA is a key EVAR planning measurement. This training study represents an approximately 61 mm AAA. Measurements within ±8 mm are accepted to account for section choice and caliper placement variation.',
       },
       {
         id: 'q7',
@@ -164,7 +164,7 @@ export const cases: VascCase[] = [
     volume: {
       type: 'nrrd',
       path: 'content/aaa/volumes/sample-aaa-001.nrrd',
-      description: 'Uses the bundled sample NRRD volume until carotid-specific imaging content is added.',
+      description: 'Training CTA study used for carotid workflow practice.',
     },
     questions: [
       {

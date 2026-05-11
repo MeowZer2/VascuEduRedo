@@ -23,19 +23,20 @@ export function SettingsPage() {
 
       <section className="grid-2">
         <article className="content-card">
-          <h3>Current scaffold</h3>
-          <p>Frontend runs in browser mode or Tauri mode. The Rust command bridge is optional for this v0.1 UI.</p>
+          <h3>About VascEdu</h3>
+          <p>Local training workspace for vascular imaging cases, measurements, and progress review.</p>
           <dl className="detail-list">
             <div><dt>App</dt><dd>{appInfo?.name ?? 'VascEdu'}</dd></div>
             <div><dt>Version</dt><dd>{appInfo?.version ?? '0.1.0'}</dd></div>
-            <div><dt>Backend</dt><dd>{appInfo?.backend ?? 'Browser preview / Tauri unavailable'}</dd></div>
+            <div><dt>Mode</dt><dd>{appInfo ? 'Desktop app' : 'Browser preview'}</dd></div>
           </dl>
         </article>
 
         <article className="content-card">
-          <h3>Next technical milestone</h3>
+          <h3>Study data</h3>
           <p>
-            Build a Rust-side NRRD loader command that returns slice metadata and an 8-bit windowed image buffer to the frontend.
+            Imaging and progress data stay local to this workstation unless you export or import content
+            through the Admin area.
           </p>
         </article>
       </section>

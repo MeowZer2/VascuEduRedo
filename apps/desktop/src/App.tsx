@@ -9,6 +9,7 @@ import { DevicesCatalogPage } from './features/devices/DevicesCatalogPage';
 import { HomePage } from './features/home/HomePage';
 import { ProgressPage } from './features/progress/ProgressPage';
 import { SettingsPage } from './features/settings/SettingsPage';
+import { TrainingStartPage, type TrainingFilters } from './features/training/TrainingStartPage';
 import { TrainingWorkspace } from './features/training/TrainingWorkspace';
 import { loadCases } from './lib/content';
 import type { VascCase } from './types';
@@ -18,6 +19,7 @@ export type Screen =
   | 'cases'
   | 'case-detail'
   | 'training'
+  | 'training-session'
   | 'vessel-composer'
   | 'devices'
   | 'progress'
@@ -63,7 +65,19 @@ export default function App() {
 
   function startCase(caseId: string) {
     setSelectedCaseId(caseId);
-    setScreen('training');
+    setScreen('training-session');
+  }
+
+  function startGuidedTraining(filters: TrainingFilters) {
+    const matching =
+      cases.find((item) => {
+        const difficultyOk = filters.difficulty === 'any' || item.difficulty === filters.difficulty;
+        const topicOk = filters.topic === 'any' || item.categoryId === filters.topic;
+        return difficultyOk && topicOk;
+      }) ?? cases[0];
+    if (!matching) return;
+    setSelectedCaseId(matching.id);
+    setScreen('training-session');
   }
 
   function openVesselComposer(caseId?: string | null) {
@@ -82,14 +96,18 @@ export default function App() {
     const loaded = await refreshCases();
     if (loaded.find((c) => c.id === caseId)) {
       setSelectedCaseId(caseId);
-      setScreen('training');
+      setScreen('training-session');
     }
   }
 
   return (
     <AppShell activeScreen={screen} onNavigate={handleNavigate}>
       {screen === 'home' && (
-        <HomePage cases={cases} onStart={() => cases[0] && startCase(cases[0].id)} onOpenCases={() => setScreen('cases')} />
+        <HomePage
+          cases={cases}
+          onStart={() => setScreen('training')}
+          onOpenCases={() => setScreen('cases')}
+        />
       )}
       {screen === 'cases' && <CaseLibraryPage cases={cases} onOpenCase={openCase} onStartCase={startCase} />}
       {screen === 'case-detail' && selectedCase && (
@@ -100,14 +118,21 @@ export default function App() {
           onOpenComposer={() => openVesselComposer(selectedCase.id)}
         />
       )}
-      {screen === 'training' && selectedCase && (
+      {screen === 'training' && (
+        <TrainingStartPage
+          cases={cases}
+          onStart={startGuidedTraining}
+          onBrowseCases={() => setScreen('cases')}
+        />
+      )}
+      {screen === 'training-session' && selectedCase && (
         <TrainingWorkspace
           vascCase={selectedCase}
           onFinish={() => {
             setProgressRefreshKey((k) => k + 1);
             setScreen('progress');
           }}
-          onChooseCase={() => setScreen('cases')}
+          onChooseCase={() => setScreen('training')}
         />
       )}
       {screen === 'devices' && <DevicesCatalogPage />}

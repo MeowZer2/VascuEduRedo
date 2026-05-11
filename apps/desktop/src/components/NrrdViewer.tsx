@@ -139,13 +139,13 @@ function makePane(
  * intentionally ignored here so existing measurement questions keep working.
  */
 function describeErrorTitle(error: string | null): string {
-  if (!error) return 'Unable to load NRRD volume';
+  if (!error) return 'Unable to load imaging study';
   const lower = error.toLowerCase();
   if (lower.includes('not found') || lower.includes('no such file')) {
     return 'File not found';
   }
   if (lower.includes('unsupported')) {
-    return 'Unsupported NRRD format';
+    return 'Unsupported imaging format';
   }
   if (lower.includes('gzip')) {
     return 'Compressed payload could not be read';
@@ -154,9 +154,9 @@ function describeErrorTitle(error: string | null): string {
     return 'Bad orientation metadata';
   }
   if (lower.includes('invalid nrrd') || lower.includes('nrrd magic')) {
-    return 'Malformed NRRD file';
+    return 'Malformed imaging file';
   }
-  return 'Unable to load NRRD volume';
+  return 'Unable to load imaging study';
 }
 
 function sourceDisplayName(source: VolumeSource): string {
@@ -221,7 +221,7 @@ export function NrrdViewer({
   const [focusedPaneIndex, setFocusedPaneIndex] = useState<number | null>(null);
 
   // Whenever the case-supplied volumePath changes, snap back to it as the
-  // active source. The user can still override via "Open NRRD…" afterwards.
+  // active source. The user can still override via Advanced study import afterwards.
   useEffect(() => {
     setCurrentSource({ kind: 'nrrd', path: volumePath });
   }, [volumePath]);
@@ -767,7 +767,7 @@ export function NrrdViewer({
       setRecentMenuOpen(false);
       const selected = await openDialog({
         multiple: false,
-        title: 'Open NRRD volume',
+        title: 'Open local study',
         filters: [
           { name: 'NRRD volumes', extensions: ['nrrd', 'nhdr'] },
           { name: 'All files', extensions: ['*'] },
@@ -879,10 +879,10 @@ export function NrrdViewer({
     <section className={`viewer-card${focusedPaneIndex !== null ? ' viewer-card-focused' : ''}`}>
       <div className="viewer-header">
         <div>
-          <h3>NRRD MPR Viewer</h3>
+          <h3>Imaging viewer</h3>
           <p>{description}</p>
-          {metadata ? <p className="viewer-metadata">{metadata}</p> : null}
-          <p className="viewer-source-line">
+          {metadata && metaOpen ? <p className="viewer-metadata">{metadata}</p> : null}
+          <p className="viewer-source-line viewer-advanced-source-line">
             <span className="viewer-source-label">File:</span>
             <strong>{currentVolumeName}</strong>
             {!isShowingCaseVolume ? (
@@ -896,7 +896,7 @@ export function NrrdViewer({
               </button>
             ) : null}
           </p>
-          {orientationWarnings.length > 0 ? (
+          {orientationWarnings.length > 0 && metaOpen ? (
             <ul className="viewer-orientation-warnings" aria-label="Orientation warnings">
               {orientationWarnings.map((warning, idx) => (
                 <li key={idx}>{warning}</li>
@@ -911,7 +911,7 @@ export function NrrdViewer({
           ) : null}
         </div>
         <div className="viewer-header-meta">
-          {orientationBadge ? (
+          {orientationBadge && orientationBadge.tone !== 'trusted' ? (
             <span
               className={`orientation-badge orientation-badge-${orientationBadge.tone}`}
               title={
@@ -919,13 +919,13 @@ export function NrrdViewer({
                   ? 'Manual fallback flips are active. Use Reset orientation to revert to the metadata-derived view.'
                   : orientationBadge.tone === 'uncertain'
                     ? 'Orientation metadata was missing or could not be canonicalized — labels are best-effort.'
-                    : 'Orientation derived from trusted NRRD metadata.'
+                    : 'Display orientation is ready.'
               }
             >
               {orientationBadge.label}
             </span>
           ) : null}
-          <span className="pill">{layout.toUpperCase()} · MPR</span>
+          <span className="pill">{layout.toUpperCase()}</span>
         </div>
       </div>
       <div className="viewer-source-row viewer-secondary-chrome">
@@ -940,7 +940,7 @@ export function NrrdViewer({
               : 'Native file picker requires the desktop build'
           }
         >
-          Open NRRD…
+          Open local study
         </button>
         <button
           type="button"
@@ -953,7 +953,7 @@ export function NrrdViewer({
               : 'Native folder picker requires the desktop build'
           }
         >
-          {dicomImportStatus === 'scanning' ? 'Scanning DICOM...' : 'Import DICOM folder...'}
+          {dicomImportStatus === 'scanning' ? 'Scanning...' : 'Import study'}
         </button>
         <div className="recent-menu">
           <button
@@ -1006,18 +1006,18 @@ export function NrrdViewer({
 
       {dicomImportError ? (
         <div className="viewer-state-inline viewer-state-error">
-          <strong>DICOM import issue</strong>
+          <strong>Study import issue</strong>
           <span>{dicomImportError}</span>
         </div>
       ) : null}
 
       {dicomDiscovery ? (
-        <section className="dicom-series-panel" aria-label="Discovered DICOM series">
+        <section className="dicom-series-panel" aria-label="Available imaging series">
           <header className="dicom-series-header">
             <div>
-              <h4>DICOM series</h4>
+              <h4>Available studies</h4>
               <p className="muted small">
-                {dicomDiscovery.dicomFileCount} DICOM file(s), {dicomDiscovery.ignoredFileCount} ignored
+                {dicomDiscovery.series.length} series found
               </p>
             </div>
             <button
@@ -1157,7 +1157,7 @@ export function NrrdViewer({
             disabled={!volume}
             onClick={() => setMetaOpen((open) => !open)}
           >
-            {metaOpen ? 'Hide metadata' : 'Metadata'}
+            {metaOpen ? 'Hide study details' : 'Study details'}
           </button>
           <button
             type="button"
@@ -1167,25 +1167,100 @@ export function NrrdViewer({
           >
             {windowControlsOpen ? 'Hide W/L' : 'W/L controls'}
           </button>
+          <div className="sync-tabs" role="group" aria-label="Display convention">
+            <button
+              type="button"
+              className={displayConvention === 'pacs' ? 'tool-tab active' : 'tool-tab'}
+              disabled={controlsDisabled}
+              onClick={() => setDisplayConvention('pacs')}
+              title="Standard radiology display"
+            >
+              Standard
+            </button>
+            <button
+              type="button"
+              className={displayConvention === 'canonical' ? 'tool-tab active' : 'tool-tab'}
+              disabled={controlsDisabled}
+              onClick={() => setDisplayConvention('canonical')}
+              title="Technical coordinate display"
+            >
+              Technical
+            </button>
+          </div>
+          <div className="viewer-source-row">
+            <button type="button" className="secondary-button small" onClick={handleOpenLocalFile} disabled={!isTauriDesktop()}>
+              Open local study
+            </button>
+            <button
+              type="button"
+              className="secondary-button small"
+              onClick={handleOpenDicomFolder}
+              disabled={!isTauriDesktop() || dicomImportStatus === 'scanning'}
+            >
+              {dicomImportStatus === 'scanning' ? 'Scanning...' : 'Import study'}
+            </button>
+            <div className="recent-menu">
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={() => setRecentMenuOpen((open) => !open)}
+                disabled={recentFiles.length === 0}
+                aria-haspopup="listbox"
+                aria-expanded={recentMenuOpen}
+              >
+                Recent
+              </button>
+              {recentMenuOpen && recentFiles.length > 0 ? (
+                <ul className="recent-menu-list" role="listbox">
+                  {recentFiles.map((entry) => (
+                    <li key={recentKey(entry)} className="recent-menu-row">
+                      <button
+                        type="button"
+                        className="recent-menu-button"
+                        onClick={() => handleOpenRecent(entry)}
+                        title={entry.path}
+                      >
+                        <strong>{entry.name}</strong>
+                        <span className="muted small">{entry.path}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="recent-menu-remove"
+                        onClick={() => handleRemoveRecent(entry)}
+                        aria-label={`Remove ${entry.name} from recent list`}
+                      >
+                        x
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+            {!isShowingCaseVolume ? (
+              <button type="button" className="secondary-button small" onClick={handleUseCaseVolume}>
+                Restore case study
+              </button>
+            ) : null}
+          </div>
         </details>
-        <div className="sync-tabs" role="group" aria-label="Display convention">
+        <div className="sync-tabs viewer-display-convention-tools" role="group" aria-label="Display convention">
           <button
             type="button"
             className={displayConvention === 'pacs' ? 'tool-tab active' : 'tool-tab'}
             disabled={controlsDisabled}
             onClick={() => setDisplayConvention('pacs')}
-            title="PACS / radiology display convention (R on viewer's left)"
+            title="Standard radiology display"
           >
-            PACS
+            Standard
           </button>
           <button
             type="button"
             className={displayConvention === 'canonical' ? 'tool-tab active' : 'tool-tab'}
             disabled={controlsDisabled}
             onClick={() => setDisplayConvention('canonical')}
-            title="Canonical RAS display (no viewer-side flips)"
+            title="Technical coordinate display"
           >
-            Canonical
+            Technical
           </button>
         </div>
         <div className="sync-tabs" role="group" aria-label="Sync toggles">
@@ -1264,7 +1339,7 @@ export function NrrdViewer({
       ) : null}
 
       {metaOpen && volume ? (
-        <dl className="viewer-metadata-panel" aria-label="Volume metadata">
+        <dl className="viewer-metadata-panel" aria-label="Study details">
           <div>
             <dt>File</dt>
             <dd title={volume.sourcePath}>{currentVolumeName}</dd>
@@ -1298,13 +1373,13 @@ export function NrrdViewer({
             </dd>
           </div>
           <div>
-            <dt>Display convention</dt>
-            <dd>{displayConvention === 'pacs' ? 'PACS / radiology' : 'Canonical RAS'}</dd>
+            <dt>Display mode</dt>
+            <dd>{displayConvention === 'pacs' ? 'Standard radiology' : 'Technical coordinates'}</dd>
           </div>
           <div>
             <dt>Orientation</dt>
             <dd>
-              {orientationStatus === 'trusted' ? 'Trusted metadata' : 'Uncertain / fallback'}
+              {orientationStatus === 'trusted' ? 'Ready' : 'Needs review'}
               {manualOverrideActive ? ' · manual override active' : ''}
               {volume.orientation?.space ? ` · NRRD space: ${volume.orientation.space}` : ''}
             </dd>
@@ -1328,7 +1403,7 @@ export function NrrdViewer({
         <div className="viewer-state viewer-state-info viewer-state-loading" role="status" aria-live="polite">
           <span className="viewer-loading-spinner" aria-hidden="true" />
           <strong>Loading {currentVolumeName || 'volume'}…</strong>
-          <span>Reading volume metadata, decoding voxels, and preparing MPR slices.</span>
+          <span>Preparing the imaging workspace.</span>
         </div>
       ) : null}
       {status === 'browser' ? (
@@ -1356,7 +1431,7 @@ export function NrrdViewer({
               onClick={handleOpenLocalFile}
               disabled={!isTauriDesktop()}
             >
-              Open another file…
+              Open another study
             </button>
           </div>
         </div>
@@ -1431,11 +1506,11 @@ export function NrrdViewer({
         <span className={`viewer-status-dot ${status}`} />
         <span>
           {status === 'ready' && volume && activeWindow
-            ? `Loaded ${volume.sourcePath}. Active pane ${activePane + 1}: ${activeWindow.plane} ${activeWindow.slice + 1}/${getSliceCount(volume, activeWindow.plane)}.`
+            ? `Ready. Active view ${activePane + 1}: ${activeWindow.plane} ${activeWindow.slice + 1}/${getSliceCount(volume, activeWindow.plane)}.`
             : null}
-          {status === 'loading' ? 'Preparing volume metadata and MPR slice.' : null}
+          {status === 'loading' ? 'Preparing imaging workspace.' : null}
           {status === 'browser' ? TAURI_DESKTOP_REQUIRED_MESSAGE : null}
-          {status === 'error' ? 'The viewer stopped before rendering the slice.' : null}
+          {status === 'error' ? 'The viewer stopped before displaying the image.' : null}
         </span>
       </div>
 
@@ -1502,7 +1577,7 @@ export function NrrdViewer({
         </div>
       ) : null}
 
-      {windowControlsOpen && focusedPaneIndex === null ? (
+      {focusedPaneIndex === null ? (
         <div className="viewer-presets">
           {WINDOW_PRESETS.map((preset) => (
             <button

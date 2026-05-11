@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export const TAURI_DESKTOP_REQUIRED_MESSAGE = 'NRRD viewer requires Tauri desktop mode. Run pnpm dev.';
+export const TAURI_DESKTOP_REQUIRED_MESSAGE = 'The imaging viewer requires the desktop app.';
 
 declare global {
   interface Window {

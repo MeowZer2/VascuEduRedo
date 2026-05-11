@@ -9,16 +9,17 @@ interface AppShellProps {
 
 const navItems: Array<{ id: Screen; label: string }> = [
   { id: 'home', label: 'Home' },
-  { id: 'cases', label: 'Cases' },
-  { id: 'training', label: 'Training' },
-  { id: 'vessel-composer', label: 'Vessel Composer' },
+  { id: 'training', label: 'Practice' },
+  { id: 'cases', label: 'Case Library' },
+  { id: 'vessel-composer', label: 'Planning' },
   { id: 'devices', label: 'Devices' },
   { id: 'progress', label: 'Progress' },
-  { id: 'admin', label: 'Admin Preview' },
+  { id: 'admin', label: 'Admin' },
   { id: 'settings', label: 'Settings' },
 ];
 
 export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) {
+  const activeNav = activeScreen === 'training-session' ? 'training' : activeScreen;
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -26,7 +27,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
           <div className="brand-mark">V</div>
           <div>
             <h1>VascEdu</h1>
-            <p>vascular imaging education</p>
+            <p>vascular training</p>
           </div>
         </div>
 
@@ -34,7 +35,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
           {navItems.map((item) => (
             <button
               key={item.id}
-              className={item.id === activeScreen ? 'nav-item active' : 'nav-item'}
+              className={item.id === activeNav ? 'nav-item active' : 'nav-item'}
               onClick={() => onNavigate(item.id)}
             >
               {item.label}
@@ -43,8 +44,8 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
         </nav>
 
         <div className="sidebar-note">
-          <strong>v0.1 scaffold</strong>
-          <span>Real NRRD viewer + quiz flow</span>
+          <strong>Practice workspace</strong>
+          <span>Imaging cases, measurements, and feedback</span>
         </div>
       </aside>
 

@@ -16,35 +16,35 @@ export function HomePage({ cases, onStart, onOpenCases }: HomePageProps) {
     <div className="page-stack">
       <section className="hero-panel">
         <div>
-          <p className="eyebrow">VascEdu v0.1</p>
-          <h2>Case-based vascular imaging education.</h2>
+          <p className="eyebrow">VascEdu</p>
+          <h2>Vascular imaging practice for clinical decision-making.</h2>
           <p>
-            Start with one excellent learning loop: review the case, inspect CTA, answer questions, read explanations,
-            and track your progress.
+            Build confidence reading CTA, making measurements, selecting devices, and reviewing
+            feedback in a focused training workspace.
           </p>
           <div className="hero-actions">
-            <button className="primary-button" onClick={onStart}>Start sample AAA case</button>
+            <button className="primary-button" onClick={onStart}>Start guided practice</button>
             <button className="secondary-button" onClick={onOpenCases}>Browse case library</button>
           </div>
         </div>
         <div className="hero-card">
-          <strong>Core loop</strong>
-          <span>Case → CTA → Questions → Feedback</span>
+          <strong>Practice loop</strong>
+          <span>Inspect imaging, answer, measure, review feedback</span>
         </div>
       </section>
 
       <section className="grid-4">
-        <StatCard label="Cases" value={cases.length} helper="sample content" />
-        <StatCard label="Modules" value={categories.length} helper="content-pack ready" />
+        <StatCard label="Cases" value={cases.length} helper="library cases" />
+        <StatCard label="Topics" value={categories.length} helper="vascular modules" />
         <StatCard label="Attempts" value={progress.totalAttempts} helper="local progress" />
         <StatCard label="Average" value={`${Math.round(progress.averagePercent)}%`} helper="across attempts" />
       </section>
 
       <section className="content-card">
-        <h3>Build principle</h3>
+        <h3>Designed for focused review</h3>
         <p>
-          This scaffold avoids rebuilding every old feature at once. It gives you a clean foundation for the most important
-          VascEdu product identity: vascular imaging cases with structured teaching questions.
+          Use the case library when you know exactly what you want to open. Use guided practice
+          when you want a session by topic, level, or learning mode.
         </p>
       </section>
     </div>

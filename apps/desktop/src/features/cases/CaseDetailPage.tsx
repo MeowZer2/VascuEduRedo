@@ -59,7 +59,7 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
           <button className="secondary-button" onClick={onOpenComposer}>
             {linkedPlan ? 'Open vessel plan' : 'Create vessel plan'}
           </button>
-          <button className="primary-button" onClick={onStart}>Start training</button>
+          <button className="primary-button" onClick={onStart}>Practice this case</button>
         </div>
       </header>
 
@@ -171,7 +171,7 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
         <h3>Imaging</h3>
         <p>{vascCase.volume.description || 'No imaging description provided.'}</p>
         {vascCase.volume.path && (
-          <p className="muted small">
+          <p className="muted small admin-only-note">
             <strong>Volume:</strong> <code>{vascCase.volume.path}</code>
           </p>
         )}
