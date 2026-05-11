@@ -43,12 +43,27 @@ export function ProceduralPlanViewer({
       <svg className="procedure-viewer-svg" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Procedural angiogram context">
         <defs>
           <radialGradient id="learner-angio-bg" cx="50%" cy="42%" r="72%">
-            <stop offset="0%" stopColor="#171d24" />
-            <stop offset="58%" stopColor="#070a0e" />
+            <stop offset="0%" stopColor="#252a2f" />
+            <stop offset="54%" stopColor="#0f1216" />
             <stop offset="100%" stopColor="#020304" />
           </radialGradient>
+          <filter id="learner-angio-grain" x="0" y="0" width="100%" height="100%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.88" numOctaves="2" seed="19" />
+            <feColorMatrix type="saturate" values="0" />
+            <feComponentTransfer>
+              <feFuncA type="table" tableValues="0 0.09" />
+            </feComponentTransfer>
+          </filter>
+          <filter id="learner-angio-soft" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="1.05" result="soft" />
+            <feMerge>
+              <feMergeNode in="soft" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
         <rect className="procedure-viewer-bg" width={WIDTH} height={HEIGHT} />
+        <rect className="procedure-viewer-grain" width={WIDTH} height={HEIGHT} />
         <text className="procedure-viewer-label" x="24" y="36">{activeStep?.label ?? plan.name}</text>
         {plan.data.segments.map((segment) => (
           <LearnerSegment key={segment.id} segment={segment} />
@@ -91,14 +106,15 @@ export function ProceduralPlanViewer({
 function LearnerSegment({ segment }: { segment: VesselSegment }) {
   const width = Math.max(4, Math.min(24, (segment.proximalDiameterMm + segment.distalDiameterMm) / 2));
   const mid = interpolate(segment, 0.5);
+  const vesselPath = learnerLumenPath(segment, width);
   return (
     <g className={`procedure-viewer-segment pathology-${segment.pathologyType}`}>
-      <line x1={segment.start.x} y1={segment.start.y} x2={segment.end.x} y2={segment.end.y} strokeWidth={width} />
+      <path d={vesselPath} />
       {segment.pathologyType === 'stenosis' ? (
-        <line className="stenosis-core" x1={interpolate(segment, 0.43).x} y1={interpolate(segment, 0.43).y} x2={interpolate(segment, 0.57).x} y2={interpolate(segment, 0.57).y} strokeWidth={Math.max(2, width * 0.35)} />
+        <path className="stenosis-core" d={learnerLumenPath(segment, Math.max(2, width * 0.34), 0.42, 0.58)} />
       ) : null}
       {segment.pathologyType === 'occlusion' ? <circle className="occlusion-dot" cx={interpolate(segment, 0.68).x} cy={interpolate(segment, 0.68).y} r="8" /> : null}
-      {segment.pathologyType === 'aneurysm' ? <ellipse className="aneurysm-sac" cx={mid.x} cy={mid.y} rx={width * 1.25} ry={width * 1.8} /> : null}
+      {segment.pathologyType === 'aneurysm' ? <ellipse className="aneurysm-sac" cx={mid.x} cy={mid.y} rx={width * 1.45} ry={width * 2.05} transform={`rotate(${angleDeg(segment)} ${mid.x} ${mid.y})`} /> : null}
       {segment.pathologyType !== 'normal' ? <text x={mid.x + 10} y={mid.y - 12}>{segment.pathologyType}</text> : null}
     </g>
   );
@@ -124,9 +140,47 @@ function LearnerObject({
       <line x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
       {object.objectType === 'balloon' ? <ellipse cx={center.x} cy={center.y} rx={object.state === 'deployed' ? 22 : 12} ry={object.state === 'deployed' ? 8 : 5} /> : null}
       {(object.objectType === 'stent' || object.objectType === 'stentGraft') ? <rect x={center.x - 22} y={center.y - 6} width="44" height="12" rx="3" /> : null}
-      <text x={end.x + 10} y={end.y + 4}>{object.label}</text>
+      {(object.objectType === 'stent' || object.objectType === 'stentGraft') ? (
+        Array.from({ length: 5 }).map((_, index) => {
+          const t = startT + ((endT - startT) * index) / 4;
+          const point = interpolate(segment, t);
+          const offset = index % 2 === 0 ? 5 : -5;
+          return <line key={index} className="procedure-viewer-strut" x1={point.x - 5} y1={point.y + offset} x2={point.x + 5} y2={point.y - offset} />;
+        })
+      ) : null}
+      {selected ? <text x={end.x + 10} y={end.y + 4}>{object.label}</text> : null}
     </g>
   );
+}
+
+function learnerLumenPath(segment: VesselSegment, width: number, t1 = 0, t2 = 1): string {
+  const sampleCount = 9;
+  const dx = segment.end.x - segment.start.x;
+  const dy = segment.end.y - segment.start.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+  const forward: Array<{ x: number; y: number }> = [];
+  const backward: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i < sampleCount; i += 1) {
+    const local = i / (sampleCount - 1);
+    const t = t1 + (t2 - t1) * local;
+    const point = interpolate(segment, t);
+    const lesion = Math.exp(-Math.pow((t - 0.5) / 0.13, 2));
+    const stenosisFactor = segment.pathologyType === 'stenosis' ? 1 - 0.55 * lesion : 1;
+    const aneurysmFactor = segment.pathologyType === 'aneurysm' ? 1 + 1.05 * lesion : 1;
+    const taper = 1 - 0.14 * t;
+    const half = Math.max(1.5, width * stenosisFactor * aneurysmFactor * taper) / 2;
+    forward.push({ x: point.x + nx * half, y: point.y + ny * half });
+    backward.unshift({ x: point.x - nx * half, y: point.y - ny * half });
+  }
+  return [...forward, ...backward]
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`)
+    .join(' ') + ' Z';
+}
+
+function angleDeg(segment: VesselSegment): number {
+  return Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x) * 180 / Math.PI;
 }
 
 function interpolate(segment: VesselSegment, t: number) {

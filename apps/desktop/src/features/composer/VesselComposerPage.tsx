@@ -69,6 +69,7 @@ const CLICK_DRAG_THRESHOLD = 4;
 type ComposerTool = 'select' | 'segment' | 'bifurcation' | 'device' | 'marker';
 type ComposerViewMode = 'planning' | 'angiogram';
 type AngiogramProjection = 'ap' | 'lao' | 'rao' | 'lateral';
+type AngiogramVisualPreset = 'dsa' | 'fluoro' | 'roadmap';
 
 interface VesselComposerPageProps {
   cases: VascCase[];
@@ -137,6 +138,7 @@ export function VesselComposerPage({
   const [markerType, setMarkerType] = useState<TreatmentMarkerType>('lesionStart');
   const [viewMode, setViewMode] = useState<ComposerViewMode>('planning');
   const [angiogramProjection, setAngiogramProjection] = useState<AngiogramProjection>('ap');
+  const [angiogramVisualPreset, setAngiogramVisualPreset] = useState<AngiogramVisualPreset>('dsa');
   const [activeStepId, setActiveStepId] = useState('baseline');
   const [proceduralType, setProceduralType] = useState<ProceduralObjectType>('guidewire');
   const [proceduralSegmentId, setProceduralSegmentId] = useState('');
@@ -1740,6 +1742,8 @@ export function VesselComposerPage({
             <AngiogramCanvas
               projection={angiogramProjection}
               onProjectionChange={setAngiogramProjection}
+              visualPreset={angiogramVisualPreset}
+              onVisualPresetChange={setAngiogramVisualPreset}
               segments={segments}
               bifurcations={bifurcations}
               treatmentMarkers={treatmentMarkers}
@@ -1752,7 +1756,7 @@ export function VesselComposerPage({
           )}
           <footer className="composer-canvas-footer">
             <span className="muted small">
-              {viewMode === 'angiogram' && 'AP angiogram projection. Select procedural objects from the panel to position or deploy them.'}
+              {viewMode === 'angiogram' && 'Synthetic angiogram projection. Select procedural objects from the panel to position or deploy them.'}
               {viewMode === 'planning' && tool === 'segment' && pendingSegmentStart && 'Click the end point. Hold Shift for grid snap.'}
               {viewMode === 'planning' && tool === 'segment' && !pendingSegmentStart && 'Click the start point. Hold Shift for grid snap.'}
               {viewMode === 'planning' && tool === 'bifurcation' && 'Click near a vessel to add a bifurcation.'}
@@ -3178,6 +3182,8 @@ function TreatmentMarkerSvg({
 function AngiogramCanvas({
   projection,
   onProjectionChange,
+  visualPreset,
+  onVisualPresetChange,
   segments,
   bifurcations,
   treatmentMarkers,
@@ -3189,6 +3195,8 @@ function AngiogramCanvas({
 }: {
   projection: AngiogramProjection;
   onProjectionChange: (projection: AngiogramProjection) => void;
+  visualPreset: AngiogramVisualPreset;
+  onVisualPresetChange: (preset: AngiogramVisualPreset) => void;
   segments: VesselSegment[];
   bifurcations: BifurcationNode[];
   treatmentMarkers: TreatmentMarker[];
@@ -3200,7 +3208,7 @@ function AngiogramCanvas({
 }) {
   return (
     <svg
-      className="vessel-composer-svg angiogram-svg"
+      className={`vessel-composer-svg angiogram-svg angiogram-preset-${visualPreset}`}
       viewBox={`0 0 ${WORKSPACE_WIDTH} ${WORKSPACE_HEIGHT}`}
       role="img"
       aria-label={`${projection.toUpperCase()} procedural angiogram`}
@@ -3208,27 +3216,47 @@ function AngiogramCanvas({
     >
       <defs>
         <radialGradient id="angiogram-vignette" cx="50%" cy="42%" r="72%">
-          <stop offset="0%" stopColor="#1a2027" />
-          <stop offset="55%" stopColor="#080b10" />
-          <stop offset="100%" stopColor="#020305" />
+          <stop offset="0%" stopColor="#24282d" />
+          <stop offset="48%" stopColor="#101318" />
+          <stop offset="100%" stopColor="#030405" />
         </radialGradient>
-        <filter id="angiogram-glow" x="-30%" y="-30%" width="160%" height="160%">
-          <feGaussianBlur stdDeviation="2.2" result="blur" />
+        <filter id="angiogram-film-grain" x="0" y="0" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.92" numOctaves="2" seed="14" result="noise" />
+          <feColorMatrix in="noise" type="saturate" values="0" />
+          <feComponentTransfer>
+            <feFuncA type="table" tableValues="0 0.11" />
+          </feComponentTransfer>
+        </filter>
+        <filter id="angiogram-soft-lumen" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="1.15" result="soft" />
           <feMerge>
-            <feMergeNode in="blur" />
+            <feMergeNode in="soft" />
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
+        <filter id="angiogram-metal" x="-25%" y="-25%" width="150%" height="150%">
+          <feGaussianBlur stdDeviation="0.55" result="metalSoft" />
+          <feMerge>
+            <feMergeNode in="metalSoft" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <linearGradient id="angiogram-lumen-density" x1="0%" x2="100%" y1="0%" y2="0%">
+          <stop offset="0%" stopColor="rgba(231,235,238,0.56)" />
+          <stop offset="52%" stopColor="rgba(250,252,252,0.84)" />
+          <stop offset="100%" stopColor="rgba(209,216,222,0.5)" />
+        </linearGradient>
       </defs>
       <rect className="angiogram-bg" width={WORKSPACE_WIDTH} height={WORKSPACE_HEIGHT} />
+      <rect className="angiogram-film-grain" width={WORKSPACE_WIDTH} height={WORKSPACE_HEIGHT} />
       <g className="angiogram-noise" pointerEvents="none">
-        {Array.from({ length: 18 }).map((_, index) => (
+        {Array.from({ length: 26 }).map((_, index) => (
           <line
             key={index}
             x1="0"
             x2={WORKSPACE_WIDTH}
-            y1={40 + index * 31}
-            y2={42 + index * 31}
+            y1={18 + index * 23}
+            y2={19 + index * 23}
           />
         ))}
       </g>
@@ -3238,7 +3266,8 @@ function AngiogramCanvas({
       <text className="angiogram-step-label" x="24" y="60">
         {activeStep?.label ?? 'Angiogram'}
       </text>
-      <foreignObject x="760" y="18" width="220" height="44">
+      <foreignObject x="664" y="18" width="314" height="78">
+        <div className="angiogram-control-stack">
         <div className="angiogram-projection-tabs">
           {(['ap', 'lao', 'rao', 'lateral'] as AngiogramProjection[]).map((item) => (
             <button
@@ -3250,6 +3279,19 @@ function AngiogramCanvas({
               {projectionLabel(item)}
             </button>
           ))}
+        </div>
+        <div className="angiogram-projection-tabs angiogram-preset-tabs">
+          {(['dsa', 'fluoro', 'roadmap'] as AngiogramVisualPreset[]).map((item) => (
+            <button
+              key={item}
+              type="button"
+              className={visualPreset === item ? 'active' : ''}
+              onClick={() => onVisualPresetChange(item)}
+            >
+              {visualPresetLabel(item)}
+            </button>
+          ))}
+        </div>
         </div>
       </foreignObject>
 
@@ -3383,9 +3425,9 @@ function AngiogramSegment({
     return (
       <g className={className} onPointerDown={select}>
         <AngioLine segment={segment} t1={0} t2={0.68} width={width} />
-        <line className="angiogram-cutoff" x1={cutoff.x - 10} y1={cutoff.y - 10} x2={cutoff.x + 10} y2={cutoff.y + 10} />
+        <line className="angiogram-cutoff" x1={cutoff.x - 9} y1={cutoff.y - 9} x2={cutoff.x + 9} y2={cutoff.y + 9} />
         <AngioLine segment={segment} t1={0.72} t2={1} width={Math.max(2, width * 0.25)} extraClass="non-opacified" />
-        <AngioSegmentLabel segment={segment} selected={selected} />
+        {selected ? <AngioSegmentLabel segment={segment} selected={selected} /> : null}
       </g>
     );
   }
@@ -3394,10 +3436,17 @@ function AngiogramSegment({
     <g className={className} onPointerDown={select}>
       <AngioLine segment={segment} t1={0} t2={1} width={width} />
       {segment.pathologyType === 'stenosis' ? (
-        <AngioLine segment={segment} t1={0.43} t2={0.57} width={narrowWidth} extraClass="stenosis-core" />
+        <AngioLine segment={segment} t1={0.41} t2={0.59} width={narrowWidth} extraClass="stenosis-core" />
       ) : null}
       {segment.pathologyType === 'aneurysm' ? (
-        <ellipse className="angiogram-aneurysm-sac" cx={mid.x} cy={mid.y} rx={width * 1.25} ry={width * 1.85} />
+        <ellipse
+          className="angiogram-aneurysm-sac"
+          cx={mid.x}
+          cy={mid.y}
+          rx={width * 1.45}
+          ry={width * 2.05}
+          transform={`rotate(${segmentAngleDeg(segment)} ${mid.x} ${mid.y})`}
+        />
       ) : null}
       {segment.pathologyType === 'dissection' ? (
         <AngioLine segment={segment} t1={0.18} t2={0.82} width={2} extraClass="dissection-flap" />
@@ -3405,7 +3454,7 @@ function AngiogramSegment({
       {segment.pathologyType === 'thrombus' ? (
         <AngioLine segment={segment} t1={0.38} t2={0.66} width={Math.max(3, width * 0.45)} extraClass="thrombus-defect" />
       ) : null}
-      {selected || segment.pathologyType !== 'normal' ? <AngioSegmentLabel segment={segment} selected={selected || selectedId === segment.id} /> : null}
+      {selected || selectedId === segment.id ? <AngioSegmentLabel segment={segment} selected={selected || selectedId === segment.id} /> : null}
     </g>
   );
 }
@@ -3425,16 +3474,60 @@ function AngioLine({
 }) {
   const p1 = interpolateSegment(segment, t1);
   const p2 = interpolateSegment(segment, t2);
+  const path = lumenPath(segment, t1, t2, width, extraClass);
   return (
-    <line
-      className={extraClass ? `angiogram-vessel ${extraClass}` : 'angiogram-vessel'}
-      x1={p1.x}
-      y1={p1.y}
-      x2={p2.x}
-      y2={p2.y}
-      strokeWidth={width}
-    />
+    <>
+      <path className={extraClass ? `angiogram-vessel ${extraClass}` : 'angiogram-vessel'} d={path} />
+      <line className="angiogram-vessel-hit" x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} strokeWidth={Math.max(width + 14, 24)} />
+    </>
   );
+}
+
+function lumenPath(
+  segment: VesselSegment,
+  t1: number,
+  t2: number,
+  baseWidth: number,
+  extraClass?: string,
+): string {
+  const sampleCount = 9;
+  const forward: ComposerPoint[] = [];
+  const backward: ComposerPoint[] = [];
+  const dx = segment.end.x - segment.start.x;
+  const dy = segment.end.y - segment.start.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+
+  for (let i = 0; i < sampleCount; i += 1) {
+    const local = i / (sampleCount - 1);
+    const t = t1 + (t2 - t1) * local;
+    const point = interpolateSegment(segment, t);
+    const half = lumenWidthAt(segment, t, baseWidth, extraClass) / 2;
+    forward.push({ x: point.x + nx * half, y: point.y + ny * half });
+    backward.unshift({ x: point.x - nx * half, y: point.y - ny * half });
+  }
+
+  const points = [...forward, ...backward];
+  return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ') + ' Z';
+}
+
+function lumenWidthAt(segment: VesselSegment, t: number, baseWidth: number, extraClass?: string): number {
+  if (extraClass === 'non-opacified') return Math.max(1.8, baseWidth * 0.55);
+  if (extraClass === 'stenosis-core') return baseWidth;
+  const taper = 1 - 0.16 * t;
+  const lesionFalloff = Math.exp(-Math.pow((t - 0.5) / 0.12, 2));
+  if (segment.pathologyType === 'stenosis') {
+    const severity = clamp(segment.severityPercent ?? 65, 10, 95) / 100;
+    return Math.max(2, baseWidth * taper * (1 - severity * 0.72 * lesionFalloff));
+  }
+  if (segment.pathologyType === 'aneurysm') {
+    return baseWidth * taper * (1 + 1.15 * lesionFalloff);
+  }
+  if (segment.pathologyType === 'thrombus') {
+    return baseWidth * taper * (1 - 0.28 * lesionFalloff);
+  }
+  return Math.max(2, baseWidth * taper);
 }
 
 function AngioSegmentLabel({ segment, selected }: { segment: VesselSegment; selected: boolean }) {
@@ -3473,6 +3566,8 @@ function AngiogramProceduralObject({
   }
 
   if (object.objectType === 'balloon') {
+    const markerA = interpolateSegment(segment, clamp(object.t - lengthFraction * 0.38, 0, 1));
+    const markerB = interpolateSegment(segment, clamp(object.t + lengthFraction * 0.38, 0, 1));
     return (
       <g className={className} onPointerDown={select}>
         <line x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
@@ -3483,7 +3578,9 @@ function AngiogramProceduralObject({
           ry={object.state === 'deployed' ? 8 : 5}
           transform={`rotate(${angle} ${center.x} ${center.y})`}
         />
-        <AngioObjectLabel object={object} point={end} />
+        <line className="angiogram-marker-band" x1={markerA.x - 4} y1={markerA.y - 4} x2={markerA.x + 4} y2={markerA.y + 4} />
+        <line className="angiogram-marker-band" x1={markerB.x - 4} y1={markerB.y - 4} x2={markerB.x + 4} y2={markerB.y + 4} />
+        {selected ? <AngioObjectLabel object={object} point={end} /> : null}
       </g>
     );
   }
@@ -3495,18 +3592,22 @@ function AngiogramProceduralObject({
         {Array.from({ length: 6 }).map((_, index) => {
           const t = startT + ((endT - startT) * index) / 5;
           const point = interpolateSegment(segment, t);
+          const offset = index % 2 === 0 ? 5 : -5;
           return (
             <line
               key={index}
               className="angiogram-stent-strut"
               x1={point.x - 5}
-              y1={point.y - 5}
+              y1={point.y + offset}
               x2={point.x + 5}
-              y2={point.y + 5}
+              y2={point.y - offset}
             />
           );
         })}
-        <AngioObjectLabel object={object} point={end} />
+        {(object.objectType === 'stentGraft' || object.state === 'deployed') ? (
+          <line className="angiogram-graft-body" x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
+        ) : null}
+        {selected ? <AngioObjectLabel object={object} point={end} /> : null}
       </g>
     );
   }
@@ -3515,7 +3616,13 @@ function AngiogramProceduralObject({
     <g className={className} onPointerDown={select}>
       <line x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
       <circle cx={end.x} cy={end.y} r={object.objectType === 'guidewire' ? 3 : 5} />
-      <AngioObjectLabel object={object} point={end} />
+      {object.objectType === 'guidewire' ? (
+        <line className="angiogram-wire-tip" x1={interpolateSegment(segment, clamp(endT - 0.05, 0, 1)).x} y1={interpolateSegment(segment, clamp(endT - 0.05, 0, 1)).y} x2={end.x} y2={end.y} />
+      ) : null}
+      {object.objectType !== 'guidewire' ? (
+        <line className="angiogram-marker-band" x1={end.x - 5} y1={end.y - 5} x2={end.x + 5} y2={end.y + 5} />
+      ) : null}
+      {selected ? <AngioObjectLabel object={object} point={end} /> : null}
     </g>
   );
 }
@@ -3539,6 +3646,18 @@ function projectionLabel(projection: AngiogramProjection): string {
     case 'ap':
     default:
       return 'AP';
+  }
+}
+
+function visualPresetLabel(preset: AngiogramVisualPreset): string {
+  switch (preset) {
+    case 'fluoro':
+      return 'Fluoro';
+    case 'roadmap':
+      return 'Roadmap';
+    case 'dsa':
+    default:
+      return 'DSA';
   }
 }
 
