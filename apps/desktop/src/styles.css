@@ -554,6 +554,7 @@ button.key-finding-row, .key-finding-row button { cursor: pointer; }
 .composer-selection-pill.bifurcation { background: rgba(142,230,201,0.12); border-color: rgba(142,230,201,0.3); color: #c8f1de; }
 .composer-selection-pill.device { background: rgba(255,143,184,0.14); border-color: rgba(255,143,184,0.3); color: #ffd6e6; }
 .composer-selection-pill.marker { background: rgba(255,209,102,0.14); border-color: rgba(255,209,102,0.3); color: #ffe6a3; }
+.composer-selection-pill.procedure { background: rgba(185,220,255,0.14); border-color: rgba(185,220,255,0.32); color: #d8eaff; }
 .composer-property-group { display: grid; gap: 8px; padding: 10px 10px 12px; border-radius: 12px; background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.04); }
 .composer-property-group-body { display: grid; gap: 8px; }
 .composer-property-details { font-size: 0.84rem; color: var(--muted); }
@@ -631,6 +632,51 @@ button.key-finding-row, .key-finding-row button { cursor: pointer; }
 .composer-treatment-marker.marker-targetLesion circle, .composer-treatment-marker.marker-targetLesion line { stroke: #ff6d7a; }
 .composer-treatment-marker.marker-branchAtRisk circle, .composer-treatment-marker.marker-branchAtRisk line { stroke: #d0c6ff; }
 .composer-treatment-marker.marker-sealZone circle, .composer-treatment-marker.marker-sealZone line { stroke: #8fe3ff; }
+.composer-procedure-panel { display: grid; gap: 10px; }
+.procedure-snapshot-list { display: grid; gap: 8px; }
+.procedure-snapshot { display: grid; gap: 6px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 12px; background: rgba(0,0,0,0.14); }
+.procedure-snapshot > strong { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.procedure-object-row { display: grid; gap: 2px; padding: 7px 8px; border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; background: rgba(255,255,255,0.04); color: var(--text); text-align: left; }
+.procedure-object-row:hover { border-color: rgba(143,184,255,0.28); background: rgba(143,184,255,0.08); }
+.procedure-object-row small { color: var(--muted); }
+.angiogram-svg { background: #030508; }
+.angiogram-bg { fill: url(#angiogram-vignette); }
+.angiogram-noise line { stroke: rgba(255,255,255,0.025); stroke-width: 1; }
+.angiogram-projection-label { fill: rgba(217,232,255,0.62); font-size: 18px; font-weight: 850; letter-spacing: 0.12em; }
+.angiogram-vessel { stroke: rgba(234,247,255,0.88); stroke-linecap: round; fill: none; vector-effect: non-scaling-stroke; }
+.angiogram-segment { cursor: pointer; }
+.angiogram-segment.selected .angiogram-vessel { stroke: #fff0bf; }
+.angiogram-segment.pathology-stenosis .angiogram-vessel { stroke: rgba(238,248,255,0.9); }
+.angiogram-vessel.stenosis-core { stroke: rgba(3,5,8,0.88); }
+.angiogram-cutoff { stroke: #f8fbff; stroke-width: 4; stroke-linecap: round; }
+.angiogram-vessel.non-opacified { stroke: rgba(234,247,255,0.22); stroke-dasharray: 9 8; }
+.angiogram-aneurysm-sac { fill: rgba(238,248,255,0.2); stroke: rgba(238,248,255,0.72); stroke-width: 3; }
+.angiogram-vessel.dissection-flap { stroke: rgba(6,9,14,0.9); stroke-width: 2; stroke-dasharray: 16 8; }
+.angiogram-vessel.thrombus-defect { stroke: rgba(4,6,10,0.72); }
+.angiogram-segment-label, .angiogram-marker text, .angiogram-catalog-device text, .angiogram-procedural-object text { fill: rgba(224,235,247,0.76); stroke: rgba(0,0,0,0.82); stroke-width: 3px; paint-order: stroke; font-size: 12px; font-weight: 760; pointer-events: none; }
+.angiogram-branches circle { fill: rgba(238,248,255,0.78); }
+.angiogram-marker { cursor: pointer; }
+.angiogram-marker line { stroke: #ffd166; stroke-width: 2.5; }
+.angiogram-marker.selected line { stroke: #ff8fb8; }
+.angiogram-catalog-device { cursor: pointer; }
+.angiogram-catalog-device circle { fill: rgba(255,143,184,0.78); stroke: rgba(255,235,244,0.95); stroke-width: 2; }
+.angiogram-catalog-device.selected circle { fill: #ffd166; }
+.angiogram-procedural-object { cursor: pointer; }
+.angiogram-procedural-object line { stroke: #dbe8f6; stroke-width: 3; stroke-linecap: round; fill: none; vector-effect: non-scaling-stroke; }
+.angiogram-procedural-object circle { fill: #f8fbff; stroke: #10141a; stroke-width: 1.5; }
+.angiogram-procedural-object.object-guidewire line { stroke: #f7fbff; stroke-width: 1.8; }
+.angiogram-procedural-object.object-catheter line { stroke: #b8d7ff; stroke-width: 5; }
+.angiogram-procedural-object.object-sheath line { stroke: #d7e2ee; stroke-width: 8; }
+.angiogram-procedural-object.object-balloon line { stroke: #b8d7ff; stroke-width: 2; }
+.angiogram-procedural-object.object-balloon ellipse { fill: rgba(143,184,255,0.2); stroke: #d9e8ff; stroke-width: 2.5; }
+.angiogram-procedural-object.object-balloon.state-deployed ellipse { fill: rgba(143,184,255,0.34); }
+.angiogram-procedural-object.object-stent line, .angiogram-procedural-object.object-stentGraft line { stroke: #ffe6a3; stroke-width: 5; }
+.angiogram-procedural-object.object-stentGraft line { stroke: #b9f0e5; stroke-width: 9; }
+.angiogram-stent-strut { stroke: #f8fbff !important; stroke-width: 1.8 !important; }
+.angiogram-procedural-object.state-undeployed { opacity: 0.82; }
+.angiogram-procedural-object.state-deployed text { fill: #cdebd9; }
+.angiogram-procedural-object.selected line, .angiogram-procedural-object.selected ellipse { filter: drop-shadow(0 0 7px rgba(255,209,102,0.85)); stroke: #ffd166; }
+.angiogram-empty text { fill: rgba(217,232,255,0.58); font-size: 16px; font-weight: 800; }
 .composer-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .composer-checkbox-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .composer-checkbox-grid label { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 0.86rem; }

@@ -12,6 +12,7 @@ import { friendlyError, useUnsavedChangesGuard } from '../../lib/productionState
 import {
   ANATOMY_TEMPLATES,
   PATHOLOGY_OPTIONS,
+  PROCEDURAL_OBJECT_OPTIONS,
   TREATMENT_MARKER_OPTIONS,
   VESSEL_PRESETS,
   assessDeviceFit,
@@ -25,7 +26,9 @@ import {
   layoutSegmentLabels,
   listVesselCompositions,
   makeSegmentFromPreset,
+  makeProceduralObject,
   makeTreatmentMarker,
+  proceduralObjectLabel,
   saveVesselComposition,
   snapNormalizedT,
   snapToGrid,
@@ -40,6 +43,9 @@ import {
   type PathologyType,
   type PlanReadinessSummary,
   type PlanValidationIssue,
+  type ProceduralObject,
+  type ProceduralObjectState,
+  type ProceduralObjectType,
   type TreatmentMarker,
   type TreatmentMarkerType,
   type VascularPlanningEntity,
@@ -59,6 +65,8 @@ const PROPERTY_HISTORY_DEBOUNCE_MS = 700;
 const CLICK_DRAG_THRESHOLD = 4;
 
 type ComposerTool = 'select' | 'segment' | 'bifurcation' | 'device' | 'marker';
+type ComposerViewMode = 'planning' | 'angiogram';
+type AngiogramProjection = 'ap';
 
 interface VesselComposerPageProps {
   cases: VascCase[];
@@ -71,6 +79,7 @@ interface PlanState {
   bifurcations: BifurcationNode[];
   devicePlacements: DevicePlacement[];
   treatmentMarkers: TreatmentMarker[];
+  proceduralObjects: ProceduralObject[];
   metadata: Record<string, unknown>;
 }
 
@@ -108,6 +117,7 @@ export function VesselComposerPage({
   const [bifurcations, setBifurcations] = useState<BifurcationNode[]>([]);
   const [devicePlacements, setDevicePlacements] = useState<DevicePlacement[]>([]);
   const [treatmentMarkers, setTreatmentMarkers] = useState<TreatmentMarker[]>([]);
+  const [proceduralObjects, setProceduralObjects] = useState<ProceduralObject[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -121,6 +131,10 @@ export function VesselComposerPage({
   const [deviceSearch, setDeviceSearch] = useState('');
   const [segmentPresetId, setSegmentPresetId] = useState(VESSEL_PRESETS[0].id);
   const [markerType, setMarkerType] = useState<TreatmentMarkerType>('lesionStart');
+  const [viewMode, setViewMode] = useState<ComposerViewMode>('planning');
+  const [angiogramProjection] = useState<AngiogramProjection>('ap');
+  const [proceduralType, setProceduralType] = useState<ProceduralObjectType>('guidewire');
+  const [proceduralSegmentId, setProceduralSegmentId] = useState('');
   const [templateId, setTemplateId] = useState<AnatomyTemplate['id']>(ANATOMY_TEMPLATES[0].id);
   const [pendingSegmentStart, setPendingSegmentStart] = useState<ComposerPoint | null>(null);
   const [compositionMetadata, setCompositionMetadata] = useState<Record<string, unknown>>({});
@@ -137,6 +151,7 @@ export function VesselComposerPage({
     bifurcations: [],
     devicePlacements: [],
     treatmentMarkers: [],
+    proceduralObjects: [],
     metadata: {},
   });
   const undoStackRef = useRef<PlanState[]>([]);
@@ -153,8 +168,9 @@ export function VesselComposerPage({
       bifurcations.find((node) => node.id === selectedId) ??
       devicePlacements.find((placement) => placement.id === selectedId) ??
       treatmentMarkers.find((marker) => marker.id === selectedId) ??
+      proceduralObjects.find((object) => object.id === selectedId) ??
       null,
-    [bifurcations, devicePlacements, segments, selectedId, treatmentMarkers],
+    [bifurcations, devicePlacements, proceduralObjects, segments, selectedId, treatmentMarkers],
   );
   const selectedCase = useMemo(
     () => cases.find((item) => item.id === caseId) ?? null,
@@ -182,9 +198,10 @@ export function VesselComposerPage({
       bifurcations,
       devicePlacements,
       treatmentMarkers,
+      proceduralObjects,
       viewport: { width: WORKSPACE_WIDTH, height: WORKSPACE_HEIGHT },
     }),
-    [bifurcations, compositionMetadata, devicePlacements, segments, treatmentMarkers],
+    [bifurcations, compositionMetadata, devicePlacements, proceduralObjects, segments, treatmentMarkers],
   );
   const deviceIds = useMemo(() => new Set(devices.map((device) => device.id)), [devices]);
   const validationIssues = useMemo(
@@ -218,9 +235,10 @@ export function VesselComposerPage({
       bifurcations,
       devicePlacements,
       treatmentMarkers,
+      proceduralObjects,
       metadata: compositionMetadata,
     };
-  }, [segments, bifurcations, devicePlacements, treatmentMarkers, compositionMetadata]);
+  }, [segments, bifurcations, devicePlacements, treatmentMarkers, proceduralObjects, compositionMetadata]);
 
   useEffect(() => {
     if (ignoreNextDirtyRef.current) {
@@ -229,7 +247,7 @@ export function VesselComposerPage({
     }
     if (!initializedRef.current) return;
     setIsDirty(true);
-  }, [segments, bifurcations, devicePlacements, treatmentMarkers, compositionMetadata]);
+  }, [segments, bifurcations, devicePlacements, treatmentMarkers, proceduralObjects, compositionMetadata]);
 
   useEffect(() => {
     if (!initializedRef.current) return;
@@ -261,6 +279,7 @@ export function VesselComposerPage({
     bifurcations,
     devicePlacements,
     treatmentMarkers,
+    proceduralObjects,
     compositionMetadata,
   ]);
 
@@ -388,7 +407,7 @@ export function VesselComposerPage({
       window.removeEventListener('keyup', handleKeyUp);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, selectedObject, segments, bifurcations, devicePlacements, treatmentMarkers, isDirty, compositionId, compositionName, caseId]);
+  }, [selectedId, selectedObject, segments, bifurcations, devicePlacements, treatmentMarkers, proceduralObjects, isDirty, compositionId, compositionName, caseId]);
 
   useEffect(() => {
     return () => setComposerDragSelectionSuppressed(false);
@@ -398,12 +417,18 @@ export function VesselComposerPage({
     if (tool !== 'segment') setPendingSegmentStart(null);
   }, [tool]);
 
+  useEffect(() => {
+    if (proceduralSegmentId && segments.some((segment) => segment.id === proceduralSegmentId)) return;
+    setProceduralSegmentId(segments[0]?.id ?? '');
+  }, [proceduralSegmentId, segments]);
+
   function snapshotState(): PlanState {
     return {
       segments: stateRef.current.segments.slice(),
       bifurcations: stateRef.current.bifurcations.slice(),
       devicePlacements: stateRef.current.devicePlacements.slice(),
       treatmentMarkers: stateRef.current.treatmentMarkers.slice(),
+      proceduralObjects: stateRef.current.proceduralObjects.slice(),
       metadata: { ...stateRef.current.metadata },
     };
   }
@@ -414,6 +439,7 @@ export function VesselComposerPage({
     setBifurcations(state.bifurcations);
     setDevicePlacements(state.devicePlacements);
     setTreatmentMarkers(state.treatmentMarkers);
+    setProceduralObjects(state.proceduralObjects);
     setCompositionMetadata(state.metadata);
   }
 
@@ -541,6 +567,7 @@ export function VesselComposerPage({
     setBifurcations(draft.data.bifurcations);
     setDevicePlacements(draft.data.devicePlacements);
     setTreatmentMarkers(draft.data.treatmentMarkers);
+    setProceduralObjects(draft.data.proceduralObjects ?? []);
     setCompositionMetadata(draft.data.metadata ?? {});
     setSelectedId(null);
     setPendingSegmentStart(null);
@@ -559,6 +586,7 @@ export function VesselComposerPage({
     setBifurcations(row.data.bifurcations);
     setDevicePlacements(row.data.devicePlacements);
     setTreatmentMarkers(row.data.treatmentMarkers);
+    setProceduralObjects(row.data.proceduralObjects);
     setCompositionMetadata(row.data.metadata ?? {});
     setPendingSegmentStart(null);
     setSelectedId(null);
@@ -583,6 +611,7 @@ export function VesselComposerPage({
     setBifurcations([]);
     setDevicePlacements([]);
     setTreatmentMarkers([]);
+    setProceduralObjects([]);
     setPendingSegmentStart(null);
     setCompositionMetadata({});
     setSelectedId(null);
@@ -727,7 +756,7 @@ export function VesselComposerPage({
   }
 
   function beginDrag(id: string, point: ComposerPoint) {
-    const original = findPlanningEntity(id, segments, bifurcations, devicePlacements, treatmentMarkers);
+    const original = findPlanningEntity(id, segments, bifurcations, devicePlacements, treatmentMarkers, proceduralObjects);
     if (!original) return;
     setComposerDragSelectionSuppressed(true);
     setSelectedId(id);
@@ -765,10 +794,15 @@ export function VesselComposerPage({
       setDevicePlacements((current) =>
         current.map((placement) => (placement.id === drag.id ? moved : placement)),
       );
-    } else {
+    } else if (drag.original.type === 'treatmentMarker') {
       const moved = moveTreatmentMarker(drag.original as TreatmentMarker, dx, dy, segments);
       setTreatmentMarkers((current) =>
         current.map((marker) => (marker.id === drag.id ? moved : marker)),
+      );
+    } else {
+      const moved = moveProceduralObject(drag.original as ProceduralObject, dx, dy, segments);
+      setProceduralObjects((current) =>
+        current.map((object) => (object.id === drag.id ? moved : object)),
       );
     }
   }
@@ -784,7 +818,11 @@ export function VesselComposerPage({
 
   function applyTemplate() {
     const hasExistingPlan =
-      segments.length > 0 || bifurcations.length > 0 || devicePlacements.length > 0 || treatmentMarkers.length > 0;
+      segments.length > 0 ||
+      bifurcations.length > 0 ||
+      devicePlacements.length > 0 ||
+      treatmentMarkers.length > 0 ||
+      proceduralObjects.length > 0;
     if (hasExistingPlan && !window.confirm('Replace the current vessel plan with this anatomy template?')) {
       return;
     }
@@ -797,6 +835,7 @@ export function VesselComposerPage({
     setBifurcations(adjusted.bifurcations);
     setDevicePlacements(adjusted.devicePlacements);
     setTreatmentMarkers(adjusted.treatmentMarkers);
+    setProceduralObjects(adjusted.proceduralObjects);
     setCompositionMetadata(adjusted.metadata);
     setPendingSegmentStart(null);
     setSelectedId(adjusted.segments[0]?.id ?? null);
@@ -907,6 +946,22 @@ export function VesselComposerPage({
     setError(null);
   }
 
+  function addProceduralObject() {
+    const segment = segments.find((item) => item.id === proceduralSegmentId) ?? segments[0];
+    if (!segment) {
+      setError('Add a vessel segment before placing procedural equipment.');
+      setStatus(null);
+      return;
+    }
+    commitNow();
+    const object = makeProceduralObject(makeId(proceduralType), proceduralType, segment.id, 0.5);
+    setProceduralObjects((current) => [...current, object]);
+    setSelectedId(object.id);
+    setViewMode('angiogram');
+    setStatus(`${object.label} added to ${segment.label}.`);
+    setError(null);
+  }
+
   function deleteSelected() {
     if (!selectedObject) return;
     commitNow();
@@ -917,6 +972,9 @@ export function VesselComposerPage({
       );
       setTreatmentMarkers((current) =>
         current.filter((marker) => marker.segmentId !== selectedObject.id),
+      );
+      setProceduralObjects((current) =>
+        current.filter((object) => object.segmentId !== selectedObject.id),
       );
       setBifurcations((current) =>
         current.map((node) => ({
@@ -931,8 +989,10 @@ export function VesselComposerPage({
       setDevicePlacements((current) =>
         current.filter((placement) => placement.id !== selectedObject.id),
       );
-    } else {
+    } else if (selectedObject.type === 'treatmentMarker') {
       setTreatmentMarkers((current) => current.filter((marker) => marker.id !== selectedObject.id));
+    } else {
+      setProceduralObjects((current) => current.filter((object) => object.id !== selectedObject.id));
     }
     setSelectedId(null);
     setDrag(null);
@@ -977,6 +1037,20 @@ export function VesselComposerPage({
       const source = selectedObject;
       const id = makeId('marker');
       setTreatmentMarkers((current) => [
+        ...current,
+        {
+          ...source,
+          id,
+          label: `${source.label} copy`,
+          t: clamp(source.t + 0.06, 0, 1),
+          metadata: source.metadata ? { ...source.metadata } : undefined,
+        },
+      ]);
+      setSelectedId(id);
+    } else if (selectedObject.type === 'proceduralObject') {
+      const source = selectedObject;
+      const id = makeId(source.objectType);
+      setProceduralObjects((current) => [
         ...current,
         {
           ...source,
@@ -1046,6 +1120,13 @@ export function VesselComposerPage({
     );
   }
 
+  function patchProceduralObject(id: string, patch: Partial<ProceduralObject>) {
+    commitPropertyChange();
+    setProceduralObjects((current) =>
+      current.map((object) => (object.id === id ? { ...object, ...patch } : object)),
+    );
+  }
+
   function patchMetadata(patch: Record<string, unknown>) {
     commitPropertyChange();
     setCompositionMetadata((current) => ({ ...current, ...patch }));
@@ -1100,7 +1181,12 @@ export function VesselComposerPage({
     };
   }
 
-  const totalEntities = segments.length + bifurcations.length + devicePlacements.length + treatmentMarkers.length;
+  const totalEntities =
+    segments.length +
+    bifurcations.length +
+    devicePlacements.length +
+    treatmentMarkers.length +
+    proceduralObjects.length;
 
   return (
     <div className="page-stack composer-page">
@@ -1133,6 +1219,23 @@ export function VesselComposerPage({
 
       <section className="composer-toolbar" aria-label="Vessel composer tools">
         <div className="composer-toolbar-row">
+          <div className="composer-tool-group" role="group" aria-label="View mode">
+            <button
+              type="button"
+              className={viewMode === 'planning' ? 'tool-tab active' : 'tool-tab'}
+              onClick={() => setViewMode('planning')}
+            >
+              Planning
+            </button>
+            <button
+              type="button"
+              className={viewMode === 'angiogram' ? 'tool-tab active' : 'tool-tab'}
+              onClick={() => setViewMode('angiogram')}
+            >
+              Angiogram
+            </button>
+          </div>
+
           <div className="composer-tool-group" role="group" aria-label="Drawing tools">
             <ToolButton tool={tool} value="select" label="Select" onSelect={setTool} title="Select / move (Esc to clear)" />
             <ToolButton tool={tool} value="segment" label="Segment" onSelect={setTool} title="Add a vessel segment" />
@@ -1334,9 +1437,21 @@ export function VesselComposerPage({
             segments={segments}
             devicePlacements={devicePlacements}
             treatmentMarkers={treatmentMarkers}
+            proceduralObjects={proceduralObjects}
             readiness={readiness}
             notes={typeof compositionMetadata.notes === 'string' ? compositionMetadata.notes : ''}
             onNotesChange={(notes) => patchMetadata({ notes })}
+          />
+
+          <ProceduralWorkflowPanel
+            segments={segments}
+            proceduralObjects={proceduralObjects}
+            proceduralType={proceduralType}
+            onProceduralTypeChange={setProceduralType}
+            proceduralSegmentId={proceduralSegmentId}
+            onProceduralSegmentChange={setProceduralSegmentId}
+            onAddProceduralObject={addProceduralObject}
+            onSelectProceduralObject={setSelectedId}
           />
 
           <section className="composer-properties-section">
@@ -1353,6 +1468,7 @@ export function VesselComposerPage({
                 onPatchBifurcation={patchBifurcation}
                 onPatchDevicePlacement={patchDevicePlacement}
                 onPatchTreatmentMarker={patchTreatmentMarker}
+                onPatchProceduralObject={patchProceduralObject}
                 onSegmentPresetChange={handleSegmentPresetChange}
                 onPlacementDeviceChange={handlePlacementDeviceChange}
                 onToggleBifurcationChild={toggleBifurcationChild}
@@ -1410,32 +1526,34 @@ export function VesselComposerPage({
             <div className="composer-canvas-stats">
               <span className="pill">{segments.length} seg</span>
               <span className="pill">{devicePlacements.length} dev</span>
+              <span className="pill">{proceduralObjects.length} proc</span>
               <span className="pill">{treatmentMarkers.length} mkr</span>
               <span className={`pill readiness-${readiness.status}`}>{readinessLabel(readiness.status)}</span>
             </div>
           </header>
 
-          <svg
-            ref={svgRef}
-            className={`vessel-composer-svg tool-${tool}`}
-            viewBox={`0 0 ${WORKSPACE_WIDTH} ${WORKSPACE_HEIGHT}`}
-            role="img"
-            aria-label="Vessel composer canvas"
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
-          >
-            <defs>
-              <pattern id="composer-grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 40 0 L 0 0 0 40" className="composer-grid-line" />
-              </pattern>
-            </defs>
-            <rect
-              className="composer-bg"
-              width={WORKSPACE_WIDTH}
-              height={WORKSPACE_HEIGHT}
-              onPointerDown={handleCanvasPointerDown}
-            />
+          {viewMode === 'planning' ? (
+            <svg
+              ref={svgRef}
+              className={`vessel-composer-svg tool-${tool}`}
+              viewBox={`0 0 ${WORKSPACE_WIDTH} ${WORKSPACE_HEIGHT}`}
+              role="img"
+              aria-label="Vessel composer canvas"
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+            >
+              <defs>
+                <pattern id="composer-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                  <path d="M 40 0 L 0 0 0 40" className="composer-grid-line" />
+                </pattern>
+              </defs>
+              <rect
+                className="composer-bg"
+                width={WORKSPACE_WIDTH}
+                height={WORKSPACE_HEIGHT}
+                onPointerDown={handleCanvasPointerDown}
+              />
 
             {totalEntities === 0 && pendingSegmentStart === null && (
               <g className="composer-empty-hint" pointerEvents="none">
@@ -1517,15 +1635,28 @@ export function VesselComposerPage({
                 />
               );
             })}
-          </svg>
+            </svg>
+          ) : (
+            <AngiogramCanvas
+              projection={angiogramProjection}
+              segments={segments}
+              bifurcations={bifurcations}
+              treatmentMarkers={treatmentMarkers}
+              devicePlacements={devicePlacements}
+              proceduralObjects={proceduralObjects}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+            />
+          )}
           <footer className="composer-canvas-footer">
             <span className="muted small">
-              {tool === 'segment' && pendingSegmentStart && 'Click the end point. Hold Shift for grid snap.'}
-              {tool === 'segment' && !pendingSegmentStart && 'Click the start point. Hold Shift for grid snap.'}
-              {tool === 'bifurcation' && 'Click near a vessel to add a bifurcation.'}
-              {tool === 'device' && 'Click a vessel segment to place the selected device.'}
-              {tool === 'marker' && 'Click a vessel segment to add a treatment marker.'}
-              {tool === 'select' && (selectedObject ? `${selectedObject.label} selected` : 'Click an object to select it. Esc clears.')}
+              {viewMode === 'angiogram' && 'AP angiogram projection. Select procedural objects from the panel to position or deploy them.'}
+              {viewMode === 'planning' && tool === 'segment' && pendingSegmentStart && 'Click the end point. Hold Shift for grid snap.'}
+              {viewMode === 'planning' && tool === 'segment' && !pendingSegmentStart && 'Click the start point. Hold Shift for grid snap.'}
+              {viewMode === 'planning' && tool === 'bifurcation' && 'Click near a vessel to add a bifurcation.'}
+              {viewMode === 'planning' && tool === 'device' && 'Click a vessel segment to place the selected device.'}
+              {viewMode === 'planning' && tool === 'marker' && 'Click a vessel segment to add a treatment marker.'}
+              {viewMode === 'planning' && tool === 'select' && (selectedObject ? `${selectedObject.label} selected` : 'Click an object to select it. Esc clears.')}
             </span>
             <span className="muted small">
               History {undoStackRef.current.length}/{redoStackRef.current.length}
@@ -1695,6 +1826,7 @@ function PlanSummaryPanel({
   segments,
   devicePlacements,
   treatmentMarkers,
+  proceduralObjects,
   readiness,
   notes,
   onNotesChange,
@@ -1708,6 +1840,7 @@ function PlanSummaryPanel({
   segments: VesselSegment[];
   devicePlacements: DevicePlacement[];
   treatmentMarkers: TreatmentMarker[];
+  proceduralObjects: ProceduralObject[];
   readiness: PlanReadinessSummary;
   notes: string;
   onNotesChange: (notes: string) => void;
@@ -1769,6 +1902,14 @@ function PlanSummaryPanel({
                 .map((placement) => placement.label || placement.deviceName)
                 .join(' · ') + (devicePlacements.length > 3 ? ` · +${devicePlacements.length - 3} more` : '')}
         </SummaryRow>
+        <SummaryRow label="Procedure">
+          {proceduralObjects.length === 0
+            ? 'No procedural objects yet'
+            : proceduralObjects
+                .slice(0, 3)
+                .map((object) => `${object.label} (${object.state})`)
+                .join(' · ') + (proceduralObjects.length > 3 ? ` · +${proceduralObjects.length - 3} more` : '')}
+        </SummaryRow>
         <SummaryRow label="Status">
           {readiness.errorCount > 0
             ? `${readiness.errorCount} blocking issue(s)`
@@ -1822,6 +1963,113 @@ function FitWarningList({ warnings }: { warnings: DeviceFitWarning[] }) {
   );
 }
 
+function ProceduralWorkflowPanel({
+  segments,
+  proceduralObjects,
+  proceduralType,
+  onProceduralTypeChange,
+  proceduralSegmentId,
+  onProceduralSegmentChange,
+  onAddProceduralObject,
+  onSelectProceduralObject,
+}: {
+  segments: VesselSegment[];
+  proceduralObjects: ProceduralObject[];
+  proceduralType: ProceduralObjectType;
+  onProceduralTypeChange: (value: ProceduralObjectType) => void;
+  proceduralSegmentId: string;
+  onProceduralSegmentChange: (value: string) => void;
+  onAddProceduralObject: () => void;
+  onSelectProceduralObject: (id: string) => void;
+}) {
+  const grouped = {
+    pre: proceduralObjects.filter((object) => object.snapshot === 'pre'),
+    positioned: proceduralObjects.filter((object) => object.snapshot === 'positioned'),
+    post: proceduralObjects.filter((object) => object.snapshot === 'post'),
+  };
+
+  return (
+    <section className="composer-procedure-panel">
+      <h3>Angiogram workflow</h3>
+      <div className="composer-summary-card">
+        <label className="field-label">
+          <span>Object</span>
+          <select
+            className="text-input"
+            value={proceduralType}
+            onChange={(event) => onProceduralTypeChange(event.target.value as ProceduralObjectType)}
+          >
+            {PROCEDURAL_OBJECT_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          <span>Segment</span>
+          <select
+            className="text-input"
+            value={proceduralSegmentId}
+            onChange={(event) => onProceduralSegmentChange(event.target.value)}
+            disabled={segments.length === 0}
+          >
+            {segments.length === 0 ? (
+              <option value="">Add a vessel first</option>
+            ) : (
+              segments.map((segment) => (
+                <option key={segment.id} value={segment.id}>
+                  {segment.label}
+                </option>
+              ))
+            )}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="secondary-button small"
+          onClick={onAddProceduralObject}
+          disabled={segments.length === 0}
+        >
+          Add object
+        </button>
+      </div>
+
+      <div className="procedure-snapshot-list">
+        <ProcedureSnapshot title="Pre-intervention" objects={grouped.pre} onSelect={onSelectProceduralObject} />
+        <ProcedureSnapshot title="Device positioned" objects={grouped.positioned} onSelect={onSelectProceduralObject} />
+        <ProcedureSnapshot title="Post-deployment" objects={grouped.post} onSelect={onSelectProceduralObject} />
+      </div>
+    </section>
+  );
+}
+
+function ProcedureSnapshot({
+  title,
+  objects,
+  onSelect,
+}: {
+  title: string;
+  objects: ProceduralObject[];
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="procedure-snapshot">
+      <strong>{title}</strong>
+      {objects.length === 0 ? (
+        <span className="muted small">No objects</span>
+      ) : (
+        objects.map((object) => (
+          <button key={object.id} type="button" className="procedure-object-row" onClick={() => onSelect(object.id)}>
+            <span>{object.label}</span>
+            <small>{proceduralObjectLabel(object.objectType)} / {object.state}</small>
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
 function PropertyEditor({
   selected,
   segments,
@@ -1832,6 +2080,7 @@ function PropertyEditor({
   onPatchBifurcation,
   onPatchDevicePlacement,
   onPatchTreatmentMarker,
+  onPatchProceduralObject,
   onSegmentPresetChange,
   onPlacementDeviceChange,
   onToggleBifurcationChild,
@@ -1845,6 +2094,7 @@ function PropertyEditor({
   onPatchBifurcation: (id: string, patch: Partial<BifurcationNode>) => void;
   onPatchDevicePlacement: (id: string, patch: Partial<DevicePlacement>) => void;
   onPatchTreatmentMarker: (id: string, patch: Partial<TreatmentMarker>) => void;
+  onPatchProceduralObject: (id: string, patch: Partial<ProceduralObject>) => void;
   onSegmentPresetChange: (segment: VesselSegment, vesselType: string) => void;
   onPlacementDeviceChange: (placement: DevicePlacement, deviceId: string) => void;
   onToggleBifurcationChild: (node: BifurcationNode, segmentId: string) => void;
@@ -1877,6 +2127,15 @@ function PropertyEditor({
         marker={selected}
         segments={segments}
         onPatch={onPatchTreatmentMarker}
+      />
+    );
+  }
+  if (selected.type === 'proceduralObject') {
+    return (
+      <ProceduralObjectPropertyEditor
+        object={selected}
+        segments={segments}
+        onPatch={onPatchProceduralObject}
       />
     );
   }
@@ -2250,6 +2509,127 @@ function TreatmentMarkerPropertyEditor({
   );
 }
 
+function ProceduralObjectPropertyEditor({
+  object,
+  segments,
+  onPatch,
+}: {
+  object: ProceduralObject;
+  segments: VesselSegment[];
+  onPatch: (id: string, patch: Partial<ProceduralObject>) => void;
+}) {
+  return (
+    <div className="composer-selection-card">
+      <span className="composer-selection-pill procedure">{proceduralObjectLabel(object.objectType)}</span>
+
+      <PropertyGroup title="Object">
+        <label className="field-label">
+          <span>Label</span>
+          <input
+            className="text-input"
+            value={object.label}
+            onChange={(event) => onPatch(object.id, { label: event.target.value })}
+          />
+        </label>
+        <label className="field-label">
+          <span>Type</span>
+          <select
+            className="text-input"
+            value={object.objectType}
+            onChange={(event) => {
+              const nextType = event.target.value as ProceduralObjectType;
+              const option = PROCEDURAL_OBJECT_OPTIONS.find((item) => item.id === nextType);
+              const deployable = nextType === 'balloon' || nextType === 'stent' || nextType === 'stentGraft';
+              onPatch(object.id, {
+                objectType: nextType,
+                label: object.label || option?.label || proceduralObjectLabel(nextType),
+                state: deployable ? object.state : 'positioned',
+              });
+            }}
+          >
+            {PROCEDURAL_OBJECT_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </PropertyGroup>
+
+      <PropertyGroup title="Position">
+        <label className="field-label">
+          <span>Attached segment</span>
+          <select
+            className="text-input"
+            value={object.segmentId}
+            onChange={(event) => onPatch(object.id, { segmentId: event.target.value })}
+          >
+            {segments.map((segment) => (
+              <option key={segment.id} value={segment.id}>
+                {segment.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          <span>Position ({Math.round(object.t * 100)}%)</span>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={object.t}
+            onChange={(event) => onPatch(object.id, { t: Number(event.target.value) })}
+          />
+        </label>
+        <NumberField
+          label="Length mm"
+          value={object.lengthMm}
+          onChange={(value) => {
+            if (value !== '') onPatch(object.id, { lengthMm: value });
+          }}
+        />
+      </PropertyGroup>
+
+      <PropertyGroup title="Procedure state">
+        <label className="field-label">
+          <span>State</span>
+          <select
+            className="text-input"
+            value={object.state}
+            onChange={(event) => onPatch(object.id, { state: event.target.value as ProceduralObjectState })}
+          >
+            <option value="positioned">Positioned</option>
+            <option value="undeployed">Undeployed</option>
+            <option value="deployed">Deployed</option>
+          </select>
+        </label>
+        <label className="field-label">
+          <span>Snapshot</span>
+          <select
+            className="text-input"
+            value={object.snapshot}
+            onChange={(event) => onPatch(object.id, { snapshot: event.target.value as ProceduralObject['snapshot'] })}
+          >
+            <option value="pre">Pre-intervention</option>
+            <option value="positioned">Device positioned</option>
+            <option value="post">Post-deployment</option>
+          </select>
+        </label>
+      </PropertyGroup>
+
+      <PropertyGroup title="Notes">
+        <textarea
+          className="text-input textarea compact"
+          value={object.notes ?? ''}
+          onChange={(event) => onPatch(object.id, { notes: event.target.value || undefined })}
+          placeholder="Step objective, device behavior, teaching cue..."
+        />
+      </PropertyGroup>
+    </div>
+  );
+}
+
 function BifurcationPropertyEditor({
   node,
   segments,
@@ -2611,6 +2991,315 @@ function TreatmentMarkerSvg({
   );
 }
 
+function AngiogramCanvas({
+  projection,
+  segments,
+  bifurcations,
+  treatmentMarkers,
+  devicePlacements,
+  proceduralObjects,
+  selectedId,
+  onSelect,
+}: {
+  projection: AngiogramProjection;
+  segments: VesselSegment[];
+  bifurcations: BifurcationNode[];
+  treatmentMarkers: TreatmentMarker[];
+  devicePlacements: DevicePlacement[];
+  proceduralObjects: ProceduralObject[];
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
+  return (
+    <svg
+      className="vessel-composer-svg angiogram-svg"
+      viewBox={`0 0 ${WORKSPACE_WIDTH} ${WORKSPACE_HEIGHT}`}
+      role="img"
+      aria-label={`${projection.toUpperCase()} procedural angiogram`}
+      onPointerDown={() => onSelect(null)}
+    >
+      <defs>
+        <radialGradient id="angiogram-vignette" cx="50%" cy="42%" r="72%">
+          <stop offset="0%" stopColor="#1a2027" />
+          <stop offset="55%" stopColor="#080b10" />
+          <stop offset="100%" stopColor="#020305" />
+        </radialGradient>
+        <filter id="angiogram-glow" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="2.2" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+      <rect className="angiogram-bg" width={WORKSPACE_WIDTH} height={WORKSPACE_HEIGHT} />
+      <g className="angiogram-noise" pointerEvents="none">
+        {Array.from({ length: 18 }).map((_, index) => (
+          <line
+            key={index}
+            x1="0"
+            x2={WORKSPACE_WIDTH}
+            y1={40 + index * 31}
+            y2={42 + index * 31}
+          />
+        ))}
+      </g>
+      <text className="angiogram-projection-label" x="24" y="36">
+        {projection.toUpperCase()}
+      </text>
+
+      <g className="angiogram-vessels" filter="url(#angiogram-glow)">
+        {segments.map((segment) => (
+          <AngiogramSegment
+            key={segment.id}
+            segment={segment}
+            selected={selectedId === segment.id}
+            onSelect={onSelect}
+          />
+        ))}
+      </g>
+
+      <g className="angiogram-branches">
+        {bifurcations.map((node) => (
+          <circle key={node.id} cx={node.position.x} cy={node.position.y} r="4" />
+        ))}
+      </g>
+
+      {treatmentMarkers.map((marker) => {
+        const segment = segments.find((item) => item.id === marker.segmentId);
+        if (!segment) return null;
+        const point = interpolateSegment(segment, marker.t);
+        return (
+          <g
+            key={marker.id}
+            className={selectedId === marker.id ? 'angiogram-marker selected' : 'angiogram-marker'}
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              onSelect(marker.id);
+            }}
+          >
+            <line x1={point.x} y1={point.y - 16} x2={point.x} y2={point.y + 16} />
+            <text x={point.x + 8} y={point.y - 10}>{marker.label}</text>
+          </g>
+        );
+      })}
+
+      {devicePlacements.map((placement) => {
+        const segment = segments.find((item) => item.id === placement.segmentId);
+        if (!segment) return null;
+        const point = interpolateSegment(segment, placement.t);
+        return (
+          <g
+            key={placement.id}
+            className={selectedId === placement.id ? 'angiogram-catalog-device selected' : 'angiogram-catalog-device'}
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              onSelect(placement.id);
+            }}
+          >
+            <circle cx={point.x} cy={point.y} r="8" />
+            <text x={point.x + 13} y={point.y + 4}>{placement.label}</text>
+          </g>
+        );
+      })}
+
+      <g className="angiogram-procedural-layer">
+        {proceduralObjects.map((object) => {
+          const segment = segments.find((item) => item.id === object.segmentId);
+          if (!segment) return null;
+          return (
+            <AngiogramProceduralObject
+              key={object.id}
+              object={object}
+              segment={segment}
+              selected={selectedId === object.id}
+              onSelect={onSelect}
+            />
+          );
+        })}
+      </g>
+
+      {segments.length === 0 ? (
+        <g className="angiogram-empty">
+          <text x={WORKSPACE_WIDTH / 2} y={WORKSPACE_HEIGHT / 2} textAnchor="middle">
+            Add vessel anatomy in Planning mode to generate an angiogram view
+          </text>
+        </g>
+      ) : null}
+    </svg>
+  );
+}
+
+function AngiogramSegment({
+  segment,
+  selected,
+  onSelect,
+}: {
+  segment: VesselSegment;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const width = clamp((segment.proximalDiameterMm + segment.distalDiameterMm) / 2, 4, 28);
+  const className = `angiogram-segment pathology-${segment.pathologyType}${selected ? ' selected' : ''}`;
+  const mid = interpolateSegment(segment, 0.5);
+  const severity = clamp(segment.severityPercent ?? 65, 10, 95);
+  const narrowWidth = Math.max(2, width * (1 - severity / 115));
+
+  function select(event: ReactPointerEvent<SVGGElement>) {
+    event.stopPropagation();
+    onSelect(segment.id);
+  }
+
+  if (segment.pathologyType === 'occlusion') {
+    const cutoff = interpolateSegment(segment, 0.68);
+    return (
+      <g className={className} onPointerDown={select}>
+        <AngioLine segment={segment} t1={0} t2={0.68} width={width} />
+        <line className="angiogram-cutoff" x1={cutoff.x - 10} y1={cutoff.y - 10} x2={cutoff.x + 10} y2={cutoff.y + 10} />
+        <AngioLine segment={segment} t1={0.72} t2={1} width={Math.max(2, width * 0.25)} extraClass="non-opacified" />
+        <AngioSegmentLabel segment={segment} />
+      </g>
+    );
+  }
+
+  return (
+    <g className={className} onPointerDown={select}>
+      <AngioLine segment={segment} t1={0} t2={1} width={width} />
+      {segment.pathologyType === 'stenosis' ? (
+        <AngioLine segment={segment} t1={0.43} t2={0.57} width={narrowWidth} extraClass="stenosis-core" />
+      ) : null}
+      {segment.pathologyType === 'aneurysm' ? (
+        <ellipse className="angiogram-aneurysm-sac" cx={mid.x} cy={mid.y} rx={width * 1.25} ry={width * 1.85} />
+      ) : null}
+      {segment.pathologyType === 'dissection' ? (
+        <AngioLine segment={segment} t1={0.18} t2={0.82} width={2} extraClass="dissection-flap" />
+      ) : null}
+      {segment.pathologyType === 'thrombus' ? (
+        <AngioLine segment={segment} t1={0.38} t2={0.66} width={Math.max(3, width * 0.45)} extraClass="thrombus-defect" />
+      ) : null}
+      <AngioSegmentLabel segment={segment} />
+    </g>
+  );
+}
+
+function AngioLine({
+  segment,
+  t1,
+  t2,
+  width,
+  extraClass,
+}: {
+  segment: VesselSegment;
+  t1: number;
+  t2: number;
+  width: number;
+  extraClass?: string;
+}) {
+  const p1 = interpolateSegment(segment, t1);
+  const p2 = interpolateSegment(segment, t2);
+  return (
+    <line
+      className={extraClass ? `angiogram-vessel ${extraClass}` : 'angiogram-vessel'}
+      x1={p1.x}
+      y1={p1.y}
+      x2={p2.x}
+      y2={p2.y}
+      strokeWidth={width}
+    />
+  );
+}
+
+function AngioSegmentLabel({ segment }: { segment: VesselSegment }) {
+  const midpoint = interpolateSegment(segment, 0.5);
+  return (
+    <text className="angiogram-segment-label" x={midpoint.x + 10} y={midpoint.y - 12}>
+      {segment.pathologyType === 'normal' ? segment.label : `${segment.label}: ${segment.pathologyType}`}
+    </text>
+  );
+}
+
+function AngiogramProceduralObject({
+  object,
+  segment,
+  selected,
+  onSelect,
+}: {
+  object: ProceduralObject;
+  segment: VesselSegment;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const lengthFraction = clamp(object.lengthMm / Math.max(segment.lengthMm, 1), 0.04, 0.95);
+  const startT = object.objectType === 'guidewire' ? 0 : clamp(object.t - lengthFraction / 2, 0, 1);
+  const endT = object.objectType === 'guidewire' ? object.t : clamp(object.t + lengthFraction / 2, 0, 1);
+  const start = interpolateSegment(segment, startT);
+  const end = interpolateSegment(segment, endT);
+  const center = interpolateSegment(segment, object.t);
+  const angle = segmentAngleDeg(segment);
+  const selectedClass = selected ? ' selected' : '';
+  const className = `angiogram-procedural-object object-${object.objectType} state-${object.state}${selectedClass}`;
+
+  function select(event: ReactPointerEvent<SVGGElement>) {
+    event.stopPropagation();
+    onSelect(object.id);
+  }
+
+  if (object.objectType === 'balloon') {
+    return (
+      <g className={className} onPointerDown={select}>
+        <line x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
+        <ellipse
+          cx={center.x}
+          cy={center.y}
+          rx={object.state === 'deployed' ? 24 : 14}
+          ry={object.state === 'deployed' ? 8 : 5}
+          transform={`rotate(${angle} ${center.x} ${center.y})`}
+        />
+        <AngioObjectLabel object={object} point={end} />
+      </g>
+    );
+  }
+
+  if (object.objectType === 'stent' || object.objectType === 'stentGraft') {
+    return (
+      <g className={className} onPointerDown={select}>
+        <line x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
+        {Array.from({ length: 6 }).map((_, index) => {
+          const t = startT + ((endT - startT) * index) / 5;
+          const point = interpolateSegment(segment, t);
+          return (
+            <line
+              key={index}
+              className="angiogram-stent-strut"
+              x1={point.x - 5}
+              y1={point.y - 5}
+              x2={point.x + 5}
+              y2={point.y + 5}
+            />
+          );
+        })}
+        <AngioObjectLabel object={object} point={end} />
+      </g>
+    );
+  }
+
+  return (
+    <g className={className} onPointerDown={select}>
+      <line x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
+      <circle cx={end.x} cy={end.y} r={object.objectType === 'guidewire' ? 3 : 5} />
+      <AngioObjectLabel object={object} point={end} />
+    </g>
+  );
+}
+
+function AngioObjectLabel({ object, point }: { object: ProceduralObject; point: ComposerPoint }) {
+  return (
+    <text x={point.x + 10} y={point.y + 4}>
+      {object.label}
+    </text>
+  );
+}
+
 function moveSegment(
   original: VesselSegment,
   dx: number,
@@ -2731,18 +3420,38 @@ function moveTreatmentMarker(
   };
 }
 
+function moveProceduralObject(
+  original: ProceduralObject,
+  dx: number,
+  dy: number,
+  segments: VesselSegment[],
+): ProceduralObject {
+  const segment = segments.find((item) => item.id === original.segmentId);
+  const currentPoint = segment ? interpolateSegment(segment, original.t) : { x: 0, y: 0 };
+  const desired = translatePoint(currentPoint, dx, dy);
+  const projection = nearestSegmentProjection(desired, segments);
+  if (!projection) return original;
+  return {
+    ...original,
+    segmentId: projection.segment.id,
+    t: snapNormalizedT(projection.t, 0.025),
+  };
+}
+
 function findPlanningEntity(
   id: string,
   segments: VesselSegment[],
   bifurcations: BifurcationNode[],
   placements: DevicePlacement[],
   markers: TreatmentMarker[],
+  proceduralObjects: ProceduralObject[],
 ): VascularPlanningEntity | null {
   return (
     segments.find((segment) => segment.id === id) ??
     bifurcations.find((node) => node.id === id) ??
     placements.find((placement) => placement.id === id) ??
     markers.find((marker) => marker.id === id) ??
+    proceduralObjects.find((object) => object.id === id) ??
     null
   );
 }
@@ -2857,11 +3566,11 @@ function clamp(value: number, min: number, max: number): number {
 function relayoutTemplateBranches(
   template: Pick<
     VesselCompositionData,
-    'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers'
+    'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects'
   >,
 ): Pick<
   VesselCompositionData,
-  'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers'
+  'metadata' | 'segments' | 'bifurcations' | 'devicePlacements' | 'treatmentMarkers' | 'proceduralObjects'
 > {
   const updatedSegments = template.segments.map((segment) => ({ ...segment }));
 
