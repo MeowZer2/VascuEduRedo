@@ -5,6 +5,7 @@ import {
   type CaseImportPayload,
   type ValidationReport,
 } from '../../lib/admin';
+import { confirmDiscard, friendlyError } from '../../lib/productionState';
 
 interface CaseImportDialogProps {
   onClose: () => void;
@@ -45,14 +46,21 @@ export function CaseImportDialog({ onClose, onImported }: CaseImportDialogProps)
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const parsed = useMemo(() => parseImportText(text), [text]);
+  const hasDraft = text.trim().length > 0;
+
+  function requestClose() {
+    if (busy) return;
+    if (hasDraft && !confirmDiscard('Discard the pasted import payload?')) return;
+    onClose();
+  }
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') requestClose();
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [hasDraft, busy]);
 
   // Re-validate on every successful parse so the user gets live feedback.
   useEffect(() => {
@@ -67,7 +75,7 @@ export function CaseImportDialog({ onClose, onImported }: CaseImportDialogProps)
         if (!cancelled) setReport(r);
       })
       .catch((e) => {
-        if (!cancelled) setErrorMsg(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setErrorMsg(friendlyError(e, 'This import could not be validated.'));
       });
     return () => {
       cancelled = true;
@@ -82,7 +90,7 @@ export function CaseImportDialog({ onClose, onImported }: CaseImportDialogProps)
       const row = await adminImportCase(parsed.payload, { slugStrategy });
       onImported(row.id);
     } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : String(e));
+      setErrorMsg(friendlyError(e, 'The case could not be imported. Check the payload and try again.'));
     } finally {
       setBusy(false);
     }
@@ -92,7 +100,7 @@ export function CaseImportDialog({ onClose, onImported }: CaseImportDialogProps)
     parsed.kind === 'parsed' && (report?.ok ?? false) && !busy;
 
   return (
-    <div className="modal-backdrop" onClick={onClose} role="presentation">
+    <div className="modal-backdrop" onClick={requestClose} role="presentation">
       <div className="modal-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <header className="modal-header">
           <div>
@@ -103,8 +111,8 @@ export function CaseImportDialog({ onClose, onImported }: CaseImportDialogProps)
               anything is written to SQLite.
             </p>
           </div>
-          <button type="button" className="secondary-button" onClick={onClose}>
-            Close ✕
+          <button type="button" className="secondary-button" onClick={requestClose} disabled={busy}>
+            Close
           </button>
         </header>
 
@@ -132,7 +140,7 @@ export function CaseImportDialog({ onClose, onImported }: CaseImportDialogProps)
         </label>
 
         {parsed.kind === 'invalid-json' && (
-          <div className="admin-banner error">JSON parse error: {parsed.message}</div>
+          <div className="admin-banner error">The pasted JSON could not be read: {parsed.message}</div>
         )}
         {errorMsg && <div className="admin-banner error">{errorMsg}</div>}
         {parsed.kind === 'parsed' && report && (
@@ -157,7 +165,7 @@ export function CaseImportDialog({ onClose, onImported }: CaseImportDialogProps)
           >
             {busy ? 'Importing…' : 'Import to SQLite'}
           </button>
-          <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>
+          <button type="button" className="secondary-button" onClick={requestClose} disabled={busy}>
             Cancel
           </button>
         </div>

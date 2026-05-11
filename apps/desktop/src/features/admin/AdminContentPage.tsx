@@ -27,6 +27,12 @@ import {
   type BookmarkInput,
 } from '../../lib/bookmarks';
 import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
+import {
+  confirmDiscard,
+  friendlyError,
+  useConfirmNavigation,
+  useUnsavedChangesGuard,
+} from '../../lib/productionState';
 import type { CaseBookmark } from '../../types';
 import { AdminDevicesTab } from './AdminDevicesTab';
 import { CaseImportDialog } from './CaseImportDialog';
@@ -36,6 +42,8 @@ import { QuestionEditor, draftToQuestionInput, questionRowToDraft, type Question
 const AdminNrrdViewer = lazy(() =>
   import('../../components/NrrdViewer').then((module) => ({ default: module.NrrdViewer })),
 );
+
+const ADMIN_UNSAVED_MESSAGE = 'You have unsaved case or question edits. Discard them and continue?';
 
 export interface AdminContentPageProps {
   onCasesChanged: () => void;
@@ -228,6 +236,23 @@ export function AdminContentPage({
   const [scanPreviewOpen, setScanPreviewOpen] = useState(false);
   const [bookmarkDraft, setBookmarkDraft] = useState({ title: '', note: '', tags: '' });
 
+  const questionDirty = useMemo(() => {
+    if (!questionDraft) return false;
+    if (!questionDraft.id) return true;
+    const original = questions.find((q) => q.id === questionDraft.id);
+    if (!original) return true;
+    return JSON.stringify(questionDraft) !== JSON.stringify(questionRowToDraft(original));
+  }, [questionDraft, questions]);
+  const hasUnsavedEdits = caseDirty || questionDirty;
+  const confirmAppNavigation = useConfirmNavigation();
+
+  useUnsavedChangesGuard('admin-content', hasUnsavedEdits, ADMIN_UNSAVED_MESSAGE);
+
+  const confirmEditorDiscard = useCallback(() => {
+    if (!hasUnsavedEdits) return true;
+    return confirmDiscard(ADMIN_UNSAVED_MESSAGE);
+  }, [hasUnsavedEdits]);
+
   const flashStatus = useCallback((msg: string) => {
     setStatusMsg(msg);
     setErrorMsg(null);
@@ -245,7 +270,7 @@ export function AdminContentPage({
       setCases(rows);
       return rows;
     } catch (e) {
-      flashError(`Failed to load cases: ${e instanceof Error ? e.message : String(e)}`);
+      flashError(`Cases could not be loaded. ${friendlyError(e, 'Please reopen the Admin page and try again.')}`);
       return [] as AdminCaseRow[];
     }
   }, [flashError]);
@@ -300,7 +325,7 @@ export function AdminContentPage({
         });
         await refreshHealth(caseId);
       } catch (e) {
-        flashError(`Failed to load case: ${e instanceof Error ? e.message : String(e)}`);
+        flashError(`Case details could not be loaded. ${friendlyError(e, 'Please choose another case or try again.')}`);
       }
     },
     [flashError, refreshHealth],
@@ -343,6 +368,7 @@ export function AdminContentPage({
   }, [available, creatingNewCase, selectedCaseId]);
 
   function startNewCase() {
+    if (!confirmEditorDiscard()) return;
     setCreatingNewCase(true);
     setSelectedCaseId(null);
     setOriginalCase(null);
@@ -358,6 +384,8 @@ export function AdminContentPage({
   }
 
   function selectCase(id: string) {
+    if (id === selectedCaseId && !creatingNewCase) return;
+    if (!confirmEditorDiscard()) return;
     setCreatingNewCase(false);
     setSelectedCaseId(id);
   }
@@ -446,6 +474,7 @@ export function AdminContentPage({
   }
 
   function handleAddQuestion() {
+    if (questionDirty && !confirmDiscard('Discard the current question edits and add a new question?')) return;
     if (!selectedCaseId) {
       flashError('Save the case first before adding questions.');
       return;
@@ -615,6 +644,8 @@ export function AdminContentPage({
   }
 
   function selectQuestion(id: string) {
+    if (id === selectedQuestionId) return;
+    if (questionDirty && !confirmDiscard('Discard the current question edits and open another question?')) return;
     const q = questions.find((row) => row.id === id);
     if (!q) return;
     setSelectedQuestionId(id);
@@ -638,7 +669,7 @@ export function AdminContentPage({
       setQuestionDraft(questionRowToDraft(saved));
       onCasesChanged();
     } catch (e) {
-      flashError(`Question save failed: ${e instanceof Error ? e.message : String(e)}`);
+      flashError(`Question could not be saved. ${friendlyError(e, 'Review the question fields and try again.')}`);
     } finally {
       setBusy(false);
     }
@@ -722,14 +753,22 @@ export function AdminContentPage({
         <button
           type="button"
           className={section === 'cases' ? 'plane-tab active' : 'plane-tab'}
-          onClick={() => setSection('cases')}
+          onClick={() => {
+            if (section === 'cases') return;
+            if (!confirmAppNavigation()) return;
+            setSection('cases');
+          }}
         >
           Cases & questions
         </button>
         <button
           type="button"
           className={section === 'devices' ? 'plane-tab active' : 'plane-tab'}
-          onClick={() => setSection('devices')}
+          onClick={() => {
+            if (section === 'devices') return;
+            if (!confirmEditorDiscard()) return;
+            setSection('devices');
+          }}
         >
           Devices
         </button>
@@ -752,7 +791,10 @@ export function AdminContentPage({
               <button
                 type="button"
                 className="secondary-button small"
-                onClick={() => setShowImport(true)}
+                onClick={() => {
+                  if (!confirmEditorDiscard()) return;
+                  setShowImport(true);
+                }}
                 disabled={busy}
               >
                 Import…
@@ -1036,6 +1078,7 @@ export function AdminContentPage({
                       type="button"
                       className="secondary-button"
                       onClick={() => {
+                        if (caseDirty && !confirmDiscard('Discard the new case draft?')) return;
                         setCreatingNewCase(false);
                         if (cases[0]) setSelectedCaseId(cases[0].id);
                       }}
@@ -1310,6 +1353,7 @@ export function AdminContentPage({
                       void saveQuestion(result.input);
                     }}
                     onCancel={() => {
+                      if (questionDirty && !confirmDiscard('Discard the current question edits?')) return;
                       if (questionDraft.id) {
                         const original = questions.find((q) => q.id === questionDraft.id);
                         if (original) setQuestionDraft(questionRowToDraft(original));

@@ -9,6 +9,7 @@ import {
   type Device,
   type DeviceInput,
 } from '../../lib/devices';
+import { confirmDiscard, friendlyError, useUnsavedChangesGuard } from '../../lib/productionState';
 
 interface DeviceDraft {
   id: string | null;
@@ -59,15 +60,23 @@ function draftToInput(draft: DeviceDraft): { ok: true; input: DeviceInput } | { 
   if (!draft.manufacturer.trim()) errors.push('Manufacturer is required.');
   if (!draft.category.trim()) errors.push('Category is required.');
   if (!draft.description.trim()) errors.push('Description is required.');
-  if (errors.length > 0) return { ok: false, errors };
 
   const properties: Record<string, string> = {};
+  const seenPropertyKeys = new Set<string>();
   for (let i = 0; i < draft.propertyKeys.length; i += 1) {
     const key = draft.propertyKeys[i].trim();
     const value = (draft.propertyValues[i] ?? '').trim();
     if (!key) continue;
+    const normalizedKey = key.toLowerCase();
+    if (seenPropertyKeys.has(normalizedKey)) {
+      errors.push(`Property "${key}" is listed more than once.`);
+      continue;
+    }
+    seenPropertyKeys.add(normalizedKey);
+    if (!value) errors.push(`Property "${key}" needs a value.`);
     properties[key] = value;
   }
+  if (errors.length > 0) return { ok: false, errors };
 
   return {
     ok: true,
@@ -94,8 +103,22 @@ export function AdminDevicesTab() {
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<DeviceDraft>(EMPTY_DRAFT);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const draftDirty = useMemo(() => {
+    if (creating) return JSON.stringify(draft) !== JSON.stringify(EMPTY_DRAFT);
+    if (!draft.id) return false;
+    const original = devices.find((device) => device.id === draft.id);
+    return original ? JSON.stringify(draft) !== JSON.stringify(deviceToDraft(original)) : false;
+  }, [creating, devices, draft]);
+
+  useUnsavedChangesGuard(
+    'admin-devices',
+    draftDirty,
+    'You have unsaved device edits. Discard them and continue?',
+  );
 
   const flashStatus = useCallback((msg: string) => {
     setStatusMsg(msg);
@@ -108,11 +131,21 @@ export function AdminDevicesTab() {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!available) return;
-    const [devs, cats] = await Promise.all([listDevices(), listDeviceCategories()]);
-    setDevices(devs);
-    setCategories(cats);
-  }, [available]);
+    if (!available) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [devs, cats] = await Promise.all([listDevices(), listDeviceCategories()]);
+      setDevices(devs);
+      setCategories(cats);
+    } catch (e) {
+      flashError(`Device catalog could not be loaded. ${friendlyError(e, 'Please reopen Admin and try again.')}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [available, flashError]);
 
   useEffect(() => {
     void refresh();
@@ -139,12 +172,15 @@ export function AdminDevicesTab() {
   }, [devices, search, categoryFilter]);
 
   function startNew() {
+    if (draftDirty && !confirmDiscard('Discard the current device edits and create a new device?')) return;
     setCreating(true);
     setSelectedId(null);
     setDraft(EMPTY_DRAFT);
   }
 
   function selectDevice(id: string) {
+    if (!creating && id === selectedId) return;
+    if (draftDirty && !confirmDiscard('Discard the current device edits and open another device?')) return;
     setCreating(false);
     setSelectedId(id);
   }
@@ -169,7 +205,7 @@ export function AdminDevicesTab() {
       setSelectedId(saved.id);
       await refresh();
     } catch (e) {
-      flashError(`Save failed: ${e instanceof Error ? e.message : String(e)}`);
+      flashError(`Device could not be saved. ${friendlyError(e, 'Review the device fields and try again.')}`);
     } finally {
       setBusy(false);
     }
@@ -186,7 +222,7 @@ export function AdminDevicesTab() {
       setDraft(EMPTY_DRAFT);
       await refresh();
     } catch (e) {
-      flashError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+      flashError(`Device could not be deleted. ${friendlyError(e, 'Please try again.')}`);
     } finally {
       setBusy(false);
     }
@@ -304,7 +340,9 @@ export function AdminDevicesTab() {
               </li>
             ))}
             {filtered.length === 0 && !creating && (
-              <li className="admin-case-item muted">No devices match.</li>
+              <li className="admin-case-item muted">
+                {loading ? 'Loading devices...' : 'No devices match.'}
+              </li>
             )}
           </ul>
         </aside>
@@ -445,6 +483,7 @@ export function AdminDevicesTab() {
                     type="button"
                     className="secondary-button"
                     onClick={() => {
+                      if (draftDirty && !confirmDiscard('Discard the new device draft?')) return;
                       setCreating(false);
                       setDraft(EMPTY_DRAFT);
                     }}

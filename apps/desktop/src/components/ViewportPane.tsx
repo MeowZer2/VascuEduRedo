@@ -6,6 +6,7 @@ import {
   type VolumeInfo,
   type VolumePlane,
 } from '../lib/volume';
+import { friendlyError } from '../lib/productionState';
 import {
   PLANE_OPTIONS,
   MAX_WINDOW_LEVEL,
@@ -433,7 +434,7 @@ export function ViewportPane({
         if (!mountedRef.current) return;
         const latest = schedulerRef.current.desired;
         if (latest?.key === request.key) {
-          setError(caught instanceof Error ? caught.message : String(caught));
+          setError(friendlyError(caught, 'This slice could not be displayed. Try another slice or reload the study.'));
         }
       })
       .finally(() => {

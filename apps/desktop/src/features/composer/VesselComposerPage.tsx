@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { listDevices, type Device } from '../../lib/devices';
+import { friendlyError, useUnsavedChangesGuard } from '../../lib/productionState';
 import {
   ANATOMY_TEMPLATES,
   PATHOLOGY_OPTIONS,
@@ -205,6 +206,12 @@ export function VesselComposerPage({
   const canUndo = undoStackRef.current.length > 0;
   const canRedo = redoStackRef.current.length > 0;
 
+  useUnsavedChangesGuard(
+    'vessel-composer',
+    isDirty,
+    'You have unsaved vessel plan changes. Discard them and continue?',
+  );
+
   useEffect(() => {
     stateRef.current = {
       segments,
@@ -258,22 +265,16 @@ export function VesselComposerPage({
   ]);
 
   useEffect(() => {
-    function handleBeforeUnload(event: BeforeUnloadEvent) {
-      if (!isDirty) return;
-      event.preventDefault();
-      event.returnValue = '';
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isDirty]);
-
-  useEffect(() => {
     let cancelled = false;
-    void listDevices().then((rows) => {
-      if (cancelled) return;
-      setDevices(rows);
-      setSelectedDeviceId((current) => current || rows[0]?.id || '');
-    });
+    void listDevices()
+      .then((rows) => {
+        if (cancelled) return;
+        setDevices(rows);
+        setSelectedDeviceId((current) => current || rows[0]?.id || '');
+      })
+      .catch((e) => {
+        if (!cancelled) setError(`Device catalog could not be loaded. ${friendlyError(e, 'Device placement will be unavailable until the catalog loads.')}`);
+      });
     return () => {
       cancelled = true;
     };

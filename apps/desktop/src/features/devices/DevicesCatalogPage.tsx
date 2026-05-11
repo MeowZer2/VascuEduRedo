@@ -5,12 +5,14 @@ import {
   listDevices,
   type Device,
 } from '../../lib/devices';
+import { friendlyError } from '../../lib/productionState';
 
 export function DevicesCatalogPage() {
   const available = isDeviceCatalogAvailable();
   const [devices, setDevices] = useState<Device[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   const [manufacturerFilter, setManufacturerFilter] = useState<string>('');
@@ -23,12 +25,19 @@ export function DevicesCatalogPage() {
     }
     let cancelled = false;
     setLoading(true);
+    setErrorMsg(null);
     Promise.all([listDevices(), listDeviceCategories()])
       .then(([devs, cats]) => {
         if (cancelled) return;
         setDevices(devs);
         setCategories(cats);
         if (devs[0]) setSelectedId(devs[0].id);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErrorMsg(`Device catalog could not be loaded. ${friendlyError(e, 'Please try again from the desktop app.')}`);
+        setDevices([]);
+        setCategories([]);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -119,10 +128,14 @@ export function DevicesCatalogPage() {
         </span>
       </section>
 
+      {errorMsg ? <div className="admin-banner error">{errorMsg}</div> : null}
+
       <section className="devices-layout">
         <aside className="devices-list-panel">
-          {filtered.length === 0 ? (
-            <p className="muted">No devices match the filters.</p>
+          {loading ? (
+            <p className="muted">Loading device catalog...</p>
+          ) : filtered.length === 0 ? (
+            <p className="muted">{errorMsg ? 'Catalog is unavailable right now.' : 'No devices match the filters.'}</p>
           ) : (
             <ul className="devices-list">
               {filtered.map((device) => (

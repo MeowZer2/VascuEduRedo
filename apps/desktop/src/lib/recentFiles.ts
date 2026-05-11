@@ -30,7 +30,10 @@ export function loadRecentFiles(): RecentVolumeEntry[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isRecentVolumeEntry).slice(0, MAX_RECENT);
+    return parsed
+      .filter(isRecentVolumeEntry)
+      .sort((a, b) => b.openedAt - a.openedAt)
+      .slice(0, MAX_RECENT);
   } catch {
     return [];
   }

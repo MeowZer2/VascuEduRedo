@@ -1,6 +1,7 @@
 export function readJson<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
   try {
-    const raw = localStorage.getItem(key);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return fallback;
     return JSON.parse(raw) as T;
   } catch {
@@ -9,5 +10,10 @@ export function readJson<T>(key: string, fallback: T): T {
 }
 
 export function writeJson<T>(key: string, value: T): void {
-  localStorage.setItem(key, JSON.stringify(value, null, 2));
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value, null, 2));
+  } catch {
+    // Preference persistence is best effort.
+  }
 }

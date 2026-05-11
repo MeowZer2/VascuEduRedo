@@ -12,6 +12,7 @@ import { SettingsPage } from './features/settings/SettingsPage';
 import { TrainingStartPage, type TrainingFilters } from './features/training/TrainingStartPage';
 import { TrainingWorkspace } from './features/training/TrainingWorkspace';
 import { loadCases } from './lib/content';
+import { UnsavedChangesProvider } from './lib/productionState';
 import type { VascCase } from './types';
 
 export type Screen =
@@ -28,6 +29,7 @@ export type Screen =
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
+  const [confirmNavigation, setConfirmNavigation] = useState<() => boolean>(() => () => true);
   // Start with sample data so the first paint isn't blank, then swap to SQLite-backed cases
   // once the backend responds. Browser mode keeps the sample data.
   const [cases, setCases] = useState<VascCase[]>(sampleCases);
@@ -59,11 +61,13 @@ export default function App() {
   }, [refreshCases]);
 
   function openCase(caseId: string) {
+    if (!confirmNavigation()) return;
     setSelectedCaseId(caseId);
     setScreen('case-detail');
   }
 
   function startCase(caseId: string) {
+    if (!confirmNavigation()) return;
     setSelectedCaseId(caseId);
     setScreen('training-session');
   }
@@ -81,12 +85,14 @@ export default function App() {
   }
 
   function openVesselComposer(caseId?: string | null) {
+    if (!confirmNavigation()) return;
     setComposerCaseId(caseId ?? null);
     if (caseId) setSelectedCaseId(caseId);
     setScreen('vessel-composer');
   }
 
   function handleNavigate(nextScreen: Screen) {
+    if (nextScreen !== screen && !confirmNavigation()) return;
     if (nextScreen === 'vessel-composer') setComposerCaseId(null);
     setScreen(nextScreen);
   }
@@ -101,64 +107,66 @@ export default function App() {
   }
 
   return (
-    <AppShell activeScreen={screen} onNavigate={handleNavigate}>
-      {screen === 'home' && (
-        <HomePage
-          cases={cases}
-          onStart={() => setScreen('training')}
-          onOpenCases={() => setScreen('cases')}
-        />
-      )}
-      {screen === 'cases' && <CaseLibraryPage cases={cases} onOpenCase={openCase} onStartCase={startCase} />}
-      {screen === 'case-detail' && selectedCase && (
-        <CaseDetailPage
-          vascCase={selectedCase}
-          onBack={() => setScreen('cases')}
-          onStart={() => startCase(selectedCase.id)}
-          onOpenComposer={() => openVesselComposer(selectedCase.id)}
-        />
-      )}
-      {screen === 'training' && (
-        <TrainingStartPage
-          cases={cases}
-          onStart={startGuidedTraining}
-          onBrowseCases={() => setScreen('cases')}
-        />
-      )}
-      {screen === 'training-session' && selectedCase && (
-        <TrainingWorkspace
-          vascCase={selectedCase}
-          onFinish={() => {
-            setProgressRefreshKey((k) => k + 1);
-            setScreen('progress');
-          }}
-          onChooseCase={() => setScreen('training')}
-        />
-      )}
-      {screen === 'devices' && <DevicesCatalogPage />}
-      {screen === 'vessel-composer' && (
-        <VesselComposerPage
-          cases={cases}
-          initialCaseId={composerCaseId}
-          onOpenCase={(caseId) => {
-            setSelectedCaseId(caseId);
-            setScreen('case-detail');
-          }}
-        />
-      )}
-      {screen === 'progress' && <ProgressPage refreshKey={progressRefreshKey} />}
-      {screen === 'admin' && (
-        <AdminContentPage
-          onCasesChanged={() => {
-            void refreshCases();
-          }}
-          onOpenInTraining={(caseId) => {
-            void openCaseInTraining(caseId);
-          }}
-          onOpenVesselComposer={(caseId) => openVesselComposer(caseId)}
-        />
-      )}
-      {screen === 'settings' && <SettingsPage />}
-    </AppShell>
+    <UnsavedChangesProvider onReady={(nextConfirmNavigation) => setConfirmNavigation(() => nextConfirmNavigation)}>
+      <AppShell activeScreen={screen} onNavigate={handleNavigate}>
+        {screen === 'home' && (
+          <HomePage
+            cases={cases}
+            onStart={() => setScreen('training')}
+            onOpenCases={() => setScreen('cases')}
+          />
+        )}
+        {screen === 'cases' && <CaseLibraryPage cases={cases} onOpenCase={openCase} onStartCase={startCase} />}
+        {screen === 'case-detail' && selectedCase && (
+          <CaseDetailPage
+            vascCase={selectedCase}
+            onBack={() => setScreen('cases')}
+            onStart={() => startCase(selectedCase.id)}
+            onOpenComposer={() => openVesselComposer(selectedCase.id)}
+          />
+        )}
+        {screen === 'training' && (
+          <TrainingStartPage
+            cases={cases}
+            onStart={startGuidedTraining}
+            onBrowseCases={() => setScreen('cases')}
+          />
+        )}
+        {screen === 'training-session' && selectedCase && (
+          <TrainingWorkspace
+            vascCase={selectedCase}
+            onFinish={() => {
+              setProgressRefreshKey((k) => k + 1);
+              setScreen('progress');
+            }}
+            onChooseCase={() => setScreen('training')}
+          />
+        )}
+        {screen === 'devices' && <DevicesCatalogPage />}
+        {screen === 'vessel-composer' && (
+          <VesselComposerPage
+            cases={cases}
+            initialCaseId={composerCaseId}
+            onOpenCase={(caseId) => {
+              setSelectedCaseId(caseId);
+              setScreen('case-detail');
+            }}
+          />
+        )}
+        {screen === 'progress' && <ProgressPage refreshKey={progressRefreshKey} />}
+        {screen === 'admin' && (
+          <AdminContentPage
+            onCasesChanged={() => {
+              void refreshCases();
+            }}
+            onOpenInTraining={(caseId) => {
+              void openCaseInTraining(caseId);
+            }}
+            onOpenVesselComposer={(caseId) => openVesselComposer(caseId)}
+          />
+        )}
+        {screen === 'settings' && <SettingsPage />}
+      </AppShell>
+    </UnsavedChangesProvider>
   );
 }

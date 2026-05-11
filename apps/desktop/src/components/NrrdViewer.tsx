@@ -28,6 +28,7 @@ import {
   saveViewerLayout,
   saveViewerToolMode,
 } from '../lib/viewerSettings';
+import { friendlyError } from '../lib/productionState';
 import { ViewportPane, type PaneSnapshot } from './ViewportPane';
 import {
   DEFAULT_PANE_PLANES,
@@ -292,7 +293,7 @@ export function NrrdViewer({
       .catch((caught: unknown) => {
         if (cancelled) return;
         setStatus('error');
-        setError(caught instanceof Error ? caught.message : String(caught));
+        setError(friendlyError(caught, 'The selected imaging study could not be opened.'));
       });
 
     return () => {
@@ -766,7 +767,7 @@ export function NrrdViewer({
         setDicomDiscovery(null);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(friendlyError(caught, 'The selected scan could not be opened.'));
     }
   }
 
@@ -795,7 +796,7 @@ export function NrrdViewer({
       }
     } catch (caught) {
       setDicomImportStatus('error');
-      setDicomImportError(caught instanceof Error ? caught.message : String(caught));
+      setDicomImportError(friendlyError(caught, 'The selected DICOM folder could not be scanned.'));
     }
   }
 
