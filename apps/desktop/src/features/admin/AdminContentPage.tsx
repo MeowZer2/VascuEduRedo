@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { NrrdViewer, type ViewerBookmarkState } from '../../components/NrrdViewer';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import type { ViewerBookmarkState } from '../../components/NrrdViewer';
 import {
   adminCreateCase,
   adminCreateQuestion,
@@ -32,6 +32,10 @@ import { AdminDevicesTab } from './AdminDevicesTab';
 import { CaseImportDialog } from './CaseImportDialog';
 import { ListEditor } from './ListEditor';
 import { QuestionEditor, draftToQuestionInput, questionRowToDraft, type QuestionDraft } from './QuestionEditor';
+
+const AdminNrrdViewer = lazy(() =>
+  import('../../components/NrrdViewer').then((module) => ({ default: module.NrrdViewer })),
+);
 
 export interface AdminContentPageProps {
   onCasesChanged: () => void;
@@ -221,6 +225,7 @@ export function AdminContentPage({
   const [selectedBookmarkId, setSelectedBookmarkId] = useState<string | null>(null);
   const [viewerBookmarkState, setViewerBookmarkState] = useState<ViewerBookmarkState | null>(null);
   const [jumpBookmark, setJumpBookmark] = useState<CaseBookmark | null>(null);
+  const [scanPreviewOpen, setScanPreviewOpen] = useState(false);
   const [bookmarkDraft, setBookmarkDraft] = useState({ title: '', note: '', tags: '' });
 
   const flashStatus = useCallback((msg: string) => {
@@ -312,6 +317,12 @@ export function AdminContentPage({
     if (!available || creatingNewCase || !selectedCaseId) return;
     void loadCaseDetail(selectedCaseId);
   }, [available, creatingNewCase, selectedCaseId, loadCaseDetail]);
+
+  useEffect(() => {
+    setScanPreviewOpen(false);
+    setViewerBookmarkState(null);
+    setJumpBookmark(null);
+  }, [creatingNewCase, selectedCaseId]);
 
   useEffect(() => {
     if (!available || !selectedCaseId || creatingNewCase) {
@@ -473,7 +484,20 @@ export function AdminContentPage({
       note: bookmark.note,
       tags: (bookmark.tags ?? []).join(', '),
     });
-    setJumpBookmark({ ...bookmark });
+    if (scanPreviewOpen) {
+      setJumpBookmark({ ...bookmark });
+    }
+  }
+
+  function openScanPreview(bookmark?: CaseBookmark | null) {
+    setScanPreviewOpen(true);
+    setJumpBookmark(bookmark ? { ...bookmark } : null);
+  }
+
+  function hideScanPreview() {
+    setScanPreviewOpen(false);
+    setViewerBookmarkState(null);
+    setJumpBookmark(null);
   }
 
   async function saveBookmarkFromViewer() {
@@ -1035,24 +1059,69 @@ export function AdminContentPage({
             <section className="content-card admin-bookmarks-panel">
               <header className="admin-panel-header">
                 <h3>Key images</h3>
-                <button
-                  type="button"
-                  className="secondary-button small"
-                  onClick={() => void saveBookmarkFromViewer()}
-                  disabled={busy || !viewerBookmarkState}
-                >
-                  Save current view
-                </button>
+                <div className="admin-panel-actions">
+                  {scanPreviewOpen ? (
+                    <button
+                      type="button"
+                      className="secondary-button small"
+                      onClick={hideScanPreview}
+                    >
+                      Hide preview
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="secondary-button small"
+                      onClick={() => openScanPreview(selectedBookmark)}
+                    >
+                      Open scan preview
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="secondary-button small"
+                    onClick={() => void saveBookmarkFromViewer()}
+                    disabled={busy || !viewerBookmarkState}
+                  >
+                    Save current view
+                  </button>
+                </div>
               </header>
               <div className="admin-bookmarks-grid">
                 <div className="admin-bookmark-viewer">
-                  <NrrdViewer
-                    volumePath={caseDraft.volumePath || 'sample'}
-                    description={caseDraft.summary || 'Author key images from the current viewer state.'}
-                    onViewerStateChange={setViewerBookmarkState}
-                    jumpToBookmark={jumpBookmark}
-                    activeBookmark={selectedBookmark}
-                  />
+                  {scanPreviewOpen ? (
+                    <Suspense
+                      fallback={
+                        <div className="admin-scan-preview-placeholder" role="status" aria-live="polite">
+                          <strong>Preparing scan preview...</strong>
+                          <span>The imaging workspace will load here.</span>
+                        </div>
+                      }
+                    >
+                      <AdminNrrdViewer
+                        volumePath={caseDraft.volumePath || 'sample'}
+                        description={caseDraft.summary || 'Author key images from the current viewer state.'}
+                        onViewerStateChange={setViewerBookmarkState}
+                        jumpToBookmark={jumpBookmark}
+                        activeBookmark={selectedBookmark}
+                      />
+                    </Suspense>
+                  ) : (
+                    <div className="admin-scan-preview-placeholder">
+                      <strong>Scan preview is available on demand.</strong>
+                      <span>
+                        Key image details are ready below. Open the preview when you want to position the MPR viewer
+                        or save the current view.
+                      </span>
+                      <button
+                        type="button"
+                        className="primary-button small"
+                        onClick={() => openScanPreview(selectedBookmark)}
+                      >
+                        Load key image viewer
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="admin-bookmark-editor">
                   <div className="key-finding-list">
@@ -1070,6 +1139,7 @@ export function AdminContentPage({
                           <span>
                             {bookmark.plane} slice {bookmark.sliceIndex + 1}
                           </span>
+                          {bookmark.note ? <span>{bookmark.note}</span> : null}
                         </button>
                         <div className="admin-question-row-actions">
                           <button

@@ -53,7 +53,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .primary-button, .secondary-button, .choice-button { border: 0; border-radius: 13px; padding: 10px 14px; font-weight: 750; }
 .primary-button { background: linear-gradient(135deg, var(--accent), var(--accent-strong)); color: white; }
 .secondary-button { background: rgba(255,255,255,0.07); color: var(--text); border: 1px solid var(--border); }
-.secondary-button.small { padding: 7px 10px; font-size: 0.86rem; }
+.primary-button.small, .secondary-button.small { padding: 7px 10px; font-size: 0.86rem; }
 .choice-button { background: rgba(255,255,255,0.06); border: 1px solid var(--border); color: var(--text); }
 .choice-button.selected { background: rgba(120,166,255,0.2); border-color: rgba(120,166,255,0.5); }
 
@@ -400,6 +400,9 @@ button.key-finding-row, .key-finding-row button { cursor: pointer; }
 .key-finding-row span { color: var(--muted); font-size: 0.8rem; }
 .admin-bookmarks-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.6fr); gap: 14px; align-items: start; }
 .admin-bookmark-viewer .viewer-card { box-shadow: none; }
+.admin-scan-preview-placeholder { min-height: 260px; padding: 18px; border: 1px dashed rgba(120,166,255,0.42); border-radius: 12px; background: rgba(0,0,0,0.16); display: grid; align-content: center; justify-items: start; gap: 10px; color: var(--text); }
+.admin-scan-preview-placeholder strong { font-size: 0.98rem; }
+.admin-scan-preview-placeholder span { max-width: 56ch; color: var(--muted); font-size: 0.88rem; line-height: 1.45; }
 .admin-bookmark-editor { display: grid; gap: 10px; }
 .admin-key-finding-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .admin-key-finding-row > button { background: transparent; border: 0; color: inherit; text-align: left; padding: 0; display: grid; gap: 3px; }
