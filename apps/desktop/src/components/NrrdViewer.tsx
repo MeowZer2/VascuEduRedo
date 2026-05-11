@@ -963,9 +963,7 @@ export function NrrdViewer({
                     title={entry.path}
                   >
                     <strong>{entry.name}</strong>
-                    <span className="muted small">
-                      {entry.kind === 'dicom' ? 'DICOM folder' : 'NRRD'} · {entry.path}
-                    </span>
+                    <span className="muted small">Study file · {entry.path}</span>
                   </button>
                   <button
                     type="button"
@@ -1166,15 +1164,15 @@ export function NrrdViewer({
           >
             {windowControlsOpen ? 'Hide fine tuning' : 'Fine tune contrast'}
           </button>
-          <div className="sync-tabs" role="group" aria-label="Display convention">
+          <div className="sync-tabs" role="group" aria-label="Display orientation preset">
             <button
               type="button"
               className={displayConvention === 'pacs' ? 'tool-tab active' : 'tool-tab'}
               disabled={controlsDisabled}
               onClick={() => setDisplayConvention('pacs')}
-              title="Standard radiology display"
+              title="Default radiology display"
             >
-              Standard
+              Default view
             </button>
             <button
               type="button"
@@ -1183,7 +1181,7 @@ export function NrrdViewer({
               onClick={() => setDisplayConvention('canonical')}
               title="Coordinate display for troubleshooting"
             >
-              Coordinates
+              Coordinate view
             </button>
           </div>
           <div className="viewer-source-row">
@@ -1287,26 +1285,6 @@ export function NrrdViewer({
             </button>
           </div>
         </details>
-        <div className="sync-tabs viewer-display-convention-tools" role="group" aria-label="Display convention">
-          <button
-            type="button"
-            className={displayConvention === 'pacs' ? 'tool-tab active' : 'tool-tab'}
-            disabled={controlsDisabled}
-            onClick={() => setDisplayConvention('pacs')}
-            title="Standard radiology display"
-          >
-            Standard
-          </button>
-          <button
-            type="button"
-            className={displayConvention === 'canonical' ? 'tool-tab active' : 'tool-tab'}
-            disabled={controlsDisabled}
-            onClick={() => setDisplayConvention('canonical')}
-            title="Technical coordinate display"
-          >
-            Technical
-          </button>
-        </div>
         <div className="sync-tabs" role="group" aria-label="Sync toggles">
           <button
             type="button"
@@ -1414,14 +1392,13 @@ export function NrrdViewer({
           </div>
           <div>
             <dt>Display mode</dt>
-            <dd>{displayConvention === 'pacs' ? 'Standard radiology' : 'Technical coordinates'}</dd>
+            <dd>{displayConvention === 'pacs' ? 'Default view' : 'Coordinate view'}</dd>
           </div>
           <div>
             <dt>Orientation</dt>
             <dd>
               {orientationStatus === 'trusted' ? 'Ready' : 'Needs review'}
-              {manualOverrideActive ? ' · manual override active' : ''}
-              {volume.orientation?.space ? ` · NRRD space: ${volume.orientation.space}` : ''}
+              {manualOverrideActive ? ' · manual adjustment active' : ''}
             </dd>
           </div>
           {orientationWarnings.length > 0 ? (
@@ -1511,6 +1488,7 @@ export function NrrdViewer({
                 onSliceChange={(slice) => handleSliceChange(idx, slice)}
                 onZoomChange={(zoom) => handleZoomChange(idx, zoom)}
                 onPanChange={(pan) => handlePanChange(idx, pan)}
+                onWLChange={(ww, wl) => handleWLChange(idx, ww, wl)}
                 onCrosshairFromPane={(point) => handleCrosshairFromPane(idx, point)}
                 onPendingPointsChange={(points) => handlePendingPointsChange(idx, points)}
                 onAddMeasurement={(m) => handleAddMeasurement(idx, m)}

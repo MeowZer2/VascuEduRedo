@@ -211,6 +211,9 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .nrrd-canvas-wrap.panning:active { cursor: grabbing; }
 .nrrd-canvas-wrap.scrolling { cursor: ns-resize; }
 .nrrd-canvas-wrap.is-scrubbing { cursor: grabbing; }
+.nrrd-canvas-wrap.pacs-drag-window { cursor: ew-resize; }
+.nrrd-canvas-wrap.pacs-drag-zoom { cursor: zoom-in; }
+.nrrd-canvas-wrap.pacs-drag-pan { cursor: grabbing; }
 
 /* Slice-pending indicator: a small pulsing dot in the upper-right corner of the
    pane that appears whenever a slice request is in flight. The previous slice

@@ -8,6 +8,12 @@ import {
 } from '../lib/volume';
 import {
   PLANE_OPTIONS,
+  MAX_WINDOW_LEVEL,
+  MAX_WINDOW_WIDTH,
+  MAX_ZOOM,
+  MIN_WINDOW_LEVEL,
+  MIN_WINDOW_WIDTH,
+  MIN_ZOOM,
   ZOOM_STEP,
   angleDeg,
   clamp,
@@ -52,8 +58,23 @@ interface ScrollDragState {
   locked: boolean;
 }
 
+type PacsDragMode = 'window' | 'zoom' | 'pan';
+
+interface PacsDragState {
+  pointerId: number;
+  mode: PacsDragMode;
+  start: DisplayPoint;
+  wwStart: number;
+  wlStart: number;
+  zoomStart: number;
+  panStart: DisplayPoint;
+}
+
 const SCROLL_DRAG_PX_PER_SLICE = 8;
 const SCROLL_DRAG_THRESHOLD_PX = 4;
+const WINDOW_WIDTH_PX_SENSITIVITY = 4;
+const WINDOW_LEVEL_PX_SENSITIVITY = 2;
+const MIDDLE_ZOOM_PX_SENSITIVITY = 160;
 const SLICE_CACHE_LIMIT = 24;
 const SLICE_SCHEDULER_DEBUG_FLAG = 'vascuedu.sliceSchedulerDebug';
 
@@ -128,6 +149,7 @@ export interface ViewportPaneProps {
   onSliceChange: (slice: number) => void;
   onZoomChange: (zoom: number) => void;
   onPanChange: (pan: DisplayPoint) => void;
+  onWLChange: (ww: number, wl: number) => void;
   onCrosshairFromPane: (imagePoint: ImagePoint) => void;
   onPendingPointsChange: (points: ImagePoint[]) => void;
   onAddMeasurement: (measurement: Measurement) => void;
@@ -206,6 +228,7 @@ export function ViewportPane({
   onSliceChange,
   onZoomChange,
   onPanChange,
+  onWLChange,
   onCrosshairFromPane,
   onPendingPointsChange,
   onAddMeasurement,
@@ -220,6 +243,7 @@ export function ViewportPane({
   const [panelSize, setPanelSize] = useState<ImageSize>({ width: 0, height: 0 });
   const [panDrag, setPanDrag] = useState<PanDragState | null>(null);
   const [scrollDrag, setScrollDrag] = useState<ScrollDragState | null>(null);
+  const [pacsDrag, setPacsDrag] = useState<PacsDragState | null>(null);
   const [hoverPoint, setHoverPoint] = useState<ImagePoint | null>(null);
   const [huReadout, setHuReadout] = useState<HuReadout | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -302,6 +326,7 @@ export function ViewportPane({
     setHoverPoint(null);
     setHuReadout(null);
     setPanDrag(null);
+    setPacsDrag(null);
   }, [pane.plane, sliceIndex]);
 
   // Slice scheduler. `pane.slice` is the desired target; request/displayed
@@ -632,11 +657,45 @@ export function ViewportPane({
     return `${pane.id}-${prefix}-${Date.now()}-${measurementCounterRef.current}`;
   }
 
+  function startPacsDrag(event: PointerEvent<HTMLDivElement>, mode: PacsDragMode) {
+    const start = displayPointFromPointer(event);
+    if (!start) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setPacsDrag({
+      pointerId: event.pointerId,
+      mode,
+      start,
+      wwStart: pane.ww,
+      wlStart: pane.wl,
+      zoomStart: pane.zoom,
+      panStart: pane.pan,
+    });
+    setHoverPoint(null);
+    setHuReadout(null);
+  }
+
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     onActivate();
+    // PACS-style chords take priority over the selected tool:
+    // RMB drag = contrast, MMB drag = zoom, LMB+RMB drag = pan.
+    if (event.button === 2 && (event.buttons & 1) === 1) {
+      startPacsDrag(event, 'pan');
+      return;
+    }
+    if (event.button === 1) {
+      startPacsDrag(event, 'zoom');
+      return;
+    }
+    if (event.button === 2) {
+      startPacsDrag(event, 'window');
+      return;
+    }
     const canStartPan =
       pane.zoom > 1 &&
-      ((toolMode === 'pan' && event.button === 0) || event.button === 1 || event.button === 2);
+      toolMode === 'pan' &&
+      event.button === 0;
     if (canStartPan) {
       const start = displayPointFromPointer(event);
       if (!start) return;
@@ -723,6 +782,34 @@ export function ViewportPane({
   }
 
   function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (pacsDrag && pacsDrag.pointerId === event.pointerId) {
+      const point = displayPointFromPointer(event);
+      if (!point) return;
+      event.preventDefault();
+      if (pacsDrag.mode === 'window' && (event.buttons & 3) === 3) {
+        setPacsDrag({ ...pacsDrag, mode: 'pan', start: point, panStart: pane.pan });
+        return;
+      }
+      const dx = point.x - pacsDrag.start.x;
+      const dy = point.y - pacsDrag.start.y;
+      if (pacsDrag.mode === 'window') {
+        onWLChange(
+          Math.round(clamp(pacsDrag.wwStart + dx * WINDOW_WIDTH_PX_SENSITIVITY, MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH)),
+          Math.round(clamp(pacsDrag.wlStart - dy * WINDOW_LEVEL_PX_SENSITIVITY, MIN_WINDOW_LEVEL, MAX_WINDOW_LEVEL)),
+        );
+        return;
+      }
+      if (pacsDrag.mode === 'zoom') {
+        const factor = Math.exp(-dy / MIDDLE_ZOOM_PX_SENSITIVITY);
+        onZoomChange(clamp(pacsDrag.zoomStart * factor, MIN_ZOOM, MAX_ZOOM));
+        return;
+      }
+      onPanChange({
+        x: pacsDrag.panStart.x + dx,
+        y: pacsDrag.panStart.y + dy,
+      });
+      return;
+    }
     if (panDrag) {
       const point = displayPointFromPointer(event);
       if (!point) return;
@@ -757,6 +844,12 @@ export function ViewportPane({
   }
 
   function endPanDrag(event: PointerEvent<HTMLDivElement>) {
+    if (pacsDrag?.pointerId === event.pointerId) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      setPacsDrag(null);
+    }
     if (panDrag?.pointerId === event.pointerId) {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
@@ -781,7 +874,7 @@ export function ViewportPane({
   }
 
   function handlePointerLeave() {
-    if (!panDrag && !scrollDrag) {
+    if (!panDrag && !scrollDrag && !pacsDrag) {
       setHoverPoint(null);
       setHuReadout(null);
     }
@@ -850,7 +943,7 @@ export function ViewportPane({
 
       <div
         ref={panelRef}
-        className={`canvas-wrap nrrd-canvas-wrap ${toolMode === 'distance' || toolMode === 'angle' ? 'measuring' : ''} ${toolMode === 'pan' ? 'panning' : ''} ${toolMode === 'scroll' ? 'scrolling' : ''}${scrollDrag?.locked ? ' is-scrubbing' : ''}`}
+        className={`canvas-wrap nrrd-canvas-wrap ${toolMode === 'distance' || toolMode === 'angle' ? 'measuring' : ''} ${toolMode === 'pan' ? 'panning' : ''} ${toolMode === 'scroll' ? 'scrolling' : ''}${scrollDrag?.locked ? ' is-scrubbing' : ''}${pacsDrag ? ` pacs-drag-${pacsDrag.mode}` : ''}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={endPanDrag}
@@ -867,7 +960,7 @@ export function ViewportPane({
         ) : null}
         <canvas
           ref={canvasRef}
-          aria-label={`${planeLabel} slice rendered from an NRRD volume`}
+          aria-label={`${planeLabel} slice rendered from a scan volume`}
           style={
             fitRect
               ? {
