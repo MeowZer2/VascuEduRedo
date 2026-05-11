@@ -77,6 +77,8 @@ export interface QuestionBase {
   hints?: string[];
   learningObjectiveId?: string;
   bookmarkId?: string;
+  proceduralStepId?: string;
+  proceduralStepTitle?: string;
 }
 
 export interface Choice {
@@ -159,6 +161,8 @@ export interface QuestionResult {
   answer: UserAnswer;
   expected: string;
   explanation: string;
+  proceduralStepId?: string;
+  proceduralStepTitle?: string;
   hintsUsed: number;
   elapsedMs: number;
 }

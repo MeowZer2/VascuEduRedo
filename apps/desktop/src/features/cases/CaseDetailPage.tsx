@@ -51,13 +51,13 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
             {vascCase.author && <span className="pill">Author: {vascCase.author}</span>}
             {vascCase.reviewer && <span className="pill">Reviewed by: {vascCase.reviewer}</span>}
             {reviewedAt && <span className="pill">Reviewed {reviewedAt}</span>}
-            <span className="pill">{linkedPlan ? 'Vessel plan linked' : 'No vessel plan'}</span>
+            <span className="pill">{linkedPlan ? 'Angiogram plan linked' : 'No angiogram plan'}</span>
           </div>
         </div>
         <div className="row-actions">
           <button className="secondary-button" onClick={onBack}>Back</button>
           <button className="secondary-button" onClick={onOpenComposer}>
-            {linkedPlan ? 'Open vessel plan' : 'Create vessel plan'}
+            {linkedPlan ? 'Open procedural plan' : 'Create procedural plan'}
           </button>
           <button className="primary-button" onClick={onStart}>Practice this case</button>
         </div>
@@ -142,8 +142,8 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
       {linkedPlan && (
         <section className="content-card">
           <div className="section-title-row">
-            <h3>Vessel plan summary</h3>
-            <button className="secondary-button small" onClick={onOpenComposer}>Open plan</button>
+            <h3>Procedural plan</h3>
+            <button className="secondary-button small" onClick={onOpenComposer}>Open procedural plan</button>
           </div>
           <PlanSummary linkedPlan={linkedPlan} />
         </section>
@@ -194,13 +194,28 @@ function PlanSummary({ linkedPlan }: { linkedPlan: VesselCompositionRow }) {
         <span>pathology/target segment{pathologicSegments.length === 1 ? '' : 's'}</span>
       </div>
       <div>
+        <strong>{data.proceduralSteps.length}</strong>
+        <span>procedural step{data.proceduralSteps.length === 1 ? '' : 's'}</span>
+      </div>
+      <div>
+        <strong>{data.proceduralObjects.length}</strong>
+        <span>procedural object{data.proceduralObjects.length === 1 ? '' : 's'}</span>
+      </div>
+      <div>
         <strong>{data.devicePlacements.length}</strong>
         <span>device placement{data.devicePlacements.length === 1 ? '' : 's'}</span>
       </div>
-      <div>
-        <strong>{data.treatmentMarkers.length}</strong>
-        <span>planning marker{data.treatmentMarkers.length === 1 ? '' : 's'}</span>
-      </div>
+      {data.proceduralSteps.length > 0 && (
+        <div className="case-plan-steps">
+          {data.proceduralSteps
+            .slice()
+            .sort((a, b) => a.orderIndex - b.orderIndex)
+            .slice(0, 5)
+            .map((step) => (
+              <span key={step.id}>{step.label}</span>
+            ))}
+        </div>
+      )}
       {pathologicSegments.length > 0 && (
         <p>
           {pathologicSegments.slice(0, 3).map((segment) => `${segment.label}: ${segment.pathologyType}`).join('; ')}

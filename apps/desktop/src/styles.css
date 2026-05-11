@@ -121,6 +121,10 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .mode-choice.selected { border-color: rgba(143,184,255,0.5); background: rgba(143,184,255,0.14); }
 .workspace-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 16px; }
 .workspace-header h2 { margin: 0; font-size: 1.7rem; }
+.workspace-header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.workspace-view-tabs { display: inline-flex; gap: 4px; padding: 4px; border-radius: 12px; border: 1px solid var(--border); background: rgba(0,0,0,0.22); }
+.workspace-view-tabs button { border: 0; border-radius: 9px; padding: 7px 10px; color: var(--muted); background: transparent; font-weight: 850; font-size: 0.82rem; }
+.workspace-view-tabs button.active { color: #07101a; background: rgba(217,232,255,0.9); }
 .viewer-card { padding: 14px; }
 .question-card { padding: 18px; }
 .viewer-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
@@ -174,6 +178,43 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .viewer-orientation-warnings { margin: 6px 0 0; padding: 8px 12px; list-style: disc inside; border-radius: 12px; border: 1px solid rgba(255,209,102,0.32); background: rgba(255,209,102,0.08); color: #ffe6a3; font-size: 0.78rem; display: grid; gap: 2px; }
 .viewer-bookmark-note { margin-top: 8px; padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(120,166,255,0.34); background: rgba(120,166,255,0.1); display: grid; gap: 2px; color: var(--text); font-size: 0.82rem; }
 .viewer-bookmark-note span { color: var(--muted); line-height: 1.35; }
+
+.procedural-workspace-card { display: grid; gap: 10px; }
+.procedure-viewer { display: grid; gap: 10px; }
+.procedure-viewer-steps { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
+.procedure-viewer-steps button { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; padding: 7px 11px; background: rgba(255,255,255,0.05); color: var(--muted); font-size: 0.82rem; font-weight: 850; }
+.procedure-viewer-steps button.active { color: #07101a; background: rgba(234,247,255,0.88); border-color: rgba(234,247,255,0.38); }
+.procedure-viewer-svg { display: block; width: 100%; min-height: 430px; aspect-ratio: 1000 / 620; border: 1px solid var(--border); border-radius: 18px; background: #04070b; overflow: hidden; }
+.procedure-viewer.compact .procedure-viewer-svg { min-height: 260px; border-radius: 14px; }
+.procedure-viewer-bg { fill: url(#learner-angio-bg); }
+.procedure-viewer-label { fill: rgba(224,235,247,0.76); font-size: 18px; font-weight: 850; letter-spacing: 0.04em; }
+.procedure-viewer-segment line { stroke: rgba(234,247,255,0.72); stroke-linecap: round; fill: none; vector-effect: non-scaling-stroke; }
+.procedure-viewer-segment.pathology-normal line { stroke: rgba(234,247,255,0.64); }
+.procedure-viewer-segment.pathology-stenosis line { stroke: rgba(246,250,255,0.86); }
+.procedure-viewer-segment .stenosis-core { stroke: rgba(3,5,8,0.9); }
+.procedure-viewer-segment.pathology-occlusion line { stroke: rgba(234,247,255,0.22); stroke-dasharray: 10 8; }
+.procedure-viewer-segment .occlusion-dot { fill: rgba(248,251,255,0.9); stroke: rgba(2,3,4,0.9); stroke-width: 3; }
+.procedure-viewer-segment .aneurysm-sac { fill: rgba(238,248,255,0.18); stroke: rgba(238,248,255,0.72); stroke-width: 3; }
+.procedure-viewer-segment text, .procedure-viewer-object text { fill: rgba(224,235,247,0.74); stroke: rgba(0,0,0,0.82); stroke-width: 3px; paint-order: stroke; font-size: 12px; font-weight: 800; pointer-events: none; }
+.procedure-viewer-marker { stroke: #ffd166; stroke-width: 3; vector-effect: non-scaling-stroke; }
+.procedure-viewer-object line { stroke: #dbe8f6; stroke-width: 3; stroke-linecap: round; fill: none; vector-effect: non-scaling-stroke; }
+.procedure-viewer-object.object-guidewire line { stroke: #f8fbff; stroke-width: 1.8; }
+.procedure-viewer-object.object-catheter line { stroke: #b8d7ff; stroke-width: 5; }
+.procedure-viewer-object.object-sheath line { stroke: #d7e2ee; stroke-width: 8; }
+.procedure-viewer-object.object-balloon line { stroke: #b8d7ff; stroke-width: 2; }
+.procedure-viewer-object.object-balloon ellipse { fill: rgba(143,184,255,0.2); stroke: #d9e8ff; stroke-width: 2.5; }
+.procedure-viewer-object.object-balloon.state-deployed ellipse { fill: rgba(143,184,255,0.34); }
+.procedure-viewer-object.object-stent line, .procedure-viewer-object.object-stentGraft line { stroke: #ffe6a3; stroke-width: 5; }
+.procedure-viewer-object.object-stentGraft line { stroke: #b9f0e5; stroke-width: 9; }
+.procedure-viewer-object rect { fill: rgba(255,230,163,0.18); stroke: #fff0bf; stroke-width: 2; }
+.procedure-viewer-object.object-stentGraft rect { fill: rgba(185,240,229,0.18); stroke: #d9fff7; }
+.procedure-viewer-object.state-undeployed { opacity: 0.82; }
+.procedure-viewer-object.selected line, .procedure-viewer-object.selected ellipse, .procedure-viewer-object.selected rect { filter: drop-shadow(0 0 7px rgba(255,209,102,0.85)); stroke: #ffd166; }
+.procedure-viewer-context { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(0,0,0,0.18); }
+.procedure-viewer-context span { color: var(--muted); line-height: 1.35; }
+.procedural-question-context { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 10px 0 12px; padding: 10px 12px; border: 1px solid rgba(143,184,255,0.24); border-radius: 12px; background: rgba(143,184,255,0.08); }
+.procedural-question-context > div { display: grid; gap: 2px; }
+.procedural-question-context strong { font-size: 0.94rem; }
 
 .viewer-header-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .viewer-source-line { margin: 6px 0 0 !important; font-size: 0.82rem; color: #c3d4ee; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -761,11 +802,13 @@ body.composer-dragging, body.composer-dragging * { user-select: none !important;
 .link-button:hover { color: #cfe0ff; }
 
 .case-meta-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.case-plan-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.case-plan-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .case-plan-summary > div { display: grid; gap: 2px; padding: 12px; border-radius: 14px; border: 1px solid var(--border); background: rgba(0,0,0,0.14); }
 .case-plan-summary strong { font-size: 1.35rem; }
 .case-plan-summary span { color: var(--muted); font-size: 0.82rem; }
 .case-plan-summary p { grid-column: 1 / -1; margin: 0; color: #dbe4f2; }
+.case-plan-summary .case-plan-steps { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; padding: 0; border: 0; background: transparent; }
+.case-plan-steps span { display: inline-flex; width: fit-content; padding: 6px 9px; border-radius: 999px; color: #d8e6ff; background: rgba(120,166,255,0.12); border: 1px solid rgba(120,166,255,0.22); font-weight: 800; }
 .import-textarea { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
 
 /* Progress + attempt review */
@@ -807,6 +850,7 @@ body.composer-dragging, body.composer-dragging * { user-select: none !important;
 .review-status-correct { color: #cdebd9; background: rgba(100,217,148,0.16); }
 .review-status-incorrect { color: #ffd6da; background: rgba(255,109,122,0.16); }
 .review-status-skipped { color: #ffe6a3; background: rgba(255,209,102,0.16); }
+.review-procedure-pill { color: #d8e6ff; background: rgba(143,184,255,0.12); border: 1px solid rgba(143,184,255,0.24); border-radius: 999px; padding: 4px 8px; font-size: 0.74rem; font-weight: 800; }
 .review-prompt { margin: 0; line-height: 1.4; }
 .review-detail-list { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; margin: 0; }
 .review-detail-list dt { color: var(--muted); font-size: 0.84rem; }

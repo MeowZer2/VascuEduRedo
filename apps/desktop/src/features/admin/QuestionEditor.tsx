@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { type AdminQuestionInput, type AdminQuestionRow } from '../../lib/admin';
 import { listDeviceCategories, listDevices, type Device } from '../../lib/devices';
+import type { ProceduralStep } from '../../lib/vesselComposer';
 import type { CaseBookmark, QuestionType } from '../../types';
 
 const QUESTION_TYPES: { value: QuestionType; label: string }[] = [
@@ -25,6 +26,8 @@ export interface QuestionDraft {
   points: number | string;
   hints: string[];
   bookmarkId: string;
+  proceduralStepId: string;
+  proceduralStepTitle: string;
   // multipleChoice / multiSelect
   choices: { id: string; label: string }[];
   correctChoiceId: string;
@@ -54,6 +57,8 @@ function emptyDraft(type: QuestionType = 'multipleChoice'): QuestionDraft {
     points: 1,
     hints: [],
     bookmarkId: '',
+    proceduralStepId: '',
+    proceduralStepTitle: '',
     choices: [
       { id: 'a', label: '' },
       { id: 'b', label: '' },
@@ -87,6 +92,8 @@ export function questionRowToDraft(row: AdminQuestionRow): QuestionDraft {
     points: (get<number>('points') ?? 1) as number,
     hints: ((get<string[]>('hints') ?? []) as string[]).slice(),
     bookmarkId: (get<string>('bookmarkId') ?? '') as string,
+    proceduralStepId: (get<string>('proceduralStepId') ?? '') as string,
+    proceduralStepTitle: (get<string>('proceduralStepTitle') ?? '') as string,
     choices: ((get<{ id: string; label: string }[]>('choices') ?? base.choices) as {
       id: string;
       label: string;
@@ -140,6 +147,10 @@ export function draftToQuestionInput(draft: QuestionDraft): DraftConversion {
   };
   if (hints.length > 0) data.hints = hints;
   if (draft.bookmarkId.trim()) data.bookmarkId = draft.bookmarkId.trim();
+  if (draft.proceduralStepId.trim()) {
+    data.proceduralStepId = draft.proceduralStepId.trim();
+    if (draft.proceduralStepTitle.trim()) data.proceduralStepTitle = draft.proceduralStepTitle.trim();
+  }
 
   switch (draft.type) {
     case 'multipleChoice': {
@@ -236,6 +247,7 @@ export interface QuestionEditorProps {
   onDelete?: () => void;
   busy: boolean;
   bookmarks?: CaseBookmark[];
+  proceduralSteps?: ProceduralStep[];
 }
 
 export function QuestionEditor({
@@ -246,6 +258,7 @@ export function QuestionEditor({
   onDelete,
   busy,
   bookmarks = [],
+  proceduralSteps = [],
 }: QuestionEditorProps) {
   function patch<K extends keyof QuestionDraft>(key: K, value: QuestionDraft[K]) {
     onChange({ ...draft, [key]: value });
@@ -263,6 +276,8 @@ export function QuestionEditor({
       points: draft.points,
       hints: draft.hints,
       bookmarkId: draft.bookmarkId,
+      proceduralStepId: draft.proceduralStepId,
+      proceduralStepTitle: draft.proceduralStepTitle,
     });
   }
 
@@ -386,6 +401,29 @@ export function QuestionEditor({
           {bookmarks.map((bookmark) => (
             <option key={bookmark.id} value={bookmark.id}>
               {bookmark.title}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="field-label">
+        <span>Referenced procedural step (optional)</span>
+        <select
+          className="text-input"
+          value={draft.proceduralStepId}
+          onChange={(e) => {
+            const step = proceduralSteps.find((item) => item.id === e.target.value);
+            onChange({
+              ...draft,
+              proceduralStepId: e.target.value,
+              proceduralStepTitle: step?.label ?? '',
+            });
+          }}
+        >
+          <option value="">No referenced procedural step</option>
+          {proceduralSteps.map((step) => (
+            <option key={step.id} value={step.id}>
+              {step.label}
             </option>
           ))}
         </select>

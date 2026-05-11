@@ -156,6 +156,12 @@ function ReviewQuestion({
   const status =
     question.isCorrect === null ? 'skipped' : question.isCorrect ? 'correct' : 'incorrect';
   const explanation = (question.questionData.explanation as string | undefined) ?? '';
+  const proceduralStepTitle =
+    typeof question.questionData.proceduralStepTitle === 'string'
+      ? question.questionData.proceduralStepTitle
+      : typeof question.questionData.proceduralStepId === 'string'
+        ? question.questionData.proceduralStepId
+        : '';
   const penalty =
     question.penaltyPoints !== null && question.hintsUsed > 0
       ? `${question.penaltyPoints.toFixed(2)} pt`
@@ -172,6 +178,11 @@ function ReviewQuestion({
           <span className="muted small">
             {question.type} · {question.points} pt{question.points === 1 ? '' : 's'}
           </span>
+          {proceduralStepTitle ? (
+            <span className="review-procedure-pill">
+              Step: {proceduralStepTitle}
+            </span>
+          ) : null}
         </div>
       </header>
       <p className="review-prompt">{question.prompt}</p>

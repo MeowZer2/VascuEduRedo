@@ -488,6 +488,8 @@ export function AdminContentPage({
       points: 1,
       hints: [],
       bookmarkId: '',
+      proceduralStepId: '',
+      proceduralStepTitle: '',
       choices: [
         { id: 'a', label: '' },
         { id: 'b', label: '' },
@@ -1364,6 +1366,7 @@ export function AdminContentPage({
                     onDelete={questionDraft.id ? () => void deleteQuestion() : undefined}
                     busy={busy}
                     bookmarks={bookmarks}
+                    proceduralSteps={selectedCasePlans[0]?.data.proceduralSteps ?? []}
                   />
                 ) : (
                   <p className="muted">Pick a question on the left, or hit <em>+ Question</em>.</p>

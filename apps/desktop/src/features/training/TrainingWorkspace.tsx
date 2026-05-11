@@ -1,7 +1,9 @@
-import { type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useState } from 'react';
+import { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { NrrdViewer, type ViewerMeasurement } from '../../components/NrrdViewer';
+import { ProceduralPlanViewer } from '../../components/ProceduralPlanViewer';
 import { createAttempt } from '../../lib/attempts';
 import { saveAttempt } from '../../lib/progress';
+import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
 import type { AttemptResult, CaseBookmark, MeasurementQuestion, VascCase } from '../../types';
 import { QuestionPanel, formatDuration } from './QuestionPanel';
 
@@ -58,6 +60,9 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
   const [workspacePrefs, setWorkspacePrefs] = useState<WorkspacePrefs>(() => loadWorkspacePrefs());
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
+  const [workspaceView, setWorkspaceView] = useState<'imaging' | 'procedure'>('imaging');
+  const [proceduralPlan, setProceduralPlan] = useState<VesselCompositionRow | null>(null);
+  const [activeProceduralStepId, setActiveProceduralStepId] = useState<string>('');
   const [attemptId, setAttemptId] = useState<string | null>(null);
   const [completedAttempt, setCompletedAttempt] = useState<AttemptResult | null>(null);
   const [activeBookmark, setActiveBookmark] = useState<CaseBookmark | null>(null);
@@ -76,20 +81,63 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
     };
   }, [vascCase.id]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setProceduralPlan(null);
+    setActiveProceduralStepId('');
+    setWorkspaceView('imaging');
+    void listVesselCompositions(vascCase.id)
+      .then((rows) => {
+        if (cancelled) return;
+        const plan = rows[0] ?? null;
+        setProceduralPlan(plan);
+        setActiveProceduralStepId(plan?.data.proceduralSteps[0]?.id ?? '');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setProceduralPlan(null);
+        setActiveProceduralStepId('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [vascCase.id]);
+
   const activeQuestion = vascCase.questions[activeQuestionIndex];
   const isMeasurementQuestion = activeQuestion?.type === 'measurement';
   const requestedTool = isMeasurementQuestion ? 'distance' as const : undefined;
   const requiredPlane = isMeasurementQuestion ? (activeQuestion as MeasurementQuestion).plane : undefined;
+  const proceduralSteps = useMemo(
+    () => proceduralPlan?.data.proceduralSteps.slice().sort((a, b) => a.orderIndex - b.orderIndex) ?? [],
+    [proceduralPlan],
+  );
+  const activeProceduralStep =
+    proceduralSteps.find((step) => step.id === activeProceduralStepId) ?? proceduralSteps[0] ?? null;
+
+  useEffect(() => {
+    if (!activeQuestion?.proceduralStepId || !proceduralPlan) return;
+    const step = proceduralSteps.find((item) => item.id === activeQuestion.proceduralStepId);
+    if (!step) return;
+    setActiveProceduralStepId(step.id);
+    setWorkspaceView('procedure');
+  }, [activeQuestion?.id, activeQuestion?.proceduralStepId, proceduralPlan, proceduralSteps]);
 
   function handleComplete(attempt: AttemptResult) {
     saveAttempt(attempt);
     setCompletedAttempt(attempt);
   }
 
-  function jumpToBookmark(bookmark: CaseBookmark) {
+  const jumpToBookmark = useCallback((bookmark: CaseBookmark) => {
     setActiveBookmark(bookmark);
     setJumpBookmark({ ...bookmark });
-  }
+    setWorkspaceView('imaging');
+  }, []);
+
+  const jumpToProceduralStep = useCallback((stepId: string) => {
+    if (!proceduralPlan?.data.proceduralSteps.some((step) => step.id === stepId)) return;
+    setActiveProceduralStepId(stepId);
+    setWorkspaceView('procedure');
+  }, [proceduralPlan]);
 
   function updateWorkspacePrefs(updater: (current: WorkspacePrefs) => WorkspacePrefs) {
     setWorkspacePrefs((current) => {
@@ -141,9 +189,29 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             <p className="eyebrow">Guided practice</p>
             <h2>{vascCase.title}</h2>
           </div>
-          <button className="secondary-button" onClick={onChooseCase}>Change case</button>
+          <div className="workspace-header-actions">
+            {proceduralPlan ? (
+              <div className="workspace-view-tabs" aria-label="Workspace view">
+                <button
+                  type="button"
+                  className={workspaceView === 'imaging' ? 'active' : ''}
+                  onClick={() => setWorkspaceView('imaging')}
+                >
+                  Imaging
+                </button>
+                <button
+                  type="button"
+                  className={workspaceView === 'procedure' ? 'active' : ''}
+                  onClick={() => setWorkspaceView('procedure')}
+                >
+                  Angiogram
+                </button>
+              </div>
+            ) : null}
+            <button className="secondary-button" onClick={onChooseCase}>Change case</button>
+          </div>
         </div>
-        {isMeasurementQuestion && requiredPlane ? (
+        {workspaceView === 'imaging' && isMeasurementQuestion && requiredPlane ? (
           <div className="measurement-question-banner">
             <span className="measurement-question-banner-icon">📏</span>
             <span>
@@ -152,14 +220,31 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             </span>
           </div>
         ) : null}
-        <NrrdViewer
-          volumePath={vascCase.volume.path ?? 'sample'}
-          description={vascCase.volume.description}
-          requestedTool={requestedTool}
-          onLatestMeasurementChange={setLatestMeasurement}
-          jumpToBookmark={jumpBookmark}
-          activeBookmark={activeBookmark}
-        />
+        {workspaceView === 'procedure' && proceduralPlan ? (
+          <section className="viewer-card procedural-workspace-card">
+            <div className="viewer-header">
+              <div>
+                <h3>Procedural angiogram</h3>
+                <p>{activeProceduralStep?.label ?? proceduralPlan.name}</p>
+              </div>
+              <span className="pill">Teaching context</span>
+            </div>
+            <ProceduralPlanViewer
+              plan={proceduralPlan}
+              activeStepId={activeProceduralStep?.id ?? activeProceduralStepId}
+              onStepChange={setActiveProceduralStepId}
+            />
+          </section>
+        ) : (
+          <NrrdViewer
+            volumePath={vascCase.volume.path ?? 'sample'}
+            description={vascCase.volume.description}
+            requestedTool={requestedTool}
+            onLatestMeasurementChange={setLatestMeasurement}
+            jumpToBookmark={jumpBookmark}
+            activeBookmark={activeBookmark}
+          />
+        )}
       </section>
       <button
         type="button"
@@ -228,6 +313,9 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             onQuestionChange={setActiveQuestionIndex}
             bookmarks={vascCase.bookmarks ?? []}
             onJumpToBookmark={jumpToBookmark}
+            proceduralPlan={proceduralPlan}
+            activeProceduralStepId={activeProceduralStep?.id}
+            onJumpToProceduralStep={jumpToProceduralStep}
           />
         ) : null}
       </aside>

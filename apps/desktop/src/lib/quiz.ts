@@ -91,6 +91,8 @@ export function evaluateAnswer(
     answer,
     expected: expectedAnswerLabel(question),
     explanation: question.explanation,
+    proceduralStepId: question.proceduralStepId,
+    proceduralStepTitle: question.proceduralStepTitle,
     hintsUsed,
     elapsedMs,
   };

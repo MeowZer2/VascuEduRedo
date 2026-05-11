@@ -3,6 +3,7 @@ import type { ViewerMeasurement } from '../../components/NrrdViewer';
 import { completeAttempt, submitQuestionResponse } from '../../lib/attempts';
 import { listDevices, type Device } from '../../lib/devices';
 import { evaluateAnswer, newAttemptId } from '../../lib/quiz';
+import type { VesselCompositionRow } from '../../lib/vesselComposer';
 import type {
   AttemptResult,
   CaseBookmark,
@@ -23,6 +24,9 @@ interface QuestionPanelProps {
   onQuestionChange: (index: number) => void;
   bookmarks: CaseBookmark[];
   onJumpToBookmark: (bookmark: CaseBookmark) => void;
+  proceduralPlan?: VesselCompositionRow | null;
+  activeProceduralStepId?: string;
+  onJumpToProceduralStep?: (stepId: string) => void;
 }
 
 function defaultAnswer(question: Question): UserAnswer {
@@ -41,6 +45,9 @@ export function QuestionPanel({
   onQuestionChange,
   bookmarks,
   onJumpToBookmark,
+  proceduralPlan,
+  activeProceduralStepId,
+  onJumpToProceduralStep,
 }: QuestionPanelProps) {
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState<UserAnswer>(defaultAnswer(vascCase.questions[0]));
@@ -53,6 +60,11 @@ export function QuestionPanel({
   const referencedBookmark = question.bookmarkId
     ? bookmarks.find((bookmark) => bookmark.id === question.bookmarkId) ?? null
     : null;
+  const referencedProceduralStep = question.proceduralStepId && proceduralPlan
+    ? proceduralPlan.data.proceduralSteps.find((step) => step.id === question.proceduralStepId) ?? null
+    : null;
+  const proceduralStepLabel =
+    referencedProceduralStep?.label ?? question.proceduralStepTitle ?? (question.proceduralStepId ? 'Procedural step' : '');
   const shownHints = hintsUsed[question.id] ?? 0;
   const isLast = index === vascCase.questions.length - 1;
 
@@ -61,6 +73,11 @@ export function QuestionPanel({
   useEffect(() => {
     setQuestionStartedAt(Date.now());
   }, [question.id]);
+
+  useEffect(() => {
+    if (!question.proceduralStepId) return;
+    onJumpToProceduralStep?.(question.proceduralStepId);
+  }, [question.id, question.proceduralStepId, onJumpToProceduralStep]);
 
   // Device-selection question state: load the (filtered) catalog when the
   // current question is a deviceSelection. Cached in this component so each
@@ -380,6 +397,22 @@ export function QuestionPanel({
         >
           Jump to referenced finding
         </button>
+      ) : null}
+      {question.proceduralStepId ? (
+        <div className="procedural-question-context">
+          <div>
+            <span className="muted small">Procedural step</span>
+            <strong>{proceduralStepLabel}</strong>
+          </div>
+          <button
+            type="button"
+            className="secondary-button small"
+            onClick={() => onJumpToProceduralStep?.(question.proceduralStepId!)}
+            disabled={!referencedProceduralStep}
+          >
+            {activeProceduralStepId === question.proceduralStepId ? 'Viewing step' : 'Jump to procedural step'}
+          </button>
+        </div>
       ) : null}
 
       {!submittedResult ? renderAnswerInput() : null}
