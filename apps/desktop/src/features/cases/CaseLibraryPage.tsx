@@ -50,7 +50,12 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
           <span className="pill">{cases.length} total</span>
         </div>
         <div className="case-table">
-          {cases.map((item) => (
+          {cases.length === 0 ? (
+            <div className="empty-state">
+              <strong>No cases available</strong>
+              <span>Create or import cases from Admin to start building your local training library.</span>
+            </div>
+          ) : cases.map((item) => (
             <article className="case-row" key={item.id}>
               <div>
                 <h4>{item.title}</h4>

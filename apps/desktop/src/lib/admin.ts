@@ -169,6 +169,20 @@ export interface CaseExportPayload extends CaseImportPayload {
   questions: Array<ImportQuestionInput & { orderIndex: number }>;
 }
 
+export interface AppBackupPayload {
+  app: string;
+  version: string;
+  exportedAt: string;
+  schema: string;
+  cases: unknown[];
+  questions: unknown[];
+  bookmarks: unknown[];
+  vesselCompositions: unknown[];
+  devices: unknown[];
+  attempts: unknown[];
+  questionResponses: unknown[];
+}
+
 export interface ImportOptions {
   /** "error" (default) rejects on slug collision, "rename" auto-suffixes the slug. */
   slugStrategy?: 'error' | 'rename';
@@ -191,6 +205,11 @@ export async function adminValidateCasePayload(
 export async function adminExportCase(caseId: string): Promise<CaseExportPayload | null> {
   ensureDesktop();
   return (await safeInvoke<CaseExportPayload>('admin_export_case', { caseId })) ?? null;
+}
+
+export async function exportAppBackup(): Promise<AppBackupPayload | null> {
+  ensureDesktop();
+  return (await safeInvoke<AppBackupPayload>('export_app_backup')) ?? null;
 }
 
 export async function adminImportCase(

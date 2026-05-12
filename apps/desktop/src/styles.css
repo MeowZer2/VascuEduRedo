@@ -68,6 +68,9 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .content-card { padding: 22px; }
 .content-card h3, .viewer-card h3, .question-card h3 { margin-top: 0; }
 .muted { color: var(--muted); }
+.empty-state { display: grid; gap: 4px; padding: 16px; border-radius: 14px; border: 1px dashed var(--border); background: rgba(0,0,0,0.12); color: var(--muted); }
+.empty-state strong { color: var(--text); }
+.empty-state.compact { padding: 12px; }
 
 .category-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .category-card { position: relative; overflow: hidden; min-height: 210px; padding: 22px; transition: transform 150ms ease, border-color 150ms ease; display: grid; align-content: end; isolation: isolate; }
@@ -93,6 +96,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .detail-list div { display: grid; grid-template-columns: 130px 1fr; gap: 12px; }
 .detail-list dt { color: var(--muted); }
 .detail-list dd { margin: 0; }
+.detail-list dd { word-break: break-word; }
 .compact-list { margin: 0; padding-left: 1.1rem; color: #dbe4f2; }
 .compact-list li { margin: 8px 0; }
 .numbered { padding-left: 1.35rem; }
@@ -825,6 +829,10 @@ body.composer-dragging, body.composer-dragging * { user-select: none !important;
 .health-list strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.84rem; color: inherit; }
 .link-button { background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
 .link-button:hover { color: #cfe0ff; }
+.release-readiness-card { display: grid; gap: 12px; }
+.release-check-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.release-check-grid > div { display: grid; gap: 4px; padding: 12px; border-radius: 14px; border: 1px solid var(--border); background: rgba(0,0,0,0.14); }
+.release-check-grid span { color: var(--muted); font-size: 0.86rem; line-height: 1.4; }
 
 .case-meta-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .case-plan-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
@@ -897,6 +905,7 @@ body.composer-dragging, body.composer-dragging * { user-select: none !important;
   .training-aside { position: static; }
   .training-layout-aside-collapsed .training-aside-toggle { writing-mode: horizontal-tb; min-height: 0; }
   .category-grid, .grid-2 { grid-template-columns: 1fr; }
+  .release-check-grid { grid-template-columns: 1fr; }
   .case-procedure-preview { grid-template-columns: 1fr; }
   .admin-layout { grid-template-columns: 1fr; }
   .admin-cases-panel { position: static; max-height: none; }

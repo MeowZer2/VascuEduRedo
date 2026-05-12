@@ -1012,6 +1012,7 @@ export function VesselComposerPage({
 
   function deleteSelected() {
     if (!selectedObject) return;
+    if (!window.confirm(`Delete this ${selectionLabel(selectedObject.type)} from the procedural plan?`)) return;
     commitNow();
     if (selectedObject.type === 'segment') {
       setSegments((current) => current.filter((segment) => segment.id !== selectedObject.id));
@@ -3658,6 +3659,19 @@ function visualPresetLabel(preset: AngiogramVisualPreset): string {
     case 'dsa':
     default:
       return 'DSA';
+  }
+}
+
+function selectionLabel(type: VascularPlanningEntity['type']): string {
+  switch (type) {
+    case 'devicePlacement':
+      return 'device placement';
+    case 'treatmentMarker':
+      return 'planning marker';
+    case 'proceduralObject':
+      return 'procedural object';
+    default:
+      return type;
   }
 }
 

@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -72,6 +72,22 @@ pub struct QuestionResponseRow {
     pub penalty_points: f64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBackup {
+    app: String,
+    version: String,
+    exported_at: String,
+    schema: String,
+    cases: Vec<Value>,
+    questions: Vec<Value>,
+    bookmarks: Vec<Value>,
+    vessel_compositions: Vec<Value>,
+    devices: Vec<Value>,
+    attempts: Vec<Value>,
+    question_responses: Vec<Value>,
+}
+
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -90,6 +106,125 @@ pub fn open_and_initialize(app: &AppHandle) -> Result<Connection, String> {
     seed_if_empty(&conn)?;
     seed_devices_if_empty(&conn)?;
     Ok(conn)
+}
+
+#[tauri::command]
+pub fn export_app_backup(state: State<DbState>) -> Result<AppBackup, String> {
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|_| "Database is busy. Please try again.".to_string())?;
+    Ok(AppBackup {
+        app: "VascEdu".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        schema: "vascedu-app-backup-v1".to_string(),
+        cases: query_json_rows(
+            &conn,
+            "SELECT id, slug, title, summary, category, volume_path, data_json FROM cases ORDER BY title",
+            &["id", "slug", "title", "summary", "category", "volumePath", "data"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::Json],
+        )?,
+        questions: query_json_rows(
+            &conn,
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions ORDER BY case_id, order_index",
+            &["id", "caseId", "orderIndex", "type", "prompt", "data"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Integer, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json],
+        )?,
+        bookmarks: query_json_rows(
+            &conn,
+            "SELECT id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json, updated_at FROM case_bookmarks ORDER BY case_id, order_index",
+            &["id", "caseId", "orderIndex", "title", "note", "plane", "sliceIndex", "windowWidth", "windowLevel", "zoom", "crosshair", "tags", "updatedAt"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Integer, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Integer, JsonColumn::Real, JsonColumn::Real, JsonColumn::NullableReal, JsonColumn::NullableJson, JsonColumn::Json, JsonColumn::Text],
+        )?,
+        vessel_compositions: query_json_rows(
+            &conn,
+            "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions ORDER BY updated_at DESC",
+            &["id", "caseId", "name", "data", "updatedAt"],
+            &[JsonColumn::Text, JsonColumn::NullableText, JsonColumn::Text, JsonColumn::Json, JsonColumn::Text],
+        )?,
+        devices: query_json_rows(
+            &conn,
+            "SELECT id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json FROM devices ORDER BY category, manufacturer, name",
+            &["id", "name", "manufacturer", "category", "subtype", "description", "sizes", "properties", "tags"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::Text, JsonColumn::Json, JsonColumn::Json, JsonColumn::Json],
+        )?,
+        attempts: query_json_rows(
+            &conn,
+            "SELECT id, case_id, started_at, completed_at, score FROM attempts ORDER BY started_at DESC",
+            &["id", "caseId", "startedAt", "completedAt", "score"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::NullableReal],
+        )?,
+        question_responses: query_json_rows(
+            &conn,
+            "SELECT id, attempt_id, question_id, answer_json, is_correct, submitted_at, awarded_points, max_points, hints_used, elapsed_ms, penalty_points FROM question_responses ORDER BY submitted_at DESC",
+            &["id", "attemptId", "questionId", "answer", "isCorrect", "submittedAt", "awardedPoints", "maxPoints", "hintsUsed", "elapsedMs", "penaltyPoints"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json, JsonColumn::BooleanInteger, JsonColumn::Text, JsonColumn::Real, JsonColumn::Real, JsonColumn::Integer, JsonColumn::Integer, JsonColumn::Real],
+        )?,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum JsonColumn {
+    Text,
+    NullableText,
+    Integer,
+    Real,
+    NullableReal,
+    BooleanInteger,
+    Json,
+    NullableJson,
+}
+
+fn query_json_rows(
+    conn: &Connection,
+    sql: &str,
+    names: &[&str],
+    columns: &[JsonColumn],
+) -> Result<Vec<Value>, String> {
+    if names.len() != columns.len() {
+        return Err("Backup export column metadata is inconsistent.".to_string());
+    }
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("Backup export could not prepare data: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let mut out = serde_json::Map::new();
+            for (index, (name, column)) in names.iter().zip(columns.iter()).enumerate() {
+                out.insert((*name).to_string(), row_value(row, index, *column)?);
+            }
+            Ok(Value::Object(out))
+        })
+        .map_err(|e| format!("Backup export could not read data: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Backup export row failed: {e}"))
+}
+
+fn row_value(row: &rusqlite::Row<'_>, index: usize, column: JsonColumn) -> rusqlite::Result<Value> {
+    Ok(match column {
+        JsonColumn::Text => Value::String(row.get::<_, String>(index)?),
+        JsonColumn::NullableText => row
+            .get::<_, Option<String>>(index)?
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        JsonColumn::Integer => json!(row.get::<_, i64>(index)?),
+        JsonColumn::Real => json!(row.get::<_, f64>(index)?),
+        JsonColumn::NullableReal => row
+            .get::<_, Option<f64>>(index)?
+            .map(|value| json!(value))
+            .unwrap_or(Value::Null),
+        JsonColumn::BooleanInteger => json!(row.get::<_, i64>(index)? != 0),
+        JsonColumn::Json => parse_json_cell(row.get::<_, String>(index)?),
+        JsonColumn::NullableJson => row
+            .get::<_, Option<String>>(index)?
+            .map(parse_json_cell)
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn parse_json_cell(raw: String) -> Value {
+    serde_json::from_str(&raw).unwrap_or(Value::String(raw))
 }
 
 fn initialize_schema(conn: &Connection) -> Result<(), String> {

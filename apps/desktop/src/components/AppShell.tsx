@@ -27,7 +27,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
           <div className="brand-mark">V</div>
           <div>
             <h1>VascEdu</h1>
-            <p>vascular training</p>
+            <p>vascular imaging training</p>
           </div>
         </div>
 
@@ -44,8 +44,8 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
         </nav>
 
         <div className="sidebar-note">
-          <strong>Guided practice</strong>
-          <span>Cases, measurements, and feedback</span>
+          <strong>Local-first desktop</strong>
+          <span>Cases, scans, planning, and progress stay on this workstation</span>
         </div>
       </aside>
 

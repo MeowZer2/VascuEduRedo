@@ -161,7 +161,14 @@ export function DevicesCatalogPage() {
         </aside>
 
         <article className="devices-detail content-card">
-          {selected ? <DeviceDetail device={selected} /> : <p className="muted">Pick a device to see details.</p>}
+          {selected ? (
+            <DeviceDetail device={selected} />
+          ) : (
+            <div className="empty-state compact">
+              <strong>No device selected</strong>
+              <span>Choose a device from the catalog, or adjust the filters to find matching devices.</span>
+            </div>
+          )}
         </article>
       </section>
     </div>

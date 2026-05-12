@@ -7,9 +7,10 @@ use db::{
     admin_import_case, admin_list_cases, admin_reorder_questions, admin_update_case,
     admin_update_device, admin_update_question, admin_validate_case, admin_validate_case_payload,
     complete_attempt, create_attempt, delete_case_bookmark, get_attempt_details, get_case,
-    get_case_questions, get_device, get_recent_activity, get_vessel_composition, list_attempts,
-    list_case_bookmarks, list_cases, list_device_categories, list_devices, list_vessel_compositions,
-    open_and_initialize, progress_by_case, progress_summary, reorder_case_bookmarks,
+    export_app_backup, get_case_questions, get_device, get_recent_activity, get_vessel_composition,
+    list_attempts, list_case_bookmarks, list_cases, list_device_categories, list_devices,
+    list_vessel_compositions, open_and_initialize, progress_by_case, progress_summary,
+    reorder_case_bookmarks,
     save_case_bookmark, save_vessel_composition, submit_question_response, DbState,
 };
 use serde::Serialize;
@@ -20,18 +21,28 @@ use volume::{
 };
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppInfo {
     name: &'static str,
     version: &'static str,
     backend: &'static str,
+    build: &'static str,
+    data_location: Option<String>,
 }
 
 #[tauri::command]
-fn app_info() -> AppInfo {
+fn app_info(app: tauri::AppHandle) -> AppInfo {
+    let data_location = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|path| path.display().to_string());
     AppInfo {
         name: "VascEdu",
-        version: "0.1.0",
+        version: env!("CARGO_PKG_VERSION"),
         backend: "Tauri/Rust command bridge active",
+        build: "local desktop",
+        data_location,
     }
 }
 
@@ -55,6 +66,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             validate_content_pack,
+            export_app_backup,
             dicom_discover_folder,
             volume_load,
             volume_load_dicom_series,

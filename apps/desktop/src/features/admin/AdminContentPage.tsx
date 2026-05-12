@@ -428,7 +428,7 @@ export function AdminContentPage({
     if (!selectedCaseId) return;
     const target = cases.find((c) => c.id === selectedCaseId);
     if (!target) return;
-    if (!window.confirm(`Delete "${target.title}" and all of its questions?`)) return;
+    if (!window.confirm(`Delete "${target.title}"?\n\nThis removes the case, questions, saved key images, attempts, and linked procedural plans from this local database.`)) return;
     setBusy(true);
     try {
       await adminDeleteCase(selectedCaseId);
@@ -603,7 +603,7 @@ export function AdminContentPage({
 
   async function deleteSelectedBookmark() {
     if (!selectedCaseId || !selectedBookmarkId) return;
-    if (!window.confirm('Delete this key image?')) return;
+    if (!window.confirm('Delete this saved key image from the case?')) return;
     setBusy(true);
     try {
       await deleteCaseBookmark(selectedBookmarkId);
@@ -679,7 +679,7 @@ export function AdminContentPage({
 
   async function deleteQuestion() {
     if (!questionDraft?.id || !selectedCaseId) return;
-    if (!window.confirm('Delete this question?')) return;
+    if (!window.confirm('Delete this question?\n\nLearners will no longer see it in this case.')) return;
     setBusy(true);
     try {
       await adminDeleteQuestion(questionDraft.id);
