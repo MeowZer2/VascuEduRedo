@@ -1286,11 +1286,11 @@ export function VesselComposerPage({
 
   return (
     <div className="page-stack composer-page">
-      <header className="page-header split-header">
+      <header className="page-header split-header planning-hero">
         <div>
-          <p className="eyebrow">Vessel composer</p>
-          <h2>Vascular procedural plan</h2>
-          <p>Structured vessel anatomy, branch relationships, and catalog-backed device placement.</p>
+          <p className="eyebrow">Planning workspace</p>
+          <h2>Angiogram and procedural planning.</h2>
+          <p>Build case-linked vessel anatomy, procedural steps, and device strategy when a case needs planning context.</p>
         </div>
         <div className="row-actions">
           {selectedCase && (

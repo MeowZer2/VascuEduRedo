@@ -114,6 +114,7 @@ export default function App() {
             cases={cases}
             onStart={() => setScreen('training')}
             onOpenCases={() => setScreen('cases')}
+            onOpenPlanning={() => openVesselComposer(selectedCaseId || null)}
           />
         )}
         {screen === 'cases' && <CaseLibraryPage cases={cases} onOpenCase={openCase} onStartCase={startCase} />}

@@ -74,10 +74,10 @@ export function DevicesCatalogPage() {
   if (!available) {
     return (
       <div className="page-stack">
-        <header className="page-header">
+        <header className="page-header devices-hero">
           <p className="eyebrow">Device catalog</p>
-          <h2>Desktop mode required</h2>
-          <p>Device data lives in local SQLite. Run the Tauri build (<code>pnpm dev</code>) to browse the catalog.</p>
+          <h2>Device reference opens in the desktop app.</h2>
+          <p>The catalog is available when VascEdu is running as the local desktop application.</p>
         </header>
       </div>
     );
@@ -85,17 +85,17 @@ export function DevicesCatalogPage() {
 
   return (
     <div className="page-stack devices-page">
-      <header className="page-header">
+      <header className="page-header devices-hero">
         <p className="eyebrow">Device catalog</p>
-        <h2>Vascular devices</h2>
-        <p>Local reference catalog used for device-selection questions and study.</p>
+        <h2>Vascular device reference.</h2>
+        <p>Browse device classes, manufacturers, sizing notes, and tags used in practice questions.</p>
       </header>
 
       <section className="devices-toolbar">
         <input
           className="text-input"
           type="search"
-          placeholder="Search by name, manufacturer, tag…"
+          placeholder="Search by name, manufacturer, or tag"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -133,9 +133,15 @@ export function DevicesCatalogPage() {
       <section className="devices-layout">
         <aside className="devices-list-panel">
           {loading ? (
-            <p className="muted">Loading device catalog...</p>
+            <div className="empty-state compact">
+              <strong>Loading catalog</strong>
+              <span>Preparing local device reference.</span>
+            </div>
           ) : filtered.length === 0 ? (
-            <p className="muted">{errorMsg ? 'Catalog is unavailable right now.' : 'No devices match the filters.'}</p>
+            <div className="empty-state compact">
+              <strong>{errorMsg ? 'Catalog unavailable' : 'No matching devices'}</strong>
+              <span>{errorMsg ? 'Try again once the desktop data is ready.' : 'Adjust search, category, or manufacturer filters.'}</span>
+            </div>
           ) : (
             <ul className="devices-list">
               {filtered.map((device) => (
@@ -179,6 +185,9 @@ export function DeviceDetail({ device }: { device: Device }) {
   return (
     <>
       <header className="device-detail-header">
+        <div className="device-visual-card" aria-hidden="true">
+          <span>{device.category.slice(0, 2).toUpperCase()}</span>
+        </div>
         <div>
           <p className="eyebrow">{device.category}{device.subtype ? ` · ${device.subtype}` : ''}</p>
           <h3>{device.name}</h3>

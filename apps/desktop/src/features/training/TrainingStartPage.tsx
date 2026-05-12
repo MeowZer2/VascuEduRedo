@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { type CSSProperties, useMemo, useState } from 'react';
 import { categories } from '../../data/sampleContent';
 import type { VascCase } from '../../types';
+import { getCategoryBackground } from '../cases/categoryBackgrounds';
 
 type PracticeMode = 'guided' | 'measurement' | 'review';
 
@@ -34,6 +35,13 @@ const modes: Array<{ id: PracticeMode; title: string; description: string }> = [
   },
 ];
 
+const practiceTracks = [
+  { title: 'Imaging interpretation', description: 'CTA anatomy, diagnosis, and treatment thresholds.' },
+  { title: 'Measurement practice', description: 'Calipers, planes, sizing, and surveillance questions.' },
+  { title: 'Device selection', description: 'Match anatomy and pathology to practical device choices.' },
+  { title: 'Procedural review', description: 'Step through angiogram context when a case includes a plan.' },
+];
+
 export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingStartPageProps) {
   const [difficulty, setDifficulty] = useState('any');
   const [topic, setTopic] = useState('any');
@@ -53,13 +61,13 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
 
   return (
     <div className="page-stack">
-      <section className="training-entry-panel">
+      <section className="training-entry-panel practice-hero">
         <div>
           <p className="eyebrow">Guided practice</p>
-          <h2>Build a focused imaging session.</h2>
+          <h2>Start a focused vascular training session.</h2>
           <p>
-            Choose a topic and session style. VascEdu will select a case and keep the scan centered
-            on the learning task.
+            Choose a topic, level, and learning mode. VascEdu opens a case with the imaging and
+            questions arranged around the task.
           </p>
         </div>
         <div className="training-entry-actions">
@@ -75,6 +83,16 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
             Browse cases
           </button>
         </div>
+      </section>
+
+      <section className="practice-track-grid">
+        {practiceTracks.map((track) => (
+          <article className="practice-track-card" key={track.title}>
+            <div className="track-visual" aria-hidden="true" />
+            <strong>{track.title}</strong>
+            <span>{track.description}</span>
+          </article>
+        ))}
       </section>
 
       <section className="training-picker-grid">
@@ -97,6 +115,20 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
 
         <article className="content-card training-picker-card">
           <h3>Focus</h3>
+          <div className="topic-tile-grid">
+            {categories.map((category) => (
+              <button
+                key={category.id}
+                type="button"
+                className={topic === category.id ? 'topic-tile selected' : 'topic-tile'}
+                style={{ '--topic-bg': `url(${getCategoryBackground(category.id) ?? ''})` } as CSSProperties}
+                onClick={() => setTopic(category.id)}
+              >
+                <strong>{category.title}</strong>
+                <span>{cases.filter((item) => item.categoryId === category.id).length} cases</span>
+              </button>
+            ))}
+          </div>
           <label className="field-label">
             Topic
             <select className="text-input" value={topic} onChange={(event) => setTopic(event.target.value)}>
