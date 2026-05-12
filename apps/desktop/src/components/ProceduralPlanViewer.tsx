@@ -23,6 +23,7 @@ export function ProceduralPlanViewer({
   const objects = plan.data.proceduralObjects.filter(
     (object) => !activeStep || !object.stepId || object.stepId === activeStep.id,
   );
+  const activeStepNotes = activeStep?.notes?.trim() ?? '';
 
   return (
     <div className={compact ? 'procedure-viewer compact' : 'procedure-viewer'}>
@@ -91,16 +92,24 @@ export function ProceduralPlanViewer({
       </svg>
       {!compact && (
         <div className="procedure-viewer-context">
-          <strong>{activeStep?.label ?? 'Procedural context'}</strong>
+          <div>
+            <strong>{activeStep?.label ?? 'Procedural context'}</strong>
+            {activeStepNotes ? <span>{activeStepNotes}</span> : null}
+          </div>
           <span>
             {objects.length === 0
-              ? 'No procedural objects assigned to this step.'
-              : objects.map((object) => `${object.label} (${object.state})`).join(' / ')}
+              ? 'No devices assigned to this step.'
+              : objects.map((object) => `${object.label} (${formatObjectState(object)})`).join(' / ')}
           </span>
         </div>
       )}
     </div>
   );
+}
+
+function formatObjectState(object: ProceduralObject): string {
+  const type = object.objectType.replace(/([A-Z])/g, ' $1').toLowerCase();
+  return `${type}, ${object.state}`;
 }
 
 function LearnerSegment({ segment }: { segment: VesselSegment }) {

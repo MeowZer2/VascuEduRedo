@@ -46,6 +46,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 
 .hero-panel { min-height: 310px; border: 1px solid var(--border); border-radius: 24px; padding: 34px; background: linear-gradient(135deg, rgba(143,184,255,0.16), rgba(116,215,200,0.08)), rgba(255,255,255,0.035); display: grid; grid-template-columns: 1.4fr 0.6fr; gap: 24px; align-items: center; box-shadow: var(--shadow); }
 .hero-actions, .row-actions, .question-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 22px; }
+.compact-actions { margin-top: 0; }
 .hero-card { border: 1px solid rgba(255,255,255,0.12); border-radius: 26px; min-height: 210px; background: radial-gradient(circle at top, rgba(255,255,255,0.18), rgba(255,255,255,0.04)); display: grid; align-content: center; justify-items: center; gap: 10px; text-align: center; padding: 26px; }
 .hero-card strong { font-size: 1.6rem; }
 .hero-card span { color: var(--muted); }
@@ -213,10 +214,19 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .procedure-viewer-object.state-undeployed { opacity: 0.82; }
 .procedure-viewer-object.selected line, .procedure-viewer-object.selected ellipse, .procedure-viewer-object.selected rect { filter: drop-shadow(0 0 7px rgba(255,209,102,0.85)); stroke: #ffd166; }
 .procedure-viewer-context { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(0,0,0,0.18); }
+.procedure-viewer-context > div { display: grid; gap: 2px; }
 .procedure-viewer-context span { color: var(--muted); line-height: 1.35; }
 .procedural-question-context { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 10px 0 12px; padding: 10px 12px; border: 1px solid rgba(143,184,255,0.24); border-radius: 12px; background: rgba(143,184,255,0.08); }
 .procedural-question-context > div { display: grid; gap: 2px; }
 .procedural-question-context strong { font-size: 0.94rem; }
+.procedural-steps-panel { display: grid; gap: 10px; }
+.panel-section-toggle.static { cursor: default; }
+.procedural-step-list, .case-procedure-step-list { display: grid; gap: 8px; }
+.procedural-step-row, .case-procedure-step { display: grid; gap: 3px; width: 100%; padding: 9px 10px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); text-align: left; }
+.procedural-step-row:hover, .case-procedure-step:hover { border-color: rgba(143,184,255,0.32); background: rgba(143,184,255,0.08); }
+.procedural-step-row.active, .case-procedure-step.active { border-color: rgba(143,184,255,0.52); background: rgba(143,184,255,0.14); }
+.procedural-step-row span, .case-procedure-step span { color: var(--muted); font-size: 0.8rem; line-height: 1.35; }
+.procedural-step-current { margin: 0; }
 
 .viewer-header-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .viewer-source-line { margin: 6px 0 0 !important; font-size: 0.82rem; color: #c3d4ee; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -824,6 +834,8 @@ body.composer-dragging, body.composer-dragging * { user-select: none !important;
 .case-plan-summary p { grid-column: 1 / -1; margin: 0; color: #dbe4f2; }
 .case-plan-summary .case-plan-steps { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; padding: 0; border: 0; background: transparent; }
 .case-plan-steps span { display: inline-flex; width: fit-content; padding: 6px 9px; border-radius: 999px; color: #d8e6ff; background: rgba(120,166,255,0.12); border: 1px solid rgba(120,166,255,0.22); font-weight: 800; }
+.case-procedure-preview { display: grid; grid-template-columns: minmax(220px, 0.34fr) minmax(0, 0.66fr); gap: 14px; margin-top: 14px; align-items: start; }
+.case-procedure-step-list { max-height: 280px; overflow: auto; }
 .import-textarea { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
 
 /* Progress + attempt review */
@@ -885,6 +897,7 @@ body.composer-dragging, body.composer-dragging * { user-select: none !important;
   .training-aside { position: static; }
   .training-layout-aside-collapsed .training-aside-toggle { writing-mode: horizontal-tb; min-height: 0; }
   .category-grid, .grid-2 { grid-template-columns: 1fr; }
+  .case-procedure-preview { grid-template-columns: 1fr; }
   .admin-layout { grid-template-columns: 1fr; }
   .admin-cases-panel { position: static; max-height: none; }
   .admin-questions-grid { grid-template-columns: 1fr; }

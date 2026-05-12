@@ -113,6 +113,12 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
   );
   const activeProceduralStep =
     proceduralSteps.find((step) => step.id === activeProceduralStepId) ?? proceduralSteps[0] ?? null;
+  const proceduralObjectsForStep = useMemo(() => {
+    if (!proceduralPlan || !activeProceduralStep) return [];
+    return proceduralPlan.data.proceduralObjects.filter(
+      (object) => !object.stepId || object.stepId === activeProceduralStep.id,
+    );
+  }, [activeProceduralStep, proceduralPlan]);
 
   useEffect(() => {
     if (!activeQuestion?.proceduralStepId || !proceduralPlan) return;
@@ -302,6 +308,33 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             ) : null}
           </section>
         ) : null}
+        {!asideCollapsed && proceduralPlan && proceduralSteps.length > 0 ? (
+          <section className="question-card procedural-steps-panel">
+            <div className="panel-section-toggle static">
+              <span>Procedural steps</span>
+              <strong>{proceduralSteps.length}</strong>
+            </div>
+            <div className="procedural-step-list">
+              {proceduralSteps.map((step) => (
+                <button
+                  key={step.id}
+                  type="button"
+                  className={activeProceduralStep?.id === step.id ? 'procedural-step-row active' : 'procedural-step-row'}
+                  onClick={() => jumpToProceduralStep(step.id)}
+                >
+                  <strong>{step.label}</strong>
+                  <span>{step.notes?.trim() || proceduralStepObjectSummary(proceduralPlan, step.id)}</span>
+                </button>
+              ))}
+            </div>
+            {activeProceduralStep ? (
+              <p className="muted small procedural-step-current">
+                Viewing: {activeProceduralStep.label}
+                {proceduralObjectsForStep.length > 0 ? ` · ${proceduralObjectsForStep.length} procedural item${proceduralObjectsForStep.length === 1 ? '' : 's'}` : ''}
+              </p>
+            ) : null}
+          </section>
+        ) : null}
         {!asideCollapsed && completedAttempt ? (
           <CaseCompletionSummary attempt={completedAttempt} onFinish={onFinish} />
         ) : !asideCollapsed ? (
@@ -321,6 +354,15 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
       </aside>
     </div>
   );
+}
+
+function proceduralStepObjectSummary(plan: VesselCompositionRow, stepId: string): string {
+  const objects = plan.data.proceduralObjects.filter((object) => !object.stepId || object.stepId === stepId);
+  if (objects.length === 0) return 'Review the angiographic context for this step.';
+  return objects
+    .slice(0, 3)
+    .map((object) => object.label)
+    .join(', ');
 }
 
 function CaseCompletionSummary({

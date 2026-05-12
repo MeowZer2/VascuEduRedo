@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ProceduralPlanViewer } from '../../components/ProceduralPlanViewer';
 import { Tag } from '../../components/Tag';
 import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
 import type { VascCase } from '../../types';
@@ -23,15 +24,23 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
   const references = vascCase.references ?? [];
   const reviewedAt = formatReviewedAt(vascCase.lastReviewedAt);
   const [linkedPlan, setLinkedPlan] = useState<VesselCompositionRow | null>(null);
+  const [previewStepId, setPreviewStepId] = useState('');
 
   useEffect(() => {
     let cancelled = false;
     void listVesselCompositions(vascCase.id)
       .then((rows) => {
-        if (!cancelled) setLinkedPlan(rows[0] ?? null);
+        if (!cancelled) {
+          const plan = rows[0] ?? null;
+          setLinkedPlan(plan);
+          setPreviewStepId(plan?.data.proceduralSteps[0]?.id ?? '');
+        }
       })
       .catch(() => {
-        if (!cancelled) setLinkedPlan(null);
+        if (!cancelled) {
+          setLinkedPlan(null);
+          setPreviewStepId('');
+        }
       });
     return () => {
       cancelled = true;
@@ -143,9 +152,36 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
         <section className="content-card">
           <div className="section-title-row">
             <h3>Procedural plan</h3>
-            <button className="secondary-button small" onClick={onOpenComposer}>Open procedural plan</button>
+            <div className="row-actions compact-actions">
+              <button className="secondary-button small" onClick={onStart}>View procedural steps</button>
+              <button className="secondary-button small" onClick={onOpenComposer}>Open procedural plan</button>
+            </div>
           </div>
           <PlanSummary linkedPlan={linkedPlan} />
+          <div className="case-procedure-preview">
+            <div className="case-procedure-step-list">
+              {linkedPlan.data.proceduralSteps
+                .slice()
+                .sort((a, b) => a.orderIndex - b.orderIndex)
+                .map((step) => (
+                  <button
+                    key={step.id}
+                    type="button"
+                    className={previewStepId === step.id ? 'case-procedure-step active' : 'case-procedure-step'}
+                    onClick={() => setPreviewStepId(step.id)}
+                  >
+                    <strong>{step.label}</strong>
+                    {step.notes ? <span>{step.notes}</span> : null}
+                  </button>
+                ))}
+            </div>
+            <ProceduralPlanViewer
+              plan={linkedPlan}
+              activeStepId={previewStepId || linkedPlan.data.proceduralSteps[0]?.id || 'baseline'}
+              compact
+              onStepChange={setPreviewStepId}
+            />
+          </div>
         </section>
       )}
 
@@ -185,6 +221,10 @@ function PlanSummary({ linkedPlan }: { linkedPlan: VesselCompositionRow }) {
   const pathologicSegments = data.segments.filter(
     (segment) => segment.pathologyType !== 'normal' || segment.targetForIntervention,
   );
+  const target = pathologicSegments[0];
+  const devices = data.proceduralObjects
+    .filter((object) => object.objectType !== 'guidewire' && object.objectType !== 'catheter')
+    .map((object) => object.label);
   const notes = typeof data.metadata.notes === 'string' ? data.metadata.notes : '';
 
   return (
@@ -218,9 +258,15 @@ function PlanSummary({ linkedPlan }: { linkedPlan: VesselCompositionRow }) {
       )}
       {pathologicSegments.length > 0 && (
         <p>
-          {pathologicSegments.slice(0, 3).map((segment) => `${segment.label}: ${segment.pathologyType}`).join('; ')}
+          <strong>Target:</strong> {target ? `${target.label} (${target.pathologyType})` : 'Intervention target'}
+          {pathologicSegments.length > 1 ? ` · ${pathologicSegments.length - 1} additional target${pathologicSegments.length === 2 ? '' : 's'}` : ''}
         </p>
       )}
+      {devices.length > 0 ? (
+        <p>
+          <strong>Devices:</strong> {Array.from(new Set(devices)).slice(0, 4).join(', ')}
+        </p>
+      ) : null}
       {notes && <p className="muted small">{notes}</p>}
     </div>
   );
