@@ -85,7 +85,7 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
         </div>
       </section>
 
-      <section className="practice-track-grid">
+      <section className="practice-track-grid practice-builder-intro">
         {practiceTracks.map((track) => (
           <article className="practice-track-card" key={track.title}>
             <div className="track-visual" aria-hidden="true" />
@@ -120,7 +120,7 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
               <button
                 key={category.id}
                 type="button"
-                className={topic === category.id ? 'topic-tile selected' : 'topic-tile'}
+                className={topic === category.id ? 'topic-tile image-slot image-slot-compact selected' : 'topic-tile image-slot image-slot-compact'}
                 style={{ '--topic-bg': `url(${getCategoryBackground(category.id) ?? ''})` } as CSSProperties}
                 onClick={() => setTopic(category.id)}
               >

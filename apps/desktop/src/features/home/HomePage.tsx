@@ -1,5 +1,4 @@
 import type { CSSProperties } from 'react';
-import { StatCard } from '../../components/StatCard';
 import { categories } from '../../data/sampleContent';
 import { getProgressSummary } from '../../lib/progress';
 import type { VascCase } from '../../types';
@@ -33,7 +32,7 @@ export function HomePage({ cases, onStart, onOpenCases, onOpenPlanning }: HomePa
             <button className="secondary-button" onClick={onOpenPlanning}>Open planning</button>
           </div>
         </div>
-        <div className="hero-image-card vascular-visual-card">
+        <div className="hero-image-card vascular-visual-card image-slot image-slot-hero">
           <div className="vascular-visual-lumen" />
           <div>
             <strong>CTA + Angiogram</strong>
@@ -42,11 +41,19 @@ export function HomePage({ cases, onStart, onOpenCases, onOpenPlanning }: HomePa
         </div>
       </section>
 
-      <section className="grid-4">
-        <StatCard label="Cases" value={cases.length} helper="library cases" />
-        <StatCard label="Topics" value={categories.length} helper="vascular modules" />
-        <StatCard label="Attempts" value={progress.totalAttempts} helper="local progress" />
-        <StatCard label="Average" value={`${Math.round(progress.averagePercent)}%`} helper="across attempts" />
+      <section className="quick-action-band" aria-label="Quick actions">
+        <button type="button" onClick={onStart}>
+          <strong>Practice</strong>
+          <span>Start a guided session</span>
+        </button>
+        <button type="button" onClick={onOpenCases}>
+          <strong>Cases</strong>
+          <span>Open the case library</span>
+        </button>
+        <button type="button" onClick={onOpenPlanning}>
+          <strong>Planning</strong>
+          <span>Work with angiogram context</span>
+        </button>
       </section>
 
       <section className="dashboard-grid">
@@ -79,11 +86,16 @@ export function HomePage({ cases, onStart, onOpenCases, onOpenPlanning }: HomePa
         </article>
       </section>
 
-      <section className="module-showcase">
+      <section className="home-feature-section">
+        <div>
+          <p className="eyebrow">Featured learning areas</p>
+          <h3>Vascular topics in focus</h3>
+        </div>
+        <div className="module-showcase">
         {categories.map((category) => (
           <article
             key={category.id}
-            className="module-card"
+            className="module-card image-slot image-slot-topic"
             style={{ '--module-bg': `url(${getCategoryBackground(category.id) ?? ''})` } as CSSProperties}
           >
             <span className="pill">{cases.filter((item) => item.categoryId === category.id).length} cases</span>
@@ -91,6 +103,7 @@ export function HomePage({ cases, onStart, onOpenCases, onOpenPlanning }: HomePa
             <p>{category.description}</p>
           </article>
         ))}
+        </div>
       </section>
 
       <section className="content-card recent-activity-card">
@@ -109,7 +122,7 @@ export function HomePage({ cases, onStart, onOpenCases, onOpenPlanning }: HomePa
               <div key={item.id} className="recent-case-card">
                 <strong>{item.title}</strong>
                 <span>{item.diagnosis}</span>
-                <small>{item.estimatedMinutes} min · {item.difficulty}</small>
+                <small>{item.estimatedMinutes} min - {item.difficulty}</small>
               </div>
             ))}
           </div>

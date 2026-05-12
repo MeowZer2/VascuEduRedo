@@ -11,6 +11,7 @@ import { ProgressPage } from './features/progress/ProgressPage';
 import { SettingsPage } from './features/settings/SettingsPage';
 import { TrainingStartPage, type TrainingFilters } from './features/training/TrainingStartPage';
 import { TrainingWorkspace } from './features/training/TrainingWorkspace';
+import { applyThemeMode, getStoredThemeMode } from './lib/appearance';
 import { loadCases } from './lib/content';
 import { UnsavedChangesProvider } from './lib/productionState';
 import type { VascCase } from './types';
@@ -41,6 +42,15 @@ export default function App() {
     () => cases.find((item) => item.id === selectedCaseId),
     [cases, selectedCaseId],
   );
+
+  useEffect(() => {
+    applyThemeMode(getStoredThemeMode());
+    const media = window.matchMedia?.('(prefers-color-scheme: light)');
+    if (!media) return undefined;
+    const onChange = () => applyThemeMode(getStoredThemeMode());
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
 
   const refreshCases = useCallback(async () => {
     const loaded = await loadCases();

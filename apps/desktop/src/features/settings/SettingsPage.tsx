@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { exportAppBackup } from '../../lib/admin';
+import { getStoredThemeMode, saveThemeMode, type ThemeMode } from '../../lib/appearance';
 import { friendlyError } from '../../lib/productionState';
 import { safeInvoke } from '../../lib/tauri';
 
@@ -14,10 +15,16 @@ interface AppInfo {
 export function SettingsPage() {
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredThemeMode());
 
   useEffect(() => {
     safeInvoke<AppInfo>('app_info').then(setAppInfo);
   }, []);
+
+  function updateThemeMode(mode: ThemeMode) {
+    setThemeMode(mode);
+    saveThemeMode(mode);
+  }
 
   async function exportBackup() {
     setBackupStatus(null);
@@ -52,6 +59,23 @@ export function SettingsPage() {
       </header>
 
       <section className="grid-2">
+        <article className="content-card appearance-card">
+          <h3>Appearance</h3>
+          <p>Choose the presentation style for learner-facing screens. System follows the desktop preference.</p>
+          <div className="segmented-control" role="group" aria-label="Theme mode">
+            {(['dark', 'light', 'system'] as ThemeMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={themeMode === mode ? 'active' : ''}
+                onClick={() => updateThemeMode(mode)}
+              >
+                {mode[0].toUpperCase() + mode.slice(1)}
+              </button>
+            ))}
+          </div>
+        </article>
+
         <article className="content-card">
           <h3>About VascEdu</h3>
           <p>Local-first vascular imaging and endovascular training workspace for CT review, procedural planning, and guided practice.</p>

@@ -58,30 +58,12 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
         </div>
       </header>
 
-      <section className="category-grid">
-        {categories.map((category) => {
-          const count = cases.filter((item) => item.categoryId === category.id).length;
-          const backgroundImage = getCategoryBackground(category.id);
-          const cardStyle = backgroundImage
-            ? ({ '--category-bg': `url(${backgroundImage})` } as CSSProperties)
-            : undefined;
-          return (
-            <article
-              className={backgroundImage ? 'category-card has-category-bg' : 'category-card'}
-              key={category.id}
-              style={cardStyle}
-            >
-              <h3>{category.title}</h3>
-              <p>{category.description}</p>
-              <span>{count} case{count === 1 ? '' : 's'}</span>
-            </article>
-          );
-        })}
-      </section>
-
-      <section className="content-card">
+      <section className="case-library-surface">
         <div className="section-title-row">
-          <h3>All cases</h3>
+          <div>
+            <h3>Browse cases</h3>
+            <p className="muted small">Search the case archive by diagnosis, topic, tag, or level.</p>
+          </div>
           <span className="pill">{filteredCases.length} shown</span>
         </div>
         <div className="library-filter-bar">
@@ -122,7 +104,7 @@ export function CaseLibraryPage({ cases, onOpenCase, onStartCase }: CaseLibraryP
                   key={item.id}
                   style={{ '--case-bg': `url(${getCategoryBackground(item.categoryId) ?? ''})` } as CSSProperties}
                 >
-                  <div className="case-card-image">
+                  <div className="case-card-image image-slot image-slot-case">
                     <span className="pill">{category?.title ?? 'Vascular case'}</span>
                   </div>
                   <div className="case-card-body">
