@@ -9,11 +9,10 @@ interface AppShellProps {
 
 const learnerNavItems: Array<{ id: Screen; label: string; kicker: string; icon: string }> = [
   { id: 'home', label: 'Home', kicker: 'Dashboard', icon: 'H' },
-  { id: 'training', label: 'Practice', kicker: 'Guided sessions', icon: 'P' },
-  { id: 'cases', label: 'Cases', kicker: 'Case library', icon: 'C' },
-  { id: 'vessel-composer', label: 'Planning', kicker: 'Angiogram workspace', icon: 'L' },
+  { id: 'cases', label: 'Cases', kicker: 'Discover & practice', icon: 'C' },
+  { id: 'vessel-composer', label: 'Planning', kicker: 'Procedural workspace', icon: 'L' },
   { id: 'devices', label: 'Devices', kicker: 'Catalog reference', icon: 'D' },
-  { id: 'progress', label: 'Progress', kicker: 'Learning record', icon: 'R' },
+  { id: 'progress', label: 'Progress', kicker: 'Performance review', icon: 'R' },
 ];
 
 const utilityNavItems: Array<{ id: Screen; label: string; kicker: string; icon: string }> = [
@@ -22,7 +21,12 @@ const utilityNavItems: Array<{ id: Screen; label: string; kicker: string; icon: 
 ];
 
 export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) {
-  const activeNav = activeScreen === 'training-session' ? 'training' : activeScreen;
+  // Practice routes (training start + session) collapse onto Cases visually
+  // because the merged Cases page is the single learner discovery surface.
+  const activeNav: Screen =
+    activeScreen === 'training' || activeScreen === 'training-session'
+      ? 'cases'
+      : activeScreen;
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -47,7 +51,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
 
         <div className="sidebar-note">
           <strong>Local-first desktop</strong>
-          <span>Cases, scans, planning, and progress stay on this workstation</span>
+          <span>Cases, scans, planning, and progress stay on this workstation.</span>
         </div>
       </aside>
 

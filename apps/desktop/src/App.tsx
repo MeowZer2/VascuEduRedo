@@ -122,12 +122,32 @@ export default function App() {
         {screen === 'home' && (
           <HomePage
             cases={cases}
-            onStart={() => setScreen('training')}
+            onStart={() => {
+              const target = selectedCase ?? cases[0];
+              if (target) {
+                setSelectedCaseId(target.id);
+                setScreen('training-session');
+              } else {
+                setScreen('cases');
+              }
+            }}
             onOpenCases={() => setScreen('cases')}
             onOpenPlanning={() => openVesselComposer(selectedCaseId || null)}
+            onOpenCase={openCase}
+            onOpenProgress={() => setScreen('progress')}
+            onOpenDevices={() => setScreen('devices')}
           />
         )}
-        {screen === 'cases' && <CaseLibraryPage cases={cases} onOpenCase={openCase} onStartCase={startCase} />}
+        {screen === 'cases' && (
+          <CaseLibraryPage
+            cases={cases}
+            onOpenCase={openCase}
+            onStartCase={startCase}
+            onQuickPractice={({ difficulty, topic }) =>
+              startGuidedTraining({ difficulty, topic, mode: 'guided' })
+            }
+          />
+        )}
         {screen === 'case-detail' && selectedCase && (
           <CaseDetailPage
             vascCase={selectedCase}
