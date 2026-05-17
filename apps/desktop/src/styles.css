@@ -1112,6 +1112,30 @@ button.topic-card { width: 100%; cursor: pointer; }
 
 .learner-cases-page .case-card-grid { gap: 16px; }
 
+/* ─────────── Home dashboard (minimal) ─────────── */
+.home-dashboard--minimal { gap: 16px; }
+.home-dashboard--minimal .image-banner-card { min-height: 220px; aspect-ratio: 24 / 7; padding: 28px 32px; }
+.home-dashboard--minimal .image-banner-card-content { gap: 14px; max-width: 560px; }
+.home-dashboard--minimal .image-banner-card-content h2 { font-size: clamp(1.7rem, 3vw, 2.6rem); }
+.home-dashboard--minimal .image-banner-card-content .eyebrow { margin-bottom: -2px; }
+
+.home-tile-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.home-tile-grid .action-tile { aspect-ratio: 5 / 4; min-height: 220px; padding: 22px; align-items: flex-end; }
+.home-tile-grid .action-tile-content strong { font-size: 1.5rem; letter-spacing: -0.01em; line-height: 1.05; color: #fbfdff; text-shadow: 0 2px 18px rgba(0,0,0,0.4); }
+.home-tile-grid .action-tile-content span { display: none; }
+.home-tile-grid .action-tile-overlay { background: linear-gradient(180deg, rgba(5,8,14,0.05) 0%, rgba(5,8,14,0.5) 60%, rgba(5,8,14,0.92) 100%); }
+.home-tile-grid .action-tile--primary .action-tile-overlay { background: linear-gradient(180deg, rgba(47,111,189,0.2) 0%, rgba(47,111,189,0.55) 50%, rgba(5,8,14,0.92) 100%); }
+
+.home-continue-card { position: relative; isolation: isolate; overflow: hidden; border-radius: 20px; border: 1px solid var(--border); background-color: #0c121b; background-size: cover; background-position: center; min-height: 220px; padding: 26px 30px; display: flex; align-items: flex-end; box-shadow: var(--shadow); color: #f1f5fb; }
+.home-continue-overlay { position: absolute; inset: 0; background: linear-gradient(110deg, rgba(5,8,14,0.92) 0%, rgba(5,8,14,0.7) 45%, rgba(5,8,14,0.18) 100%); z-index: -1; }
+.home-continue-content { position: relative; display: grid; gap: 10px; max-width: 540px; }
+.home-continue-content h3 { margin: 0; font-size: clamp(1.3rem, 2.4vw, 1.9rem); line-height: 1.15; color: #fbfdff; letter-spacing: -0.02em; }
+.home-continue-meta { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; font-size: 0.78rem; font-weight: 700; text-transform: capitalize; color: #cfe0ff; }
+.home-continue-meta li { padding: 4px 9px; border-radius: 999px; background: rgba(7,10,16,0.55); border: 1px solid rgba(217,232,255,0.22); }
+
+:root[data-theme="light"] .home-continue-card { color: #ffffff; }
+:root[data-theme="light"] .home-tile-grid .action-tile-content strong { color: #ffffff; }
+
 /* ─────────── Light-theme structural overrides ─────────── */
 :root[data-theme="light"] body {
   background: radial-gradient(circle at 8% 0%, rgba(143,184,255,0.18) 0, transparent 36rem),
@@ -1180,6 +1204,8 @@ button.topic-card { width: 100%; cursor: pointer; }
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app-shell { grid-template-columns: 240px 1fr; }
   .home-hero, .dashboard-grid, .training-entry-panel, .continue-grid { grid-template-columns: 1fr; }
+  .home-tile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-dashboard--minimal .image-banner-card { aspect-ratio: auto; }
   .library-filter-bar { grid-template-columns: 1fr; }
   .image-banner-card--hero { aspect-ratio: auto; min-height: 220px; padding: 22px; }
   .image-banner-card-content h2 { font-size: 1.45rem; }
