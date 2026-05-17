@@ -320,6 +320,33 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("Schema init failed: {e}"))?;
     ensure_question_response_columns(conn)?;
+    ensure_attempt_profile_column(conn)?;
+    Ok(())
+}
+
+/// Sentinel profile id for attempts created before local profiles existed (or
+/// when no profile id is supplied). The frontend's one-time migration reassigns
+/// these rows onto the default local profile via `reassign_attempts_profile`.
+pub const LEGACY_PROFILE_ID: &str = "local-default";
+
+/// Additive, non-destructive: give `attempts` a `profile_id` so residents
+/// sharing a workstation don't share SQLite progress/review. Existing rows are
+/// backfilled with the legacy sentinel (idempotent — safe to run every start).
+fn ensure_attempt_profile_column(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "attempts", "profile_id")? {
+        conn.execute("ALTER TABLE attempts ADD COLUMN profile_id TEXT", [])
+            .map_err(|e| format!("attempts add column profile_id failed: {e}"))?;
+    }
+    conn.execute(
+        "UPDATE attempts SET profile_id = ?1 WHERE profile_id IS NULL",
+        params![LEGACY_PROFILE_ID],
+    )
+    .map_err(|e| format!("attempts profile_id backfill failed: {e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attempts_profile ON attempts(profile_id, started_at)",
+        [],
+    )
+    .map_err(|e| format!("attempts profile index failed: {e}"))?;
     Ok(())
 }
 
@@ -596,13 +623,18 @@ fn now_iso() -> String {
 }
 
 #[tauri::command]
-pub fn create_attempt(state: State<DbState>, case_id: String) -> Result<AttemptRow, String> {
+pub fn create_attempt(
+    state: State<DbState>,
+    case_id: String,
+    profile_id: Option<String>,
+) -> Result<AttemptRow, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let id = Uuid::new_v4().to_string();
     let started_at = now_iso();
+    let profile_id = profile_id.unwrap_or_else(|| LEGACY_PROFILE_ID.to_string());
     conn.execute(
-        "INSERT INTO attempts (id, case_id, started_at, completed_at, score) VALUES (?1, ?2, ?3, NULL, NULL)",
-        params![id, case_id, started_at],
+        "INSERT INTO attempts (id, case_id, started_at, completed_at, score, profile_id) VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
+        params![id, case_id, started_at, profile_id],
     )
     .map_err(|e| format!("create_attempt insert failed: {e}"))?;
     Ok(AttemptRow {
@@ -612,6 +644,28 @@ pub fn create_attempt(state: State<DbState>, case_id: String) -> Result<AttemptR
         completed_at: None,
         score: None,
     })
+}
+
+/// One-time, non-destructive migration helper: move attempts owned by one
+/// profile id onto another (used to claim legacy/sentinel rows for the default
+/// local profile). Returns the number of rows reassigned.
+#[tauri::command]
+pub fn reassign_attempts_profile(
+    state: State<DbState>,
+    from_profile_id: String,
+    to_profile_id: String,
+) -> Result<i64, String> {
+    if from_profile_id == to_profile_id {
+        return Ok(0);
+    }
+    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let changed = conn
+        .execute(
+            "UPDATE attempts SET profile_id = ?2 WHERE profile_id = ?1",
+            params![from_profile_id, to_profile_id],
+        )
+        .map_err(|e| format!("reassign_attempts_profile failed: {e}"))?;
+    Ok(changed as i64)
 }
 
 #[tauri::command]
@@ -713,49 +767,44 @@ pub fn complete_attempt(
 pub fn list_attempts(
     state: State<DbState>,
     case_id: Option<String>,
+    profile_id: Option<String>,
 ) -> Result<Vec<AttemptRow>, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let mut out = Vec::new();
-    if let Some(case_id) = case_id {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, case_id, started_at, completed_at, score FROM attempts WHERE case_id = ?1 ORDER BY started_at DESC",
-            )
-            .map_err(|e| format!("list_attempts prepare failed: {e}"))?;
-        let rows = stmt
-            .query_map(params![case_id], |row| {
-                Ok(AttemptRow {
-                    id: row.get(0)?,
-                    case_id: row.get(1)?,
-                    started_at: row.get(2)?,
-                    completed_at: row.get(3)?,
-                    score: row.get(4)?,
-                })
-            })
-            .map_err(|e| format!("list_attempts query failed: {e}"))?;
-        for row in rows {
-            out.push(row.map_err(|e| format!("list_attempts row failed: {e}"))?);
-        }
+    let mut conditions: Vec<&str> = Vec::new();
+    let mut args: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    if let Some(ref c) = case_id {
+        conditions.push("case_id = ?");
+        args.push(c);
+    }
+    if let Some(ref p) = profile_id {
+        conditions.push("profile_id = ?");
+        args.push(p);
+    }
+    let where_clause = if conditions.is_empty() {
+        String::new()
     } else {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, case_id, started_at, completed_at, score FROM attempts ORDER BY started_at DESC",
-            )
-            .map_err(|e| format!("list_attempts prepare failed: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(AttemptRow {
-                    id: row.get(0)?,
-                    case_id: row.get(1)?,
-                    started_at: row.get(2)?,
-                    completed_at: row.get(3)?,
-                    score: row.get(4)?,
-                })
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT id, case_id, started_at, completed_at, score FROM attempts{where_clause} ORDER BY started_at DESC"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("list_attempts prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+            Ok(AttemptRow {
+                id: row.get(0)?,
+                case_id: row.get(1)?,
+                started_at: row.get(2)?,
+                completed_at: row.get(3)?,
+                score: row.get(4)?,
             })
-            .map_err(|e| format!("list_attempts query failed: {e}"))?;
-        for row in rows {
-            out.push(row.map_err(|e| format!("list_attempts row failed: {e}"))?);
-        }
+        })
+        .map_err(|e| format!("list_attempts query failed: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("list_attempts row failed: {e}"))?);
     }
     Ok(out)
 }
@@ -1384,34 +1433,72 @@ fn build_measurement_detail(question_data: &Value, answer: &Value) -> Option<Mea
 }
 
 #[tauri::command]
-pub fn progress_summary(state: State<DbState>) -> Result<ProgressSummary, String> {
+pub fn progress_summary(
+    state: State<DbState>,
+    profile_id: Option<String>,
+) -> Result<ProgressSummary, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
 
+    // Profile scoping: attempt rows filter on `profile_id`; response rows filter
+    // transitively via their attempt. Empty fragments when no profile is given
+    // keep the command backward-compatible.
+    let has_p = profile_id.is_some();
+    let prof_args = || -> Vec<&dyn rusqlite::ToSql> {
+        let mut v: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        if let Some(ref p) = profile_id {
+            v.push(p);
+        }
+        v
+    };
+    let a_where = if has_p { " WHERE profile_id = ?1" } else { "" };
+    let a_and = if has_p { " AND profile_id = ?1" } else { "" };
+    let r_scope = if has_p {
+        " attempt_id IN (SELECT id FROM attempts WHERE profile_id = ?1)"
+    } else {
+        ""
+    };
+
     let total_attempts: i64 = conn
-        .query_row("SELECT COUNT(*) FROM attempts", [], |r| r.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM attempts{a_where}"),
+            rusqlite::params_from_iter(prof_args().iter()),
+            |r| r.get(0),
+        )
         .map_err(|e| format!("progress_summary count attempts failed: {e}"))?;
     let completed_attempts: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM attempts WHERE completed_at IS NOT NULL",
-            [],
+            &format!("SELECT COUNT(*) FROM attempts WHERE completed_at IS NOT NULL{a_and}"),
+            rusqlite::params_from_iter(prof_args().iter()),
             |r| r.get(0),
         )
         .map_err(|e| format!("progress_summary completed count failed: {e}"))?;
     let cases_completed: i64 = conn
         .query_row(
-            "SELECT COUNT(DISTINCT case_id) FROM attempts WHERE completed_at IS NOT NULL",
-            [],
+            &format!(
+                "SELECT COUNT(DISTINCT case_id) FROM attempts WHERE completed_at IS NOT NULL{a_and}"
+            ),
+            rusqlite::params_from_iter(prof_args().iter()),
             |r| r.get(0),
         )
         .map_err(|e| format!("progress_summary distinct cases failed: {e}"))?;
 
     let total_responses: i64 = conn
-        .query_row("SELECT COUNT(*) FROM question_responses", [], |r| r.get(0))
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM question_responses{}",
+                if has_p { format!(" WHERE{r_scope}") } else { String::new() }
+            ),
+            rusqlite::params_from_iter(prof_args().iter()),
+            |r| r.get(0),
+        )
         .map_err(|e| format!("progress_summary count responses failed: {e}"))?;
     let correct_responses: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM question_responses WHERE is_correct = 1",
-            [],
+            &format!(
+                "SELECT COUNT(*) FROM question_responses WHERE is_correct = 1{}",
+                if has_p { format!(" AND{r_scope}") } else { String::new() }
+            ),
+            rusqlite::params_from_iter(prof_args().iter()),
             |r| r.get(0),
         )
         .map_err(|e| format!("progress_summary correct responses failed: {e}"))?;
@@ -1430,11 +1517,11 @@ pub fn progress_summary(state: State<DbState>) -> Result<ProgressSummary, String
     {
         let mut stmt = conn
             .prepare(
-                "SELECT case_id, score FROM attempts WHERE completed_at IS NOT NULL AND score IS NOT NULL",
+                &format!("SELECT case_id, score FROM attempts WHERE completed_at IS NOT NULL AND score IS NOT NULL{a_and}"),
             )
             .map_err(|e| format!("progress_summary scores prepare failed: {e}"))?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(prof_args().iter()), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             })
             .map_err(|e| format!("progress_summary scores query failed: {e}"))?;
@@ -1467,11 +1554,16 @@ pub fn progress_summary(state: State<DbState>) -> Result<ProgressSummary, String
     {
         let mut stmt = conn
             .prepare(
-                "SELECT question_id, answer_json FROM question_responses",
+                &format!(
+                    "SELECT question_id, answer_json FROM question_responses{}",
+                    if has_p { format!(" WHERE{r_scope}") } else { String::new() }
+                ),
             )
             .map_err(|e| format!("progress_summary measurement prepare failed: {e}"))?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map(rusqlite::params_from_iter(prof_args().iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| format!("progress_summary measurement query failed: {e}"))?;
         for r in rows {
             let (qid, answer_json) =
@@ -1513,24 +1605,37 @@ pub fn progress_summary(state: State<DbState>) -> Result<ProgressSummary, String
 }
 
 #[tauri::command]
-pub fn progress_by_case(state: State<DbState>) -> Result<Vec<CaseProgress>, String> {
+pub fn progress_by_case(
+    state: State<DbState>,
+    profile_id: Option<String>,
+) -> Result<Vec<CaseProgress>, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let questions_meta = load_questions_meta(&conn)?;
     let max_scores = case_max_scores_from(&questions_meta);
 
-    // Pull all attempts joined with case info.
-    let mut stmt = conn
-        .prepare(
-            r#"
+    let mut args: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    let where_profile = if let Some(ref p) = profile_id {
+        args.push(p);
+        "WHERE a.profile_id = ?1"
+    } else {
+        ""
+    };
+
+    // Pull all attempts (for this profile) joined with case info.
+    let sql = format!(
+        r#"
             SELECT a.case_id, c.title, c.category, a.started_at, a.completed_at, a.score
             FROM attempts a
             INNER JOIN cases c ON c.id = a.case_id
+            {where_profile}
             ORDER BY a.case_id ASC, a.started_at DESC
-            "#,
-        )
+            "#
+    );
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| format!("progress_by_case prepare failed: {e}"))?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1624,25 +1729,38 @@ pub fn progress_by_case(state: State<DbState>) -> Result<Vec<CaseProgress>, Stri
 pub fn get_recent_activity(
     state: State<DbState>,
     limit: Option<i64>,
+    profile_id: Option<String>,
 ) -> Result<Vec<AttemptSummary>, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let limit = limit.unwrap_or(10).clamp(1, 200);
     let questions_meta = load_questions_meta(&conn)?;
     let max_scores = case_max_scores_from(&questions_meta);
 
-    let mut stmt = conn
-        .prepare(
-            r#"
+    // Param order matches placeholder order in the SQL below.
+    let mut args: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    let (where_profile, limit_ph) = if let Some(ref p) = profile_id {
+        args.push(p);
+        args.push(&limit);
+        ("WHERE a.profile_id = ?1", "?2")
+    } else {
+        args.push(&limit);
+        ("", "?1")
+    };
+    let sql = format!(
+        r#"
             SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score
             FROM attempts a
             INNER JOIN cases c ON c.id = a.case_id
+            {where_profile}
             ORDER BY a.started_at DESC
-            LIMIT ?1
-            "#,
-        )
+            LIMIT {limit_ph}
+            "#
+    );
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| format!("get_recent_activity prepare failed: {e}"))?;
     let rows = stmt
-        .query_map(params![limit], |row| {
+        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1678,19 +1796,31 @@ pub fn get_recent_activity(
 pub fn get_attempt_details(
     state: State<DbState>,
     attempt_id: String,
+    profile_id: Option<String>,
 ) -> Result<Option<AttemptDetails>, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
 
-    let attempt_row = conn
-        .query_row(
-            r#"
+    // Scope by profile so one profile cannot open another's attempt by id.
+    let mut args: Vec<&dyn rusqlite::ToSql> = vec![&attempt_id];
+    let profile_clause = if let Some(ref p) = profile_id {
+        args.push(p);
+        " AND a.profile_id = ?2"
+    } else {
+        ""
+    };
+    let attempt_sql = format!(
+        r#"
             SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score
             FROM attempts a
             INNER JOIN cases c ON c.id = a.case_id
-            WHERE a.id = ?1
+            WHERE a.id = ?1{profile_clause}
             LIMIT 1
-            "#,
-            params![attempt_id],
+            "#
+    );
+    let attempt_row = conn
+        .query_row(
+            &attempt_sql,
+            rusqlite::params_from_iter(args.iter()),
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

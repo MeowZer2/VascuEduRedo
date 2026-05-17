@@ -10,7 +10,7 @@ use db::{
     export_app_backup, get_case_questions, get_device, get_recent_activity, get_vessel_composition,
     list_attempts, list_case_bookmarks, list_cases, list_device_categories, list_devices,
     list_vessel_compositions, open_and_initialize, progress_by_case, progress_summary,
-    reorder_case_bookmarks,
+    reassign_attempts_profile, reorder_case_bookmarks,
     save_case_bookmark, save_vessel_composition, submit_question_response, DbState,
 };
 use serde::Serialize;
@@ -95,6 +95,7 @@ fn main() {
             progress_by_case,
             get_recent_activity,
             get_attempt_details,
+            reassign_attempts_profile,
             admin_validate_case,
             admin_validate_case_payload,
             admin_export_case,

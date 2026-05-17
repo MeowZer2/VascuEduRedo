@@ -1,5 +1,11 @@
 import type { QuestionResult, UserAnswer } from '../types';
+import { getActiveProfileId } from './profiles';
 import { isTauriDesktop, safeInvoke } from './tauri';
+
+// Must match `LEGACY_PROFILE_ID` in src-tauri/src/db.rs — the sentinel that
+// pre-profile / unscoped SQLite attempt rows are backfilled with.
+const SQLITE_LEGACY_PROFILE_ID = 'local-default';
+const SQLITE_CLAIM_FLAG = 'vascedu.profiles.sqliteLegacyClaimed.v1';
 
 export interface AttemptRow {
   id: string;
@@ -16,7 +22,10 @@ export interface AttemptRow {
 export async function createAttempt(caseId: string): Promise<AttemptRow | null> {
   if (!isTauriDesktop()) return null;
   try {
-    return await safeInvoke<AttemptRow>('create_attempt', { caseId });
+    return await safeInvoke<AttemptRow>('create_attempt', {
+      caseId,
+      profileId: getActiveProfileId(),
+    });
   } catch (error) {
     console.error('createAttempt failed:', error);
     return null;
@@ -60,9 +69,39 @@ export async function completeAttempt(attemptId: string, score: number): Promise
 export async function listAttempts(caseId?: string): Promise<AttemptRow[]> {
   if (!isTauriDesktop()) return [];
   try {
-    return (await safeInvoke<AttemptRow[]>('list_attempts', { caseId: caseId ?? null })) ?? [];
+    return (
+      (await safeInvoke<AttemptRow[]>('list_attempts', {
+        caseId: caseId ?? null,
+        profileId: getActiveProfileId(),
+      })) ?? []
+    );
   } catch (error) {
     console.error('listAttempts failed:', error);
     return [];
+  }
+}
+
+/**
+ * One-time, non-destructive migration: claim pre-profile / unscoped SQLite
+ * attempt rows (sentinel `local-default`) for the given profile so existing
+ * desktop progress/review is preserved under the default local profile.
+ * Safe to call on every startup — guarded by a localStorage flag and a no-op
+ * in browser mode.
+ */
+export async function claimLegacySqliteAttempts(profileId: string): Promise<void> {
+  if (!isTauriDesktop()) return;
+  if (typeof window !== 'undefined' && window.localStorage.getItem(SQLITE_CLAIM_FLAG)) return;
+  try {
+    if (profileId && profileId !== SQLITE_LEGACY_PROFILE_ID) {
+      await safeInvoke<number>('reassign_attempts_profile', {
+        fromProfileId: SQLITE_LEGACY_PROFILE_ID,
+        toProfileId: profileId,
+      });
+    }
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SQLITE_CLAIM_FLAG, '1');
+    }
+  } catch (error) {
+    console.error('claimLegacySqliteAttempts failed:', error);
   }
 }

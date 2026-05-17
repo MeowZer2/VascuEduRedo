@@ -5,6 +5,7 @@
 // `activeProfileId` is meant to be used as a React `key` on profile-scoped
 // screens (Home / Progress) so switching profiles fully refreshes them.
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { claimLegacySqliteAttempts } from './attempts';
 import {
   createProfile as createProfileCore,
   deleteProfile as deleteProfileCore,
@@ -45,6 +46,13 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(() => {
     setProfiles(listProfiles());
     setActiveProfileId(getActiveProfileId());
+  }, []);
+
+  // One-time, non-destructive: on desktop, claim legacy/unscoped SQLite
+  // attempt rows for the default local profile (browser mode is a no-op).
+  useEffect(() => {
+    void claimLegacySqliteAttempts(bootProfile.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Keep in sync when another part of the app (or another tab) changes profiles.

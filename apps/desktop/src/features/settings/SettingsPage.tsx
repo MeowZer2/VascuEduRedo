@@ -6,6 +6,8 @@ import { exportAppBackup } from '../../lib/admin';
 import { getStoredThemeMode, saveThemeMode, type ThemeMode } from '../../lib/appearance';
 import { friendlyError } from '../../lib/productionState';
 import { safeInvoke } from '../../lib/tauri';
+import { loadDisplayConvention, saveDisplayConvention } from '../../lib/viewerSettings';
+import type { DisplayConvention } from '../../components/viewerShared';
 
 interface AppInfo {
   name: string;
@@ -32,11 +34,13 @@ export function SettingsPage() {
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredThemeMode());
-  const [density, setDensity] = useState<'compact' | 'comfortable' | 'spacious'>('comfortable');
-  const [orientation, setOrientation] = useState<'radiologic' | 'neurologic'>('radiologic');
-  const [autoplay, setAutoplay] = useState(true);
-  const [hints, setHints] = useState(false);
-  const [analytics, setAnalytics] = useState(false);
+  // Wired to the real viewer display convention (persisted; read by the viewer).
+  const [convention, setConvention] = useState<DisplayConvention>(() => loadDisplayConvention());
+
+  function updateConvention(next: DisplayConvention) {
+    setConvention(next);
+    saveDisplayConvention(next);
+  }
 
   useEffect(() => {
     safeInvoke<AppInfo>('app_info').then(setAppInfo);
@@ -117,16 +121,20 @@ export function SettingsPage() {
               <div>
                 <strong>Density</strong>
                 <p>Adjust spacing and card sizes across the workspace.</p>
+                <p className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                  Not yet wired — coming in a later build.
+                </p>
               </div>
-              <div className="segmented" role="group" aria-label="Workspace density">
-                {(['compact', 'comfortable', 'spacious'] as const).map((item) => (
+              <div className="segmented" role="group" aria-label="Workspace density" aria-disabled>
+                {(['Compact', 'Comfortable', 'Spacious'] as const).map((item) => (
                   <button
                     key={item}
                     type="button"
-                    className={density === item ? 'active' : ''}
-                    onClick={() => setDensity(item)}
+                    className={item === 'Comfortable' ? 'active' : ''}
+                    disabled
+                    title="Not yet wired — coming in a later build"
                   >
-                    {item[0].toUpperCase() + item.slice(1)}
+                    {item}
                   </button>
                 ))}
               </div>
@@ -134,46 +142,56 @@ export function SettingsPage() {
             <div className="setting-row">
               <div>
                 <strong>Imaging orientation</strong>
-                <p>Default convention used when displaying axial slices in the viewer.</p>
+                <p>Default display convention used by the imaging viewer.</p>
               </div>
               <div className="segmented" role="group" aria-label="Imaging orientation">
                 <button
                   type="button"
-                  className={orientation === 'radiologic' ? 'active' : ''}
-                  onClick={() => setOrientation('radiologic')}
+                  className={convention === 'pacs' ? 'active' : ''}
+                  onClick={() => updateConvention('pacs')}
                 >
-                  Radiologic
+                  PACS
                 </button>
                 <button
                   type="button"
-                  className={orientation === 'neurologic' ? 'active' : ''}
-                  onClick={() => setOrientation('neurologic')}
+                  className={convention === 'canonical' ? 'active' : ''}
+                  onClick={() => updateConvention('canonical')}
                 >
-                  Neurologic
+                  Canonical
                 </button>
               </div>
             </div>
           </article>
 
           <article className="card">
-            <SectionHead title="Practice behavior" subtitle="How sessions and feedback are presented" />
+            <SectionHead
+              title="Practice behavior"
+              subtitle="How sessions and feedback are presented"
+            />
+            <p className="muted" style={{ fontSize: 11.5, margin: '0 0 6px' }}>
+              These preferences are not yet wired into the training flow — shown disabled so
+              they don&apos;t imply behavior that isn&apos;t implemented.
+            </p>
             <ToggleRow
               title="Auto-advance after correct answer"
               description="Move to the next question 2 seconds after a correct response."
-              enabled={autoplay}
-              onToggle={() => setAutoplay((value) => !value)}
+              enabled={false}
+              disabled
+              onToggle={() => undefined}
             />
             <ToggleRow
               title="Reveal hints automatically"
               description="Show the first hint if no answer is submitted within 60 seconds."
-              enabled={hints}
-              onToggle={() => setHints((value) => !value)}
+              enabled={false}
+              disabled
+              onToggle={() => undefined}
             />
             <ToggleRow
               title="Share anonymized usage analytics"
               description="Help improve VascEdu — no PHI or imaging data is ever shared."
-              enabled={analytics}
-              onToggle={() => setAnalytics((value) => !value)}
+              enabled={false}
+              disabled
+              onToggle={() => undefined}
             />
           </article>
 
@@ -329,11 +347,13 @@ function ToggleRow({
   description,
   enabled,
   onToggle,
+  disabled = false,
 }: {
   title: string;
   description: string;
   enabled: boolean;
   onToggle: () => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="setting-row">
@@ -346,7 +366,9 @@ function ToggleRow({
         className={enabled ? 'switch on' : 'switch'}
         aria-label={title}
         aria-pressed={enabled}
-        onClick={onToggle}
+        disabled={disabled}
+        title={disabled ? 'Not yet wired — coming in a later build' : undefined}
+        onClick={disabled ? undefined : onToggle}
       />
     </div>
   );
