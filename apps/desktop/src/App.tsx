@@ -133,6 +133,7 @@ function AppInner() {
           <HomePage
             key={`home-${activeProfileId}`}
             cases={cases}
+            refreshKey={progressRefreshKey}
             onStart={() => {
               const target = selectedCase ?? cases[0];
               if (target) {

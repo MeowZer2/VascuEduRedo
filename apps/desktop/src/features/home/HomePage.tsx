@@ -3,12 +3,13 @@ import { anatomyIcon, IcArrowRight, IcArrowUpRight, IcBranch, IcCheck, IcClock, 
 import { Pill, PhotoLayers, Ring, SectionHead, Spark, StatCard, Thumb, TILE_CONTENT } from '../../components/prototype/primitives';
 import { ScanAAA } from '../../components/prototype/scans';
 import { categories } from '../../data/sampleContent';
-import { getProgressSummary } from '../../lib/progress';
 import { getCaseCardArt, getHeroArt, getTopicArt } from '../../lib/uiImages';
 import type { VascCase } from '../../types';
+import { useHomeDashboard } from './useHomeDashboard';
 
 interface HomePageProps {
   cases: VascCase[];
+  refreshKey?: number;
   onStart: () => void;
   onOpenCases: () => void;
   onOpenPlanning: () => void;
@@ -27,48 +28,63 @@ const CATEGORY_SHORT: Record<string, string> = {
   thoracic: 'Thoracic',
 };
 
-const FALLBACK_ACTIVITY = [3, 5, 2, 7, 6, 4, 8, 11, 6, 9, 13, 8, 12, 14];
-
 function shortName(categoryId: string): string {
   return CATEGORY_SHORT[categoryId] ?? categories.find((c) => c.id === categoryId)?.title ?? 'Vascular';
 }
 
-function formatDate(iso: string): string {
+function formatDate(iso: string | null): string {
+  if (!iso) return '-';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function formatDuration(ms: number): string {
+function formatDuration(ms: number | null): string {
+  if (!ms || !Number.isFinite(ms)) return '-';
   const totalMinutes = Math.max(1, Math.round(ms / 60000));
   return `${totalMinutes}m`;
 }
 
+function formatScore(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
 export function HomePage({
   cases,
+  refreshKey = 0,
   onStart,
   onOpenCases,
   onOpenCase,
   onOpenProgress,
 }: HomePageProps) {
-  const progress = useMemo(() => getProgressSummary(), []);
+  const dashboard = useHomeDashboard({ cases, refreshKey });
   const featured = cases[0];
-  const continued = cases.slice(0, 3);
-  const averagePercent = Math.round(progress.averagePercent);
-  const attempts = progress.totalAttempts;
-  const bestPercent = progress.bestCase ? Math.round(progress.bestCase.percent) : 0;
-  const heroArt = getHeroArt('home');
-
-  const activity = useMemo(() => {
-    if (progress.attempts.length === 0) return FALLBACK_ACTIVITY;
-    const buckets = new Array(14).fill(0);
-    const now = Date.now();
-    progress.attempts.forEach((attempt) => {
-      const day = Math.floor((now - new Date(attempt.completedAt).getTime()) / 86_400_000);
-      if (day >= 0 && day < 14) buckets[13 - day] += 1;
+  const continued = useMemo(() => {
+    const recentCases = dashboard.continueCaseIds
+      .map((caseId) => cases.find((item) => item.id === caseId))
+      .filter((item): item is VascCase => Boolean(item));
+    return (recentCases.length > 0 ? recentCases : cases).slice(0, 3);
+  }, [cases, dashboard.continueCaseIds]);
+  const recentAttemptByCase = useMemo(() => {
+    const map = new Map<string, (typeof dashboard.recentAttempts)[number]>();
+    dashboard.recentAttempts.forEach((attempt) => {
+      if (!map.has(attempt.caseId)) map.set(attempt.caseId, attempt);
     });
-    return buckets.some((v) => v > 0) ? buckets : FALLBACK_ACTIVITY;
-  }, [progress.attempts]);
+    return map;
+  }, [dashboard.recentAttempts]);
+  const averagePercent = Math.round(dashboard.summary.averagePercent);
+  const attempts = dashboard.summary.attempts;
+  const completedCases = dashboard.summary.completedCases;
+  const bestPercent =
+    dashboard.summary.bestPercent !== null ? Math.round(dashboard.summary.bestPercent) : null;
+  const hasCompletedAttempts = dashboard.summary.hasCompletedAttempts;
+  const progressSource =
+    dashboard.source === 'sqlite'
+      ? 'Profile SQLite - same source as Progress'
+      : dashboard.fallbackReason === 'review-unavailable'
+        ? 'Browser fallback - stored in this profile'
+        : 'Local fallback - SQLite progress unavailable';
+  const heroArt = getHeroArt('home');
 
   return (
     <div className="page">
@@ -103,7 +119,7 @@ export function HomePage({
               </div>
             )}
             <div>
-              <IcBranch size={13} /> {progress.completedCases} cases completed
+              <IcBranch size={13} /> {completedCases} cases completed
             </div>
             <div>
               <IcUser size={13} /> {attempts} attempts logged
@@ -142,20 +158,20 @@ export function HomePage({
       <section className="grid grid-4">
         <StatCard
           label="Cases attempted"
-          value={String(progress.completedCases)}
+          value={String(completedCases)}
           sub={`of ${cases.length} in library`}
         />
         <StatCard
           label="Avg. score"
-          value={attempts > 0 ? String(averagePercent) : '—'}
-          unit={attempts > 0 ? '%' : undefined}
+          value={hasCompletedAttempts ? String(averagePercent) : '-'}
+          unit={hasCompletedAttempts ? '%' : undefined}
           sub="across all attempts"
         />
         <StatCard
           label="Best score"
-          value={progress.bestCase ? String(bestPercent) : '—'}
-          unit={progress.bestCase ? '%' : undefined}
-          sub={progress.bestCase ? progress.bestCase.caseTitle : 'No attempts yet'}
+          value={bestPercent !== null ? String(bestPercent) : '-'}
+          unit={bestPercent !== null ? '%' : undefined}
+          sub={dashboard.summary.bestCaseTitle ?? 'No attempts yet'}
         />
         <StatCard label="Attempts" value={String(attempts)} sub="practice sessions" />
       </section>
@@ -173,7 +189,9 @@ export function HomePage({
             }
           />
           <div style={{ display: 'grid', gap: 12 }}>
-            {continued.map((item, i) => (
+            {continued.map((item) => {
+              const recentAttempt = recentAttemptByCase.get(item.id);
+              return (
               <button
                 key={item.id}
                 onClick={() => onOpenCase(item.id)}
@@ -216,15 +234,16 @@ export function HomePage({
                   </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  {i === 0 && attempts > 0 ? (
+                  {recentAttempt?.percent !== null && recentAttempt?.percent !== undefined ? (
                     <Pill variant="success" mono>
-                      <IcCheck size={11} /> {averagePercent}%
+                      <IcCheck size={11} /> {Math.round(recentAttempt.percent)}%
                     </Pill>
                   ) : null}
                   <IcArrowRight size={16} className="muted" />
                 </div>
               </button>
-            ))}
+              );
+            })}
             {continued.length === 0 && (
               <div className="empty">
                 <strong>No cases yet</strong>
@@ -241,8 +260,8 @@ export function HomePage({
             action={<Pill mono>14d</Pill>}
           />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 24, alignItems: 'center' }}>
-            <Spark values={activity} />
-            <Ring percent={attempts > 0 ? averagePercent : 0} label="Avg score" size={108} />
+            <Spark values={dashboard.activity} />
+            <Ring percent={hasCompletedAttempts ? averagePercent : 0} label="Avg score" size={108} />
           </div>
           <hr className="divider" style={{ margin: '16px 0' }} />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 14 }}>
@@ -251,7 +270,7 @@ export function HomePage({
                 Best
               </div>
               <div className="mono" style={{ fontSize: 18, fontWeight: 600, marginTop: 2 }}>
-                {progress.bestCase ? `${bestPercent}%` : '—'}
+                {bestPercent !== null ? `${bestPercent}%` : '-'}
               </div>
             </div>
             <div>
@@ -259,7 +278,7 @@ export function HomePage({
                 Completed
               </div>
               <div className="mono" style={{ fontSize: 18, fontWeight: 600, marginTop: 2 }}>
-                {progress.completedCases}
+                {completedCases}
               </div>
             </div>
             <div>
@@ -313,14 +332,14 @@ export function HomePage({
       <section className="card">
         <SectionHead
           title="Recent attempts"
-          subtitle="Local SQLite · stored on this workstation"
+          subtitle={dashboard.loading ? 'Loading profile progress' : progressSource}
           action={
             <button className="btn ghost small" onClick={onOpenProgress}>
               Open progress <IcArrowRight size={12} />
             </button>
           }
         />
-        {progress.attempts.length === 0 ? (
+        {dashboard.recentAttempts.length === 0 ? (
           <div className="empty">
             <strong>No attempts recorded</strong>
             Complete a practice session to see it here.
@@ -337,20 +356,22 @@ export function HomePage({
               </tr>
             </thead>
             <tbody>
-              {progress.attempts.slice(0, 5).map((a) => (
+              {dashboard.recentAttempts.slice(0, 5).map((a) => (
                 <tr key={a.id}>
                   <td>{a.caseTitle}</td>
-                  <td className="mono muted">{formatDate(a.completedAt)}</td>
+                  <td className="mono muted">{formatDate(a.completedAt ?? a.startedAt)}</td>
                   <td className="mono" style={{ textAlign: 'right' }}>
                     {formatDuration(a.totalElapsedMs)}
                   </td>
                   <td style={{ textAlign: 'right' }}>
                     <span className="mono" style={{ fontWeight: 600 }}>
-                      {Math.round(a.percent)}%
+                      {a.percent !== null ? `${Math.round(a.percent)}%` : '-'}
                     </span>
-                    <span className="muted mono" style={{ marginLeft: 8, fontSize: 11 }}>
-                      {a.score}/{a.maxScore}
-                    </span>
+                    {a.score !== null ? (
+                      <span className="muted mono" style={{ marginLeft: 8, fontSize: 11 }}>
+                        {formatScore(a.score)}/{formatScore(a.maxScore)}
+                      </span>
+                    ) : null}
                   </td>
                   <td style={{ textAlign: 'right', width: 24 }}>
                     <IcArrowRight size={14} className="muted" />
