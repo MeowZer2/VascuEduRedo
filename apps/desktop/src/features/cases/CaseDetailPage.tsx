@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { type CSSProperties, useEffect, useState } from 'react';
 import { ProceduralPlanViewer } from '../../components/ProceduralPlanViewer';
-import { Tag } from '../../components/Tag';
+import { categories } from '../../data/sampleContent';
+import { getCaseCardArt, getTopicArt } from '../../lib/uiImages';
 import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
 import type { VascCase } from '../../types';
 
@@ -15,7 +16,6 @@ function formatReviewedAt(iso?: string): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  // Reviewer cares about the date, not the time-of-day.
   return d.toLocaleDateString();
 }
 
@@ -25,6 +25,8 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
   const reviewedAt = formatReviewedAt(vascCase.lastReviewedAt);
   const [linkedPlan, setLinkedPlan] = useState<VesselCompositionRow | null>(null);
   const [previewStepId, setPreviewStepId] = useState('');
+  const category = categories.find((item) => item.id === vascCase.categoryId);
+  const art = getCaseCardArt(vascCase) ?? getTopicArt(vascCase.categoryId);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,75 +50,119 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
   }, [vascCase.id]);
 
   return (
-    <div className="page-stack">
-      <header className="page-header split-header">
-        <div>
-          <p className="eyebrow">Case detail</p>
-          <h2>{vascCase.title}</h2>
-          <p>{vascCase.diagnosis}</p>
-          <div className="case-meta-pills">
-            <span className="pill">{vascCase.difficulty}</span>
-            <span className="pill">{vascCase.estimatedMinutes} min</span>
-            {vascCase.author && <span className="pill">Author: {vascCase.author}</span>}
-            {vascCase.reviewer && <span className="pill">Reviewed by: {vascCase.reviewer}</span>}
-            {reviewedAt && <span className="pill">Reviewed {reviewedAt}</span>}
-            <span className="pill">{linkedPlan ? 'Angiogram plan linked' : 'No angiogram plan'}</span>
-          </div>
-        </div>
-        <div className="row-actions">
-          <button className="secondary-button" onClick={onBack}>Back</button>
-          <button className="secondary-button" onClick={onOpenComposer}>
-            {linkedPlan ? 'Open procedural plan' : 'Create procedural plan'}
-          </button>
-          <button className="primary-button" onClick={onStart}>Practice this case</button>
-        </div>
-      </header>
+    <div className="page case-detail-redesign">
+      <div className="detail-crumbs">
+        <button type="button" className="btn ghost small" onClick={onBack}>
+          Back to library
+        </button>
+        <span>/</span>
+        <span>{category?.title ?? 'Vascular case'}</span>
+        <span>/</span>
+        <strong>{vascCase.id}</strong>
+      </div>
 
-      <section className="grid-2">
-        <article className="content-card">
-          <h3>Patient</h3>
-          <dl className="detail-list">
-            <div><dt>Age</dt><dd>{vascCase.patient.age}</dd></div>
-            <div><dt>Sex</dt><dd>{vascCase.patient.sex}</dd></div>
-            <div><dt>Presentation</dt><dd>{vascCase.patient.presentation}</dd></div>
-          </dl>
-          {vascCase.patient.history.length > 0 && (
-            <>
-              <h4>History</h4>
-              <ul className="compact-list">
-                {vascCase.patient.history.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          {vascCase.patient.vitals && vascCase.patient.vitals.length > 0 && (
-            <>
-              <h4>Vitals</h4>
-              <ul className="compact-list">
-                {vascCase.patient.vitals.map((v) => (
-                  <li key={v}>{v}</li>
-                ))}
-              </ul>
-            </>
-          )}
+      <section className="detail-hero">
+        <article className="card pad-lg detail-info">
+          <div>
+            <div className="page-eyebrow">{category?.title ?? 'Case detail'}</div>
+            <h1 className="page-title">{vascCase.title}</h1>
+            <p className="page-subtitle">{vascCase.diagnosis}</p>
+          </div>
+          <div className="pills-row">
+            <span className="pill accent pill-mono">{vascCase.difficulty}</span>
+            <span className="pill pill-mono">{vascCase.estimatedMinutes} min</span>
+            <span className="pill pill-mono">{vascCase.questions.length} questions</span>
+            <span className="pill pill-mono">{vascCase.bookmarks?.length ?? 0} key images</span>
+            <span className={linkedPlan ? 'pill success pill-mono' : 'pill pill-mono'}>
+              {linkedPlan ? 'Procedural plan' : 'No plan'}
+            </span>
+            {reviewedAt ? <span className="pill success pill-mono">Reviewed {reviewedAt}</span> : null}
+          </div>
+          <div className="flex detail-actions">
+            <button type="button" className="btn primary large" onClick={onStart}>
+              Practice this case
+            </button>
+            <button type="button" className="btn secondary" onClick={onOpenComposer}>
+              {linkedPlan ? 'Open procedural plan' : 'Create procedural plan'}
+            </button>
+            <button type="button" className="btn ghost" onClick={onBack}>
+              Back
+            </button>
+          </div>
         </article>
 
-        <article className="content-card">
-          <h3>Learning objectives</h3>
+        <div
+          className="case-detail-visual frame-corners"
+          style={{ '--case-detail-bg': art ? `url(${art})` : undefined } as CSSProperties}
+          aria-hidden="true"
+        >
+          <span className="corner tl" />
+          <span className="corner tr" />
+          <span className="corner bl" />
+          <span className="corner br" />
+          <div className="case-detail-visual-label">
+            <span>{vascCase.volume.type.toUpperCase()}</span>
+            <strong>{vascCase.volume.description || 'Imaging review'}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid grid-12">
+        <article className="card col-6">
+          <div className="section-head">
+            <div>
+              <h3>Patient</h3>
+              <p>Clinical context for the encounter.</p>
+            </div>
+          </div>
+          <dl className="def">
+            <dt>Age / Sex</dt>
+            <dd>{vascCase.patient.age} / {vascCase.patient.sex}</dd>
+            <dt>Presentation</dt>
+            <dd>{vascCase.patient.presentation}</dd>
+            {vascCase.patient.vitals && vascCase.patient.vitals.length > 0 ? (
+              <>
+                <dt>Vitals</dt>
+                <dd>{vascCase.patient.vitals.join(', ')}</dd>
+              </>
+            ) : null}
+            {vascCase.patient.history.length > 0 ? (
+              <>
+                <dt>History</dt>
+                <dd>
+                  <ul className="bullet">
+                    {vascCase.patient.history.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </dd>
+              </>
+            ) : null}
+          </dl>
+        </article>
+
+        <article className="card col-6">
+          <div className="section-head">
+            <div>
+              <h3>Learning objectives</h3>
+              <p>What this case is built to reinforce.</p>
+            </div>
+          </div>
           {vascCase.learningObjectives.length === 0 ? (
             <p className="muted">No learning objectives listed.</p>
           ) : (
-            <ol className="compact-list numbered">
+            <ol className="bullet numbered-objectives">
               {vascCase.learningObjectives.map((item) => (
                 <li key={item}>{item}</li>
               ))}
             </ol>
           )}
           {vascCase.tags.length > 0 && (
-            <div className="tag-row spacious">
+            <div className="pills-row detail-tag-row">
               {vascCase.tags.map((tag) => (
-                <Tag key={tag}>{tag}</Tag>
+                <span key={tag} className="pill">
+                  {tag}
+                </span>
               ))}
             </div>
           )}
@@ -124,21 +170,31 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
       </section>
 
       {(teachingPoints.length > 0 || references.length > 0) && (
-        <section className="grid-2">
+        <section className="grid grid-12">
           {teachingPoints.length > 0 && (
-            <article className="content-card">
-              <h3>Teaching points</h3>
-              <ul className="compact-list">
-                {teachingPoints.map((tp) => (
-                  <li key={tp}>{tp}</li>
+            <article className="card col-6">
+              <div className="section-head">
+                <div>
+                  <h3>Teaching points</h3>
+                  <p>High-yield review notes.</p>
+                </div>
+              </div>
+              <ul className="bullet">
+                {teachingPoints.map((point) => (
+                  <li key={point}>{point}</li>
                 ))}
               </ul>
             </article>
           )}
           {references.length > 0 && (
-            <article className="content-card">
-              <h3>References</h3>
-              <ol className="compact-list numbered">
+            <article className="card col-6">
+              <div className="section-head">
+                <div>
+                  <h3>References</h3>
+                  <p>Source material attached to this case.</p>
+                </div>
+              </div>
+              <ol className="bullet numbered-objectives">
                 {references.map((ref) => (
                   <li key={ref}>{ref}</li>
                 ))}
@@ -149,12 +205,19 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
       )}
 
       {linkedPlan && (
-        <section className="content-card">
-          <div className="section-title-row">
-            <h3>Procedural plan</h3>
-            <div className="row-actions compact-actions">
-              <button className="secondary-button small" onClick={onStart}>View procedural steps</button>
-              <button className="secondary-button small" onClick={onOpenComposer}>Open procedural plan</button>
+        <section className="card">
+          <div className="section-head">
+            <div>
+              <h3>Procedural plan</h3>
+              <p>Linked angiogram plan and step sequence.</p>
+            </div>
+            <div className="flex">
+              <button type="button" className="btn secondary small" onClick={onStart}>
+                Practice steps
+              </button>
+              <button type="button" className="btn secondary small" onClick={onOpenComposer}>
+                Open plan
+              </button>
             </div>
           </div>
           <PlanSummary linkedPlan={linkedPlan} />
@@ -186,15 +249,20 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
       )}
 
       {vascCase.bookmarks && vascCase.bookmarks.length > 0 ? (
-        <section className="content-card">
-          <h3>Key findings</h3>
+        <section className="card">
+          <div className="section-head">
+            <div>
+              <h3>Key findings</h3>
+              <p>Saved imaging landmarks for this case.</p>
+            </div>
+          </div>
           <div className="key-finding-list">
             {vascCase.bookmarks.map((bookmark) => (
               <div key={bookmark.id} className="key-finding-row">
                 <strong>{bookmark.title}</strong>
                 <span>
                   {bookmark.plane} slice {bookmark.sliceIndex + 1}
-                  {bookmark.tags && bookmark.tags.length > 0 ? ` · ${bookmark.tags.join(', ')}` : ''}
+                  {bookmark.tags && bookmark.tags.length > 0 ? ` - ${bookmark.tags.join(', ')}` : ''}
                 </span>
                 {bookmark.note ? <span className="muted small">{bookmark.note}</span> : null}
               </div>
@@ -203,9 +271,13 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
         </section>
       ) : null}
 
-      <section className="content-card">
-        <h3>Imaging</h3>
-        <p>{vascCase.volume.description || 'No imaging description provided.'}</p>
+      <section className="card">
+        <div className="section-head">
+          <div>
+            <h3>Imaging</h3>
+            <p>{vascCase.volume.description || 'No imaging description provided.'}</p>
+          </div>
+        </div>
         {vascCase.volume.path && (
           <p className="muted small admin-only-note">
             <strong>Volume:</strong> <code>{vascCase.volume.path}</code>
@@ -231,19 +303,19 @@ function PlanSummary({ linkedPlan }: { linkedPlan: VesselCompositionRow }) {
     <div className="case-plan-summary">
       <div>
         <strong>{pathologicSegments.length}</strong>
-        <span>pathology/target segment{pathologicSegments.length === 1 ? '' : 's'}</span>
+        <span>target segments</span>
       </div>
       <div>
         <strong>{data.proceduralSteps.length}</strong>
-        <span>procedural step{data.proceduralSteps.length === 1 ? '' : 's'}</span>
+        <span>procedure steps</span>
       </div>
       <div>
         <strong>{data.proceduralObjects.length}</strong>
-        <span>procedural object{data.proceduralObjects.length === 1 ? '' : 's'}</span>
+        <span>procedure objects</span>
       </div>
       <div>
         <strong>{data.devicePlacements.length}</strong>
-        <span>device placement{data.devicePlacements.length === 1 ? '' : 's'}</span>
+        <span>device placements</span>
       </div>
       {data.proceduralSteps.length > 0 && (
         <div className="case-plan-steps">
@@ -259,7 +331,9 @@ function PlanSummary({ linkedPlan }: { linkedPlan: VesselCompositionRow }) {
       {pathologicSegments.length > 0 && (
         <p>
           <strong>Target:</strong> {target ? `${target.label} (${target.pathologyType})` : 'Intervention target'}
-          {pathologicSegments.length > 1 ? ` · ${pathologicSegments.length - 1} additional target${pathologicSegments.length === 2 ? '' : 's'}` : ''}
+          {pathologicSegments.length > 1
+            ? ` - ${pathologicSegments.length - 1} additional target${pathologicSegments.length === 2 ? '' : 's'}`
+            : ''}
         </p>
       )}
       {devices.length > 0 ? (

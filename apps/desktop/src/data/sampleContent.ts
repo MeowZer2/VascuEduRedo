@@ -9,11 +9,32 @@ export const categories: Category[] = [
     color: 'rose',
   },
   {
-    id: 'carotid',
-    title: 'Carotid Disease',
+    id: 'cerebrovascular',
+    title: 'Cerebrovascular Disease',
     emoji: '🧠',
-    description: 'Symptomatic stenosis, imaging review, indications, and operative decision-making.',
+    description: 'Carotid stenosis, cerebrovascular anatomy, stroke prevention, and intervention timing.',
     color: 'indigo',
+  },
+  {
+    id: 'mesenteric-renal',
+    title: 'Mesenteric and Renal Artery',
+    emoji: 'MRA',
+    description: 'Visceral perfusion, chronic mesenteric ischemia, renal artery disease, and branch anatomy.',
+    color: 'amber',
+  },
+  {
+    id: 'pad',
+    title: 'Peripheral Arterial Disease',
+    emoji: 'PAD',
+    description: 'Lower extremity inflow, femoropopliteal disease, tibial runoff, and limb ischemia.',
+    color: 'orange',
+  },
+  {
+    id: 'venous',
+    title: 'Venous Disease',
+    emoji: 'VND',
+    description: 'Varicose veins, venous obstruction, thrombosis, reflux, and ulcer workups.',
+    color: 'blue',
   },
   {
     id: 'dialysis-access',
@@ -21,6 +42,13 @@ export const categories: Category[] = [
     emoji: '💉',
     description: 'Access planning, fistula complications, steal syndrome, and surveillance.',
     color: 'emerald',
+  },
+  {
+    id: 'thoracic',
+    title: 'Thoracic Aorta/Arch',
+    emoji: 'TAA',
+    description: 'Arch anatomy, thoracic aneurysm, dissection, branch vessels, and endovascular planning.',
+    color: 'red',
   },
 ];
 
@@ -144,7 +172,7 @@ export const cases: VascCase[] = [
   },
   {
     id: 'carotid-001',
-    categoryId: 'carotid',
+    categoryId: 'cerebrovascular',
     title: 'Symptomatic high-grade internal carotid artery stenosis',
     diagnosis: 'Symptomatic carotid stenosis',
     difficulty: 'advanced',

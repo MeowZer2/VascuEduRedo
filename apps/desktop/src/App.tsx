@@ -13,6 +13,7 @@ import { TrainingStartPage, type TrainingFilters } from './features/training/Tra
 import { TrainingWorkspace } from './features/training/TrainingWorkspace';
 import { applyThemeMode, getStoredThemeMode } from './lib/appearance';
 import { loadCases } from './lib/content';
+import { ProfileProvider, useProfiles } from './lib/profileContext';
 import { UnsavedChangesProvider } from './lib/productionState';
 import type { VascCase } from './types';
 
@@ -29,6 +30,15 @@ export type Screen =
   | 'settings';
 
 export default function App() {
+  return (
+    <ProfileProvider>
+      <AppInner />
+    </ProfileProvider>
+  );
+}
+
+function AppInner() {
+  const { activeProfileId } = useProfiles();
   const [screen, setScreen] = useState<Screen>('home');
   const [confirmNavigation, setConfirmNavigation] = useState<() => boolean>(() => () => true);
   // Start with sample data so the first paint isn't blank, then swap to SQLite-backed cases
@@ -121,6 +131,7 @@ export default function App() {
       <AppShell activeScreen={screen} onNavigate={handleNavigate}>
         {screen === 'home' && (
           <HomePage
+            key={`home-${activeProfileId}`}
             cases={cases}
             onStart={() => {
               const target = selectedCase ?? cases[0];
@@ -184,7 +195,9 @@ export default function App() {
             }}
           />
         )}
-        {screen === 'progress' && <ProgressPage refreshKey={progressRefreshKey} />}
+        {screen === 'progress' && (
+          <ProgressPage key={`progress-${activeProfileId}`} refreshKey={progressRefreshKey} />
+        )}
         {screen === 'admin' && (
           <AdminContentPage
             onCasesChanged={() => {

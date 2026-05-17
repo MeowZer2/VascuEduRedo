@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   isDeviceCatalogAvailable,
   listDeviceCategories,
@@ -73,65 +73,86 @@ export function DevicesCatalogPage() {
 
   if (!available) {
     return (
-      <div className="page-stack">
-        <header className="page-header devices-hero">
-          <p className="eyebrow">Device catalog</p>
-          <h2>Device reference opens in the desktop app.</h2>
-          <p>The catalog is available when VascEdu is running as the local desktop application.</p>
+      <div className="page">
+        <header className="page-head">
+          <div>
+            <div className="page-eyebrow">Reference - endovascular devices</div>
+            <h1 className="page-title">Device catalog</h1>
+            <p className="page-subtitle">
+              The device reference is available when VascEdu is running as the local desktop
+              application.
+            </p>
+          </div>
         </header>
       </div>
     );
   }
 
   return (
-    <div className="page-stack devices-page">
-      <header className="page-header devices-hero">
-        <p className="eyebrow">Device catalog</p>
-        <h2>Vascular device reference.</h2>
-        <p>Browse device classes, manufacturers, sizing notes, and tags used in practice questions.</p>
+    <div className="page devices-redesign">
+      <header className="page-head">
+        <div>
+          <div className="page-eyebrow">Reference - endovascular devices</div>
+          <h1 className="page-title">Device catalog</h1>
+          <p className="page-subtitle">
+            Browse device classes, manufacturers, sizing notes, and tags used in practice
+            questions.
+          </p>
+        </div>
+        <span className="pill pill-mono">{loading ? 'Loading' : `${filtered.length} of ${devices.length}`}</span>
       </header>
 
-      <section className="devices-toolbar">
-        <input
-          className="text-input"
-          type="search"
-          placeholder="Search by name, manufacturer, or tag"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      <section className="toolbar devices-redesign-toolbar">
+        <label className="search-input devices-search">
+          <span aria-hidden="true">S</span>
+          <input
+            type="search"
+            placeholder="Search by name, manufacturer, or tag..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <kbd>Catalog</kbd>
+        </label>
+        <div className="segmented devices-category-tabs" role="group" aria-label="Device category">
+          <button
+            type="button"
+            className={categoryFilter === '' ? 'active' : ''}
+            onClick={() => setCategoryFilter('')}
+          >
+            All ({devices.length})
+          </button>
+          {categories.map((category) => {
+            const count = devices.filter((device) => device.category === category).length;
+            return (
+              <button
+                key={category}
+                type="button"
+                className={categoryFilter === category ? 'active' : ''}
+                onClick={() => setCategoryFilter(category)}
+              >
+                {category} ({count})
+              </button>
+            );
+          })}
+        </div>
         <select
-          className="text-input"
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-        >
-          <option value="">All categories</option>
-          {categories.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        <select
-          className="text-input"
+          className="input devices-manufacturer-filter"
           value={manufacturerFilter}
           onChange={(e) => setManufacturerFilter(e.target.value)}
         >
           <option value="">All manufacturers</option>
-          {manufacturers.map((m) => (
-            <option key={m} value={m}>
-              {m}
+          {manufacturers.map((manufacturer) => (
+            <option key={manufacturer} value={manufacturer}>
+              {manufacturer}
             </option>
           ))}
         </select>
-        <span className="muted small">
-          {loading ? 'Loading…' : `${filtered.length} of ${devices.length} devices`}
-        </span>
       </section>
 
       {errorMsg ? <div className="admin-banner error">{errorMsg}</div> : null}
 
       <section className="devices-layout">
-        <aside className="devices-list-panel">
+        <article className="card pad-sm">
           {loading ? (
             <div className="empty-state compact">
               <strong>Loading catalog</strong>
@@ -140,33 +161,40 @@ export function DevicesCatalogPage() {
           ) : filtered.length === 0 ? (
             <div className="empty-state compact">
               <strong>{errorMsg ? 'Catalog unavailable' : 'No matching devices'}</strong>
-              <span>{errorMsg ? 'Try again once the desktop data is ready.' : 'Adjust search, category, or manufacturer filters.'}</span>
+              <span>
+                {errorMsg
+                  ? 'Try again once the desktop data is ready.'
+                  : 'Adjust search, category, or manufacturer filters.'}
+              </span>
             </div>
           ) : (
-            <ul className="devices-list">
+            <div className="devices-list">
               {filtered.map((device) => (
-                <li
+                <button
+                  type="button"
                   key={device.id}
-                  className={
-                    device.id === selected?.id ? 'devices-list-item active' : 'devices-list-item'
-                  }
+                  className={device.id === selected?.id ? 'device-row active' : 'device-row'}
+                  onClick={() => setSelectedId(device.id)}
                 >
-                  <button
-                    type="button"
-                    className="devices-list-button"
-                    onClick={() => setSelectedId(device.id)}
-                  >
+                  <span className="device-icon" aria-hidden="true">
+                    {device.category.slice(0, 2).toUpperCase()}
+                  </span>
+                  <span>
                     <strong>{device.name}</strong>
-                    <span>{device.manufacturer}</span>
-                    <span className="device-category-pill">{device.category}</span>
-                  </button>
-                </li>
+                    <span className="mfr">
+                      {device.manufacturer} - {device.subtype || device.category}
+                    </span>
+                  </span>
+                  <span className="device-meta">
+                    <span className="pill pill-mono">{device.sizes.length} sz</span>
+                  </span>
+                </button>
               ))}
-            </ul>
+            </div>
           )}
-        </aside>
+        </article>
 
-        <article className="devices-detail content-card">
+        <article className="card pad-lg devices-detail-redesign">
           {selected ? (
             <DeviceDetail device={selected} />
           ) : (
@@ -184,53 +212,79 @@ export function DevicesCatalogPage() {
 export function DeviceDetail({ device }: { device: Device }) {
   return (
     <>
-      <header className="device-detail-header">
-        <div className="device-visual-card" aria-hidden="true">
+      <header className="device-detail-redesign-header">
+        <div className="device-visual-card device-visual-card-xl" aria-hidden="true">
           <span>{device.category.slice(0, 2).toUpperCase()}</span>
         </div>
         <div>
-          <p className="eyebrow">{device.category}{device.subtype ? ` · ${device.subtype}` : ''}</p>
-          <h3>{device.name}</h3>
+          <div className="page-eyebrow">{device.category}{device.subtype ? ` - ${device.subtype}` : ''}</div>
+          <h2>{device.name}</h2>
           <p className="muted">{device.manufacturer}</p>
+          <p className="device-detail-description">{device.description}</p>
         </div>
       </header>
 
-      <p>{device.description}</p>
+      <hr className="divider" />
 
-      {device.sizes.length > 0 && (
-        <section>
-          <h4>Sizes</h4>
-          <ul className="compact-list">
-            {device.sizes.map((s) => (
-              <li key={s}>{s}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {Object.keys(device.properties).length > 0 && (
-        <section>
-          <h4>Properties</h4>
-          <dl className="device-properties">
-            {Object.entries(device.properties).map(([key, value]) => (
-              <div key={key}>
-                <dt>{prettyKey(key)}</dt>
-                <dd>{value}</dd>
+      <section className="grid grid-12 device-detail-grid">
+        <div className="col-7">
+          {device.sizes.length > 0 && (
+            <>
+              <h4 className="detail-kicker">Available sizes</h4>
+              <div className="pills-row">
+                {device.sizes.map((size) => (
+                  <span key={size} className="pill pill-mono">
+                    {size}
+                  </span>
+                ))}
               </div>
-            ))}
-          </dl>
-        </section>
-      )}
+            </>
+          )}
 
-      {device.tags.length > 0 && (
-        <div className="tag-row spacious">
-          {device.tags.map((tag) => (
-            <span key={tag} className="tag">
-              {tag}
-            </span>
-          ))}
+          {Object.keys(device.properties).length > 0 && (
+            <>
+              <h4 className="detail-kicker">Properties</h4>
+              <dl className="def device-def">
+                {Object.entries(device.properties).map(([key, value]) => (
+                  <Fragment key={key}>
+                    <dt>{prettyKey(key)}</dt>
+                    <dd>{value}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+            </>
+          )}
+
+          {device.tags.length > 0 && (
+            <>
+              <h4 className="detail-kicker">Tags</h4>
+              <div className="pills-row">
+                {device.tags.map((tag) => (
+                  <span key={tag} className="pill">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
         </div>
-      )}
+
+        <aside className="col-5 device-side-panel">
+          <div className="card flat pad-sm">
+            <div className="page-eyebrow">Used in practice</div>
+            <strong>Device selection track</strong>
+            <p className="muted">
+              This reference card is available from device-selection questions and planning review.
+            </p>
+          </div>
+          <div className="card flat pad-sm">
+            <div className="page-eyebrow">IFU note</div>
+            <p className="muted">
+              Confirm device IFU before clinical use. The catalog is an educational reference.
+            </p>
+          </div>
+        </aside>
+      </section>
     </>
   );
 }

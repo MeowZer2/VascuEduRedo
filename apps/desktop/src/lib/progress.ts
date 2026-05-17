@@ -1,8 +1,14 @@
 import { cases, categories } from '../data/sampleContent';
 import type { AttemptResult } from '../types';
+import { getActiveProfileId, LEGACY_ATTEMPTS_KEY, profileScopedKey } from './profiles';
 import { readJson, writeJson } from './storage';
 
-const ATTEMPTS_KEY = 'vascedu.attempts.v0';
+// Attempts are scoped per local profile so residents sharing a workstation do
+// not share progress. The base key matches the legacy (pre-profile) key, which
+// ensureDefaultProfile() migrates onto the default profile on first run.
+function attemptsKey(): string {
+  return profileScopedKey(LEGACY_ATTEMPTS_KEY, getActiveProfileId());
+}
 
 export interface ProgressSummary {
   attempts: AttemptResult[];
@@ -19,16 +25,16 @@ export interface ProgressSummary {
 }
 
 export function getAttempts(): AttemptResult[] {
-  return readJson<AttemptResult[]>(ATTEMPTS_KEY, []);
+  return readJson<AttemptResult[]>(attemptsKey(), []);
 }
 
 export function saveAttempt(attempt: AttemptResult): void {
   const attempts = getAttempts();
-  writeJson(ATTEMPTS_KEY, [attempt, ...attempts]);
+  writeJson(attemptsKey(), [attempt, ...attempts]);
 }
 
 export function clearAttempts(): void {
-  writeJson(ATTEMPTS_KEY, []);
+  writeJson(attemptsKey(), []);
 }
 
 export function getProgressSummary(): ProgressSummary {

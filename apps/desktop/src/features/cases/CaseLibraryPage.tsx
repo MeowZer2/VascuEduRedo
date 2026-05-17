@@ -1,13 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  ActionTile,
-  CaseTile,
-  ImageBannerCard,
-  SectionHeader,
-  TopicCard,
-} from '../../components/learnerCards';
+import { anatomyIcon, IcPlay, IcSearch, IcStack, IcGrid, IcList } from '../../components/prototype/icons';
+import { CaseCard, Pill, PhotoLayers, Thumb, TILE_CONTENT } from '../../components/prototype/primitives';
 import { categories } from '../../data/sampleContent';
-import { actionArt, getCaseCardArt, getHeroArt, getTopicArt } from '../../lib/uiImages';
+import { casesPracticeArt, getCaseCardArt, getTopicArt } from '../../lib/uiImages';
 import { listVesselCompositions } from '../../lib/vesselComposer';
 import type { VascCase } from '../../types';
 
@@ -19,6 +14,18 @@ interface CaseLibraryPageProps {
 }
 
 const ANY = 'any';
+const ALL = 'all';
+const DIFFICULTY_ORDER: Record<string, number> = { beginner: 0, intermediate: 1, advanced: 2 };
+
+const CATEGORY_SHORT: Record<string, string> = {
+  aaa: 'AAA',
+  cerebrovascular: 'Carotid',
+  'mesenteric-renal': 'Visceral',
+  pad: 'PAD',
+  venous: 'Venous',
+  'dialysis-access': 'Access',
+  thoracic: 'Thoracic',
+};
 
 export function CaseLibraryPage({
   cases,
@@ -28,8 +35,9 @@ export function CaseLibraryPage({
 }: CaseLibraryPageProps) {
   const [search, setSearch] = useState('');
   const [difficulty, setDifficulty] = useState<string>(ANY);
-  const [topic, setTopic] = useState<string>(ANY);
-  const [tagFilter, setTagFilter] = useState<string>('');
+  const [topic, setTopic] = useState<string>(ALL);
+  const [sort, setSort] = useState<'recent' | 'alpha' | 'diff'>('recent');
+  const [view, setView] = useState<'grid' | 'list'>('grid');
   const [planCaseIds, setPlanCaseIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
@@ -55,26 +63,6 @@ export function CaseLibraryPage({
     () => Array.from(new Set(cases.map((item) => item.difficulty))).filter(Boolean),
     [cases],
   );
-  const allTags = useMemo(() => {
-    const set = new Set<string>();
-    cases.forEach((item) => item.tags.forEach((tag) => set.add(tag)));
-    return Array.from(set).sort();
-  }, [cases]);
-
-  const filteredCases = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return cases.filter((item) => {
-      if (difficulty !== ANY && item.difficulty !== difficulty) return false;
-      if (topic !== ANY && item.categoryId !== topic) return false;
-      if (tagFilter && !item.tags.includes(tagFilter)) return false;
-      if (!needle) return true;
-      return (
-        item.title.toLowerCase().includes(needle) ||
-        item.diagnosis.toLowerCase().includes(needle) ||
-        item.tags.some((tag) => tag.toLowerCase().includes(needle))
-      );
-    });
-  }, [cases, difficulty, search, tagFilter, topic]);
 
   const topicCounts = useMemo(() => {
     const map = new Map<string, number>();
@@ -84,13 +72,35 @@ export function CaseLibraryPage({
     return map;
   }, [cases]);
 
-  const filtersActive = search !== '' || difficulty !== ANY || topic !== ANY || tagFilter !== '';
+  const filteredCases = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    const list = cases.filter((item) => {
+      if (difficulty !== ANY && item.difficulty !== difficulty) return false;
+      if (topic !== ALL && item.categoryId !== topic) return false;
+      if (!needle) return true;
+      return (
+        item.title.toLowerCase().includes(needle) ||
+        item.diagnosis.toLowerCase().includes(needle) ||
+        item.tags.some((tag) => tag.toLowerCase().includes(needle))
+      );
+    });
+    if (sort === 'alpha') {
+      return [...list].sort((a, b) => a.title.localeCompare(b.title));
+    }
+    if (sort === 'diff') {
+      return [...list].sort(
+        (a, b) => (DIFFICULTY_ORDER[a.difficulty] ?? 9) - (DIFFICULTY_ORDER[b.difficulty] ?? 9),
+      );
+    }
+    return list;
+  }, [cases, difficulty, search, sort, topic]);
+
+  const filtersActive = search !== '' || difficulty !== ANY || topic !== ALL;
 
   function clearFilters() {
     setSearch('');
     setDifficulty(ANY);
-    setTopic(ANY);
-    setTagFilter('');
+    setTopic(ALL);
   }
 
   function startQuickPractice() {
@@ -98,189 +108,272 @@ export function CaseLibraryPage({
       onStartCase(filteredCases[0].id);
       return;
     }
-    onQuickPractice({ difficulty, topic });
+    onQuickPractice({ difficulty, topic: topic === ALL ? ANY : topic });
+  }
+
+  function shortName(categoryId: string): string {
+    return CATEGORY_SHORT[categoryId] ?? categories.find((c) => c.id === categoryId)?.title ?? 'Vascular';
   }
 
   return (
-    <div className="page-stack learner-cases-page">
-      <ImageBannerCard
-        imageUrl={getHeroArt('cases')}
-        ratio="hero"
-        eyebrow="Cases & practice"
-        title="Discover, filter, and start vascular practice in one place."
-        description="Browse the case archive, narrow by topic or difficulty, and launch a guided practice session whenever you're ready."
-      >
-        <div className="hero-actions">
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <div className="page-eyebrow">Cases · {categories.length} vascular tracks</div>
+          <h1 className="page-title">
+            Case <span className="display-italic">library</span>
+          </h1>
+          <p className="page-subtitle">
+            Browse the case archive, filter by topic or difficulty, and launch a guided practice
+            session.
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
           <button
-            className="primary-button"
-            onClick={startQuickPractice}
-            disabled={cases.length === 0}
-          >
-            Quick start practice
-          </button>
-          <button
-            className="secondary-button"
+            className="btn secondary"
             onClick={clearFilters}
             disabled={!filtersActive}
             title="Clear all filters"
           >
             Clear filters
           </button>
+          <button className="btn primary" onClick={startQuickPractice} disabled={cases.length === 0}>
+            <IcPlay size={14} /> Quick practice
+          </button>
         </div>
-      </ImageBannerCard>
+      </div>
 
-      <section className="learner-section">
-        <SectionHeader
-          eyebrow="Practice modes"
-          title="Jump straight in"
-          description="Start a focused session matching your current filters."
-        />
-        <div className="action-tile-row">
-          <ActionTile
-            imageUrl={actionArt.practice}
-            label="Guided practice"
-            caption="Imaging, decisions, feedback, teaching"
-            variant="primary"
-            onClick={startQuickPractice}
-            disabled={cases.length === 0}
-          />
-          <ActionTile
-            imageUrl={actionArt.cases}
-            label="Random case"
-            caption="Pick any case from the matching set"
-            onClick={() => {
-              if (filteredCases.length === 0) return;
-              const pick = filteredCases[Math.floor(Math.random() * filteredCases.length)];
-              onStartCase(pick.id);
+      {/* Topic chips */}
+      <section>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: 12,
+          }}
+        >
+          <button
+            className={`tile ${topic === ALL ? 'has-rule' : ''}`}
+            onClick={() => setTopic(ALL)}
+            style={{
+              minHeight: 108,
+              padding: 14,
+              gap: 6,
+              borderColor: topic === ALL ? 'var(--border-accent)' : undefined,
             }}
-            disabled={filteredCases.length === 0}
-          />
-          <ActionTile
-            imageUrl={actionArt.planning}
-            label="Cases with plans"
-            caption="Practice cases that include a procedural plan"
-            onClick={() => {
-              const planned = filteredCases.find((item) => planCaseIds.has(item.id));
-              if (planned) onStartCase(planned.id);
-            }}
-            disabled={filteredCases.every((item) => !planCaseIds.has(item.id))}
-          />
+          >
+            <PhotoLayers imageUrl={casesPracticeArt.allTopics} />
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-start',
+                ...TILE_CONTENT,
+              }}
+            >
+              <div className="tile-ic">
+                <IcStack size={18} />
+              </div>
+              <span className="mono muted" style={{ fontSize: 11 }}>
+                {cases.length} cases
+              </span>
+            </div>
+            <h4 style={TILE_CONTENT}>All topics</h4>
+            <p style={TILE_CONTENT}>Full case archive across vascular tracks.</p>
+          </button>
+          {categories.map((cat) => {
+            const Icon = anatomyIcon(cat.id);
+            const active = topic === cat.id;
+            return (
+              <button
+                key={cat.id}
+                className="tile"
+                onClick={() => setTopic(cat.id)}
+                style={{
+                  minHeight: 108,
+                  padding: 14,
+                  gap: 6,
+                  borderColor: active ? 'var(--border-accent)' : undefined,
+                }}
+              >
+                <PhotoLayers imageUrl={getTopicArt(cat.id)} />
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'flex-start',
+                    ...TILE_CONTENT,
+                  }}
+                >
+                  <div className="tile-ic">
+                    <Icon size={18} />
+                  </div>
+                  <span className="mono muted" style={{ fontSize: 11 }}>
+                    {topicCounts.get(cat.id) ?? 0} cases
+                  </span>
+                </div>
+                <h4 style={TILE_CONTENT}>{cat.title}</h4>
+                <p style={TILE_CONTENT}>{cat.description}</p>
+              </button>
+            );
+          })}
         </div>
       </section>
 
-      <section className="learner-section">
-        <SectionHeader
-          eyebrow="Topics"
-          title="Browse by vascular topic"
-          description="Click a topic to filter the case grid below."
-        />
-        <div className="topic-card-grid">
-          <TopicCard
-            title="All topics"
-            caseCount={cases.length}
-            description="Show every case in the library."
-            onClick={() => setTopic(ANY)}
-            ariaLabel="Show all topics"
-          />
-          {categories.map((category) => (
-            <TopicCard
-              key={category.id}
-              imageUrl={getTopicArt(category.id)}
-              title={category.title}
-              caseCount={topicCounts.get(category.id) ?? 0}
-              description={category.description}
-              onClick={() => setTopic(category.id)}
-              ariaLabel={`Filter by ${category.title}`}
-            />
-          ))}
-        </div>
-      </section>
-
-      <section className="learner-section case-discovery-section">
-        <SectionHeader
-          eyebrow="Case library"
-          title="Filtered cases"
-          description="Search by diagnosis, topic, tag, or level. Start practice from any card."
-          action={<span className="pill">{filteredCases.length} shown</span>}
-        />
-
-        <div className="library-filter-bar">
+      {/* Toolbar */}
+      <section className="toolbar">
+        <div className="search-input" style={{ width: 340, color: 'var(--text-2)' }}>
+          <IcSearch size={14} />
           <input
-            className="text-input"
-            type="search"
-            placeholder="Search diagnosis, topic, or tag"
+            placeholder="Search diagnosis, tags, anatomy…"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
-          <select
-            className="text-input"
-            value={topic}
-            onChange={(event) => setTopic(event.target.value)}
-          >
-            <option value={ANY}>All topics</option>
-            {categories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.title}
-              </option>
-            ))}
-          </select>
-          <select
-            className="text-input"
-            value={difficulty}
-            onChange={(event) => setDifficulty(event.target.value)}
-          >
-            <option value={ANY}>All levels</option>
-            {difficulties.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
-          </select>
-          <select
-            className="text-input"
-            value={tagFilter}
-            onChange={(event) => setTagFilter(event.target.value)}
-            disabled={allTags.length === 0}
-          >
-            <option value="">All tags</option>
-            {allTags.map((tag) => (
-              <option key={tag} value={tag}>{tag}</option>
-            ))}
-          </select>
         </div>
-
-        <div className="case-card-grid">
-          {cases.length === 0 ? (
-            <div className="empty-state">
-              <strong>No cases available</strong>
-              <span>Add cases from the authoring workspace to start building the library.</span>
-            </div>
-          ) : filteredCases.length === 0 ? (
-            <div className="empty-state">
-              <strong>No matching cases</strong>
-              <span>Adjust the search, topic, or level filter to broaden the library view.</span>
-            </div>
-          ) : (
-            filteredCases.map((item) => {
-              const category = categories.find((cat) => cat.id === item.categoryId);
-              return (
-                <CaseTile
-                  key={item.id}
-                  imageUrl={getCaseCardArt(item)}
-                  topicLabel={category?.title ?? 'Vascular case'}
-                  title={item.title}
-                  diagnosis={item.diagnosis}
-                  difficulty={item.difficulty}
-                  estimatedMinutes={item.estimatedMinutes}
-                  questionCount={item.questions.length}
-                  hasPlan={planCaseIds.has(item.id)}
-                  tags={item.tags}
-                  onOpenDetails={() => onOpenCase(item.id)}
-                  onStart={() => onStartCase(item.id)}
-                />
-              );
-            })
-          )}
+        <select
+          className="input"
+          style={{ width: 160 }}
+          value={difficulty}
+          onChange={(event) => setDifficulty(event.target.value)}
+        >
+          <option value={ANY}>All levels</option>
+          {difficulties.map((item) => (
+            <option key={item} value={item}>
+              {item[0].toUpperCase() + item.slice(1)}
+            </option>
+          ))}
+        </select>
+        <select
+          className="input"
+          style={{ width: 160 }}
+          value={sort}
+          onChange={(event) => setSort(event.target.value as typeof sort)}
+        >
+          <option value="recent">Sort: Recent</option>
+          <option value="alpha">A–Z</option>
+          <option value="diff">Difficulty</option>
+        </select>
+        <div className="toolbar-spacer" />
+        <span className="muted mono" style={{ fontSize: 12 }}>
+          {filteredCases.length} shown
+        </span>
+        <div className="segmented">
+          <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')}>
+            <IcGrid size={13} />
+          </button>
+          <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}>
+            <IcList size={13} />
+          </button>
         </div>
       </section>
+
+      {/* Grid or list */}
+      {cases.length === 0 ? (
+        <div className="empty">
+          <strong>No cases available</strong>
+          Add cases from the authoring workspace to start building the library.
+        </div>
+      ) : filteredCases.length === 0 ? (
+        <div className="empty">
+          <strong>No matching cases</strong>
+          Adjust the search, topic, or level filter to broaden the library view.
+        </div>
+      ) : view === 'grid' ? (
+        <section className="grid grid-3">
+          {filteredCases.map((item) => (
+            <CaseCard
+              key={item.id}
+              vascCase={{
+                id: item.id,
+                categoryId: item.categoryId,
+                title: item.title,
+                diagnosis: item.diagnosis,
+                difficulty: item.difficulty,
+                estimatedMinutes: item.estimatedMinutes,
+                questionCount: item.questions.length,
+                hasPlan: planCaseIds.has(item.id),
+                imageUrl: getCaseCardArt(item),
+              }}
+              categoryName={shortName(item.categoryId)}
+              onOpen={() => onOpenCase(item.id)}
+            />
+          ))}
+        </section>
+      ) : (
+        <section className="card pad-sm">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Topic</th>
+                <th>Level</th>
+                <th>Questions</th>
+                <th>Plan</th>
+                <th>Duration</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {filteredCases.map((item) => (
+                <tr key={item.id} style={{ cursor: 'pointer' }} onClick={() => onOpenCase(item.id)}>
+                  <td>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '56px 1fr',
+                        gap: 12,
+                        alignItems: 'center',
+                      }}
+                    >
+                      <div style={{ width: 56, height: 42, borderRadius: 6, overflow: 'hidden' }}>
+                        <Thumb imageUrl={getCaseCardArt(item)} categoryId={item.categoryId} wide label="" />
+                      </div>
+                      <div>
+                        <strong style={{ fontSize: 13, fontWeight: 600, display: 'block' }}>
+                          {item.title}
+                        </strong>
+                        <span className="muted" style={{ fontSize: 11.5 }}>
+                          {item.diagnosis}
+                        </span>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <Pill variant="accent" mono>
+                      {shortName(item.categoryId)}
+                    </Pill>
+                  </td>
+                  <td>
+                    <Pill mono>{item.difficulty}</Pill>
+                  </td>
+                  <td className="mono">{item.questions.length}</td>
+                  <td>
+                    {planCaseIds.has(item.id) ? (
+                      <Pill variant="blue" mono>
+                        linked
+                      </Pill>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td className="mono muted">{item.estimatedMinutes} min</td>
+                  <td>
+                    <button
+                      className="btn primary small"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onStartCase(item.id);
+                      }}
+                    >
+                      Start
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
     </div>
   );
 }
