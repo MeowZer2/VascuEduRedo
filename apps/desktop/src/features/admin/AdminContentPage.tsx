@@ -603,7 +603,14 @@ export function AdminContentPage({
 
   async function deleteSelectedBookmark() {
     if (!selectedCaseId || !selectedBookmarkId) return;
-    if (!window.confirm('Delete this saved key image from the case?')) return;
+    const target = bookmarks.find((bookmark) => bookmark.id === selectedBookmarkId);
+    const label = target?.title?.trim() ? `"${target.title.trim()}"` : 'this saved key image';
+    if (
+      !window.confirm(
+        `Delete ${label} from the case?\n\nThe saved slice, window/level, and annotation are removed from this local database. This cannot be undone.`,
+      )
+    )
+      return;
     setBusy(true);
     try {
       await deleteCaseBookmark(selectedBookmarkId);
@@ -679,7 +686,16 @@ export function AdminContentPage({
 
   async function deleteQuestion() {
     if (!questionDraft?.id || !selectedCaseId) return;
-    if (!window.confirm('Delete this question?\n\nLearners will no longer see it in this case.')) return;
+    const promptText = questionDraft.prompt.trim();
+    const label = promptText
+      ? `"${promptText.length > 80 ? `${promptText.slice(0, 80)}…` : promptText}"`
+      : 'this question';
+    if (
+      !window.confirm(
+        `Delete ${label}?\n\nThe question and its saved learner responses are removed from this local database. This cannot be undone.`,
+      )
+    )
+      return;
     setBusy(true);
     try {
       await adminDeleteQuestion(questionDraft.id);

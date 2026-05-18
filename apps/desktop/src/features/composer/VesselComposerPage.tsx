@@ -1164,7 +1164,16 @@ export function VesselComposerPage({
   function deleteSelected() {
     if (!canModifyPlan) return;
     if (!selectedObject) return;
-    if (!window.confirm(`Delete this ${selectionLabel(selectedObject.type)} from the procedural plan?`)) return;
+    const cascadeNote =
+      selectedObject.type === 'segment'
+        ? '\n\nDevice placements, treatment markers, procedural objects, and bifurcation links attached to this segment are also removed.'
+        : '';
+    if (
+      !window.confirm(
+        `Delete this ${selectionLabel(selectedObject.type)} from the procedural plan?${cascadeNote}\n\nUse Undo to reverse this.`,
+      )
+    )
+      return;
     commitNow();
     if (selectedObject.type === 'segment') {
       setSegments((current) => current.filter((segment) => segment.id !== selectedObject.id));
@@ -2389,6 +2398,7 @@ function ProceduralWorkflowPanel({
           className="secondary-button small"
           onClick={onAddProceduralObject}
           disabled={segments.length === 0}
+          title={segments.length === 0 ? 'Add a vessel segment first' : 'Place this procedural object on the selected segment'}
         >
           Add object
         </button>

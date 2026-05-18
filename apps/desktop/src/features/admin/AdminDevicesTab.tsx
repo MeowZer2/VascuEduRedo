@@ -213,7 +213,7 @@ export function AdminDevicesTab() {
 
   async function deleteSelected() {
     if (!draft.id) return;
-    if (!window.confirm(`Delete "${draft.name}" from the local device catalog?\n\nDevice-selection questions that reference it may need review.`)) return;
+    if (!window.confirm(`Delete "${draft.name}" from the local device catalog?\n\nDevice-selection questions that reference it may need review. This cannot be undone.`)) return;
     setBusy(true);
     try {
       await adminDeleteDevice(draft.id);
