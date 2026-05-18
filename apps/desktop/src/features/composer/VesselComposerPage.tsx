@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { listDevices, type Device } from '../../lib/devices';
+import { AdvancedAngiogramCanvas } from './AdvancedAngiogramCanvas';
 import { useProfiles } from '../../lib/profileContext';
 import { friendlyError, useUnsavedChangesGuard } from '../../lib/productionState';
 import {
@@ -1964,7 +1965,7 @@ export function VesselComposerPage({
             })}
             </svg>
           ) : (
-            <AngiogramCanvas
+            <AdvancedAngiogramCanvas
               projection={angiogramProjection}
               onProjectionChange={setAngiogramProjection}
               visualPreset={angiogramVisualPreset}
@@ -1977,6 +1978,22 @@ export function VesselComposerPage({
               activeStep={activeStep}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              renderFallback={() => (
+                <AngiogramCanvas
+                  projection={angiogramProjection}
+                  onProjectionChange={setAngiogramProjection}
+                  visualPreset={angiogramVisualPreset}
+                  onVisualPresetChange={setAngiogramVisualPreset}
+                  segments={segments}
+                  bifurcations={bifurcations}
+                  treatmentMarkers={treatmentMarkers}
+                  devicePlacements={devicePlacements}
+                  proceduralObjects={visibleProceduralObjects}
+                  activeStep={activeStep}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                />
+              )}
             />
           )}
           <footer className="composer-canvas-footer">
