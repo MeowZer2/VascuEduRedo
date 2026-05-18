@@ -1,15 +1,16 @@
-// Advanced 2D synthetic angiogram renderer (Canvas 2D), v0.41.
+// Advanced 2D synthetic angiogram renderer (Canvas 2D), v0.42.
 //
 // Pure module: the React layer owns interaction; this only draws pixels and
 // is wrapped so any failure makes the caller fall back to the legacy SVG.
 //
-// v0.41 — topology-aware continuous vessel rendering. Instead of painting each
-// authored segment as an independent ribbon, this builds a vascular graph
-// (parent/child junctions), derives continuous centerlines with tangent
-// continuity across joins, merges geometry at bifurcations with real carina
-// fork polygons, and drives a single continuous contrast column / density
-// falloff across the connected tree. Everything is composited through one
-// shared acquisition pass so it reads as one captured image.
+// v0.42 — artifact cleanup. Vessels are now painted as ONE union mask that is
+// then filled with a single continuous global density field (so there are no
+// per-segment gradient resets, no overlap accumulation bands, and no hard
+// rectangular noise clips). Devices are composited in a SEPARATE radiopacity
+// buffer so contrast and hardware no longer muddy together. Graft fabric is a
+// faint soft body (not a solid block); side branches are short, curved, low
+// contrast and merged into the vessel union; global blur is replaced by a
+// light local edge-softness halo.
 //
 // Public API consumed by AdvancedAngiogramCanvas.tsx (kept stable):
 //   ANGIO_WORKSPACE_WIDTH / ANGIO_WORKSPACE_HEIGHT
@@ -50,17 +51,20 @@ interface Pt {
   y: number;
 }
 
+// --- internal tuning knobs (no UI yet) ------------------------------------
+
 const TUNING = {
-  vesselDensity: 0.94,
-  edgeSoftness: 2,
-  internalNoise: 0.2,
-  contrastFalloff: 0.62,
-  centralColumn: 0.42,
-  streakStrength: 0.16,
-  motionSoftness: 0.55,
+  vesselOpacity: 0.92,
   deviceOpacity: 0.95,
-  roadmapTintStrength: 0.55,
-  fluoroSoftTissueStrength: 0.06,
+  graftBodyOpacity: 0.16,
+  sideBranchOpacity: 0.4,
+  sideBranchMaxLength: 78,
+  dsaBackgroundLevel: 0.86,
+  centralColumnStrength: 0.3,
+  junctionBlendStrength: 1,
+  edgeSoftness: 1.4,
+  internalNoise: 0.16,
+  contrastFalloff: 0.6,
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -88,9 +92,6 @@ function projectRaw(p: Pt, projection: AngioProjection): Pt {
   }
 }
 
-/** Auto-frame the connected anatomy into a comfortable region of the canvas,
- *  leaving safe margins for the AP/DSA labels and projection/preset controls.
- *  Pure + deterministic so the renderer and the SVG overlay agree. */
 export function computeAngioViewTransform(args: {
   segments: VesselSegment[];
   projection: AngioProjection;
@@ -110,7 +111,6 @@ export function computeAngioViewTransform(args: {
       if (r.y > maxY) maxY = r.y;
     }
   }
-  // Content box: clear of top-left labels and top-right controls.
   const boxX0 = 96;
   const boxX1 = 904;
   const boxY0 = 118;
@@ -132,8 +132,7 @@ export function projectAngioPoint(
   return { x: r.x * view.scale + view.tx, y: r.y * view.scale + view.ty };
 }
 
-/** Back-compat raw projector (no auto-fit). Kept exported so nothing
- *  external breaks even though the component now uses projectAngioPoint. */
+/** Back-compat raw projector (kept exported so nothing external breaks). */
 export function projectPoint(point: Pt, projection: AngioProjection): Pt {
   return projectRaw(point, projection);
 }
@@ -172,13 +171,13 @@ function norm(v: Pt): Pt {
   return { x: v.x / m, y: v.y / m };
 }
 
-// --- vascular graph (topology) --------------------------------------------
+// --- vascular graph (topology, unchanged from v0.41) -----------------------
 
 interface VNode {
   seg: VesselSegment;
-  a: Pt; // view-space start (exactly == overlay)
-  b: Pt; // view-space end
-  c: Pt; // quadratic control point (curvature + takeoff continuity)
+  a: Pt;
+  b: Pt;
+  c: Pt;
   startHalf: number;
   endHalf: number;
   seed: number;
@@ -197,7 +196,6 @@ function vesselBow(vesselType: string): number {
   if (v.includes('carotid')) return 0.12;
   return 0.2;
 }
-
 function diameterToHalf(mm: number, scale: number): number {
   return (clamp(mm, 1.2, 30) * 1.55 + 3) * 0.5 * scale;
 }
@@ -205,7 +203,7 @@ function diameterToHalf(mm: number, scale: number): number {
 function buildGraph(
   input: AngioRenderInput,
   view: AngioViewTransform,
-): { nodes: Map<string, VNode>; order: string[]; rootPaths: string[][] } {
+): { nodes: Map<string, VNode>; order: string[] } {
   const { segments, bifurcations, projection } = input;
   const nodes = new Map<string, VNode>();
   const proj = (p: Pt) => projectAngioPoint(p, projection, view);
@@ -243,7 +241,6 @@ function buildGraph(
     }
   }
 
-  // Geometric fallback for un-authored joins (child start near a parent end).
   const TOL = 26 * view.scale;
   for (const child of nodes.values()) {
     if (child.parentId) continue;
@@ -261,7 +258,6 @@ function buildGraph(
     }
   }
 
-  // Anatomy-aware curvature + tangent continuity at branch takeoffs.
   for (const n of nodes.values()) {
     const a = n.a;
     const b = n.b;
@@ -275,7 +271,6 @@ function buildGraph(
     const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     let cx = mid.x + nrm.x * bowMag * bowSign;
     let cy = mid.y + nrm.y * bowMag * bowSign;
-
     if (n.parentId) {
       const p = nodes.get(n.parentId);
       if (p) {
@@ -288,7 +283,6 @@ function buildGraph(
     n.c = { x: cx, y: cy };
   }
 
-  // Width continuity across junctions.
   for (const n of nodes.values()) {
     if (n.parentId) {
       const p = nodes.get(n.parentId);
@@ -306,7 +300,6 @@ function buildGraph(
     }
   }
 
-  // Continuous distance-from-root fraction → smooth contrast falloff.
   const roots = [...nodes.values()].filter((n) => !n.parentId);
   let maxCum = 1;
   const setCum = (n: VNode, startCum: number, guard: number) => {
@@ -330,22 +323,7 @@ function buildGraph(
     .sort((x, y) => x.depthFrac0 - y.depthFrac0)
     .map((n) => n.seg.id);
 
-  const rootPaths: string[][] = [];
-  const walk = (n: VNode, acc: string[], guard: number) => {
-    if (guard > 64) return;
-    const path = [...acc, n.seg.id];
-    if (n.childIds.length === 0) {
-      rootPaths.push(path);
-      return;
-    }
-    for (const cid of n.childIds) {
-      const c = nodes.get(cid);
-      if (c) walk(c, path, guard + 1);
-    }
-  };
-  roots.forEach((r) => walk(r, [], 0));
-
-  return { nodes, order, rootPaths };
+  return { nodes, order };
 }
 
 type Graph = ReturnType<typeof buildGraph>;
@@ -369,7 +347,7 @@ function bezTangent(n: VNode, t: number): Pt {
 function centerAt(n: VNode, t: number): Pt {
   const p = bez(n, t);
   const tg = bezTangent(n, t);
-  const w = valueNoise(n.seed + 101, t * 2.2) * Math.hypot(n.b.x - n.a.x, n.b.y - n.a.y) * 0.012;
+  const w = valueNoise(n.seed + 101, t * 2.2) * Math.hypot(n.b.x - n.a.x, n.b.y - n.a.y) * 0.01;
   return { x: p.x - tg.y * w, y: p.y + tg.x * w };
 }
 function normalAt(n: VNode, t: number): Pt {
@@ -398,13 +376,13 @@ function pathologyHalf(n: VNode, t: number, side: 1 | -1): number {
     half *= 1 - 0.14 * lesion;
   }
   const irr =
-    valueNoise(n.seed + (side === 1 ? 7 : 23), t * 5) * 0.12 +
-    valueNoise(n.seed + (side === 1 ? 53 : 71), t * 1.6) * 0.07;
+    valueNoise(n.seed + (side === 1 ? 7 : 23), t * 5) * 0.1 +
+    valueNoise(n.seed + (side === 1 ? 53 : 71), t * 1.6) * 0.06;
   return Math.max(1.2, half * (1 + irr));
 }
 
 function ribbonPath(octx: CanvasRenderingContext2D, n: VNode, t0: number, t1: number, scale: number): void {
-  const samples = 28;
+  const samples = 26;
   const left: Pt[] = [];
   const right: Pt[] = [];
   for (let i = 0; i < samples; i += 1) {
@@ -431,7 +409,7 @@ interface PresetConfig {
   haze: number;
   noise: number;
   banding: number;
-  softness: number;
+  edgeBlur: number;
   silhouettes: boolean;
   roadmapGhost: boolean;
   vignette: string;
@@ -440,44 +418,45 @@ interface PresetConfig {
 function presetConfig(preset: AngioPreset): PresetConfig {
   switch (preset) {
     case 'dsa':
+      // Subtracted look: muted grey field (not blank white), crisp.
       return {
-        bg: ['#edeff0', '#dde0e1', '#c8ccce'],
-        ink: '20,22,26',
+        bg: ['#dfe2e4', '#ccd0d2', '#b4b9bc'],
+        ink: '22,25,30',
         density: 0.95,
-        haze: 0.035,
-        noise: 0.028,
-        banding: 0.012,
-        softness: 0.35,
+        haze: 0.05,
+        noise: 0.03,
+        banding: 0.01,
+        edgeBlur: 0.5,
         silhouettes: false,
         roadmapGhost: false,
-        vignette: 'rgba(38,42,46,0.38)',
+        vignette: 'rgba(34,38,42,0.42)',
       };
     case 'roadmap':
       return {
         bg: ['#0e1620', '#091018', '#04080d'],
         ink: '150,170,178',
-        density: 0.62,
+        density: 0.6,
         haze: 0.045,
-        noise: 0.085,
-        banding: 0.025,
-        softness: 0.7,
+        noise: 0.08,
+        banding: 0.02,
+        edgeBlur: 0.8,
         silhouettes: true,
         roadmapGhost: true,
-        vignette: 'rgba(0,0,0,0.56)',
+        vignette: 'rgba(0,0,0,0.54)',
       };
     case 'fluoro':
     default:
       return {
         bg: ['#12171d', '#0b0f14', '#050709'],
         ink: '208,216,222',
-        density: 0.54,
-        haze: 0.055,
+        density: 0.52,
+        haze: 0.05,
         noise: 0.15,
-        banding: 0.03,
-        softness: 0.85,
+        banding: 0.028,
+        edgeBlur: 0.9,
         silhouettes: true,
         roadmapGhost: false,
-        vignette: 'rgba(0,0,0,0.58)',
+        vignette: 'rgba(0,0,0,0.56)',
       };
   }
 }
@@ -504,22 +483,32 @@ function withFilter(ctx: CanvasRenderingContext2D, filter: string, fn: () => voi
 
 // --- cached layers ---------------------------------------------------------
 
+function makeBuffer(): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = ANGIO_WORKSPACE_WIDTH;
+  c.height = ANGIO_WORKSPACE_HEIGHT;
+  return c;
+}
 const cache: {
-  scene: HTMLCanvasElement | null;
+  vbuf: HTMLCanvasElement | null;
+  dbuf: HTMLCanvasElement | null;
+  core: HTMLCanvasElement | null;
   grain: { c: HTMLCanvasElement; key: string } | null;
   internal: HTMLCanvasElement | null;
   banding: HTMLCanvasElement | null;
-} = { scene: null, grain: null, internal: null, banding: null };
+} = { vbuf: null, dbuf: null, core: null, grain: null, internal: null, banding: null };
 
-function sceneCanvas(): HTMLCanvasElement {
-  if (!cache.scene) {
-    const c = document.createElement('canvas');
-    c.width = ANGIO_WORKSPACE_WIDTH;
-    c.height = ANGIO_WORKSPACE_HEIGHT;
-    cache.scene = c;
-  }
-  return cache.scene;
+function bufCtx(key: 'vbuf' | 'dbuf' | 'core'): CanvasRenderingContext2D | null {
+  if (!cache[key]) cache[key] = makeBuffer();
+  const ctx = cache[key]!.getContext('2d');
+  if (!ctx) return null;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.clearRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+  return ctx;
 }
+
 function grainCanvas(amount: number): HTMLCanvasElement | null {
   const key = amount.toFixed(3);
   if (cache.grain && cache.grain.key === key) return cache.grain.c;
@@ -543,7 +532,7 @@ function grainCanvas(amount: number): HTMLCanvasElement | null {
 }
 function internalNoiseCanvas(): HTMLCanvasElement | null {
   if (cache.internal) return cache.internal;
-  const cells = 26;
+  const cells = 30;
   const s = document.createElement('canvas');
   s.width = cells;
   s.height = cells;
@@ -551,7 +540,7 @@ function internalNoiseCanvas(): HTMLCanvasElement | null {
   if (!sg) return null;
   const img = sg.createImageData(cells, cells);
   for (let i = 0; i < img.data.length; i += 4) {
-    const v = Math.random() * 255;
+    const v = 150 + Math.random() * 105;
     img.data[i] = v;
     img.data[i + 1] = v;
     img.data[i + 2] = v;
@@ -563,7 +552,7 @@ function internalNoiseCanvas(): HTMLCanvasElement | null {
   c.height = 256;
   const g = c.getContext('2d');
   if (!g) return null;
-  withFilter(g, 'blur(7px)', () => g.drawImage(s, 0, 0, 256, 256));
+  withFilter(g, 'blur(9px)', () => g.drawImage(s, 0, 0, 256, 256));
   cache.internal = c;
   return c;
 }
@@ -582,147 +571,198 @@ function bandingCanvas(): HTMLCanvasElement | null {
   return c;
 }
 
-// --- scene painting --------------------------------------------------------
+// --- shared shape helpers --------------------------------------------------
 
-function densityAt(depthFrac: number): number {
-  return clamp(1 - TUNING.contrastFalloff * Math.pow(depthFrac, 1.25), 0.28, 1);
+function carinaPath(octx: CanvasRenderingContext2D, n: VNode, graph: Graph): boolean {
+  if (n.childIds.length === 0) return false;
+  const children = n.childIds.map((id) => graph.nodes.get(id)).filter((c): c is VNode => !!c);
+  if (children.length === 0) return false;
+  const pe = centerAt(n, 0.985);
+  const pn = normalAt(n, 0.985);
+  const ph = pathologyHalf(n, 0.985, 1);
+  const ptan = bezTangent(n, 1);
+  const ordered = children
+    .map((c) => {
+      const cs = centerAt(c, 0.06);
+      return { c, side: (cs.x - pe.x) * pn.x + (cs.y - pe.y) * pn.y };
+    })
+    .sort((u, v) => v.side - u.side);
+  const pL = { x: pe.x + pn.x * ph, y: pe.y + pn.y * ph };
+  const pR = { x: pe.x - pn.x * ph, y: pe.y - pn.y * ph };
+  const carina = { x: pe.x + ptan.x * ph * 1.05, y: pe.y + ptan.y * ph * 1.05 };
+  octx.beginPath();
+  octx.moveTo(pL.x, pL.y);
+  ordered.forEach(({ c }, idx) => {
+    const cn = normalAt(c, 0.05);
+    const ch = pathologyHalf(c, 0.05, 1);
+    const cc = centerAt(c, 0.2);
+    const outer = idx === 0 ? 1 : -1;
+    const wallOut = { x: cc.x + cn.x * ch * outer, y: cc.y + cn.y * ch * outer };
+    const wallIn = { x: cc.x - cn.x * ch * outer, y: cc.y - cn.y * ch * outer };
+    const ctrlA = {
+      x: pe.x + ptan.x * ph * 0.55 + (idx === 0 ? pn.x : -pn.x) * ph,
+      y: pe.y + ptan.y * ph * 0.55 + (idx === 0 ? pn.y : -pn.y) * ph,
+    };
+    octx.quadraticCurveTo(ctrlA.x, ctrlA.y, wallOut.x, wallOut.y);
+    octx.lineTo(wallIn.x, wallIn.y);
+    const last = idx === ordered.length - 1;
+    octx.quadraticCurveTo(carina.x, carina.y, last ? pR.x : pe.x, last ? pR.y : pe.y);
+  });
+  octx.closePath();
+  return true;
 }
 
-function paintTreeMask(octx: CanvasRenderingContext2D, graph: Graph, cfg: PresetConfig): void {
-  const ink = cfg.ink;
-  const baseA = cfg.density * TUNING.vesselDensity;
-
-  // 1. One soft outer margin for the whole tree (edge falloff, no hard edge).
-  withFilter(octx, `blur(${TUNING.edgeSoftness}px)`, () => {
-    octx.fillStyle = `rgba(${ink},${baseA * 0.3})`;
-    for (const id of graph.order) {
-      const n = graph.nodes.get(id);
-      if (!n) continue;
-      ribbonPath(octx, n, 0, 1, 1.08);
-      octx.fill();
+function sideBranches(
+  n: VNode,
+  fn: (poly: Pt[]) => void,
+): void {
+  const vt = (n.seg.vesselType || '').toLowerCase();
+  if (!(vt.includes('aorta') || vt.includes('iliac') || vt.includes('femoral'))) return;
+  const count = hash01(n.seed + 9) < 0.55 ? 1 : 0; // restrained
+  for (let k = 0; k < count; k += 1) {
+    const t = 0.4 + 0.4 * hash01(n.seed + 31 + k);
+    const root = centerAt(n, t);
+    const tg = bezTangent(n, t);
+    const sideSign = hash01(n.seed + 51 + k) < 0.5 ? 1 : -1;
+    const nrm = { x: -tg.y * sideSign, y: tg.x * sideSign };
+    // emerge tangentially, then curve away — short and tapered
+    const dir = norm({ x: nrm.x * 0.7 + tg.x * 0.5, y: nrm.y * 0.7 + tg.y * 0.5 });
+    const length = Math.min(
+      TUNING.sideBranchMaxLength,
+      pathologyHalf(n, t, 1) * (3.4 + hash01(n.seed + 71 + k) * 2.4),
+    );
+    const curve = (0.5 + hash01(n.seed + 81 + k) * 0.5) * sideSign;
+    const poly: Pt[] = [];
+    const back: Pt[] = [];
+    for (let i = 0; i <= 12; i += 1) {
+      const f = i / 12;
+      const w = Math.max(0.5, pathologyHalf(n, t, 1) * 0.34 * (1 - f) ** 1.5);
+      const bend = curve * length * 0.35 * f * f;
+      const bx = root.x + dir.x * length * f + nrm.x * bend;
+      const by = root.y + dir.y * length * f + nrm.y * bend;
+      poly.push({ x: bx + nrm.x * w, y: by + nrm.y * w });
+      back.unshift({ x: bx - nrm.x * w, y: by - nrm.y * w });
     }
-  });
-
-  // 2. Carina fork polygons merge parent trunk into child branches so the
-  //    bifurcation is one continuous lumen, not stacked ribbons / a diamond.
-  for (const n of graph.nodes.values()) {
-    if (n.childIds.length === 0) continue;
-    const children = n.childIds.map((id) => graph.nodes.get(id)).filter((c): c is VNode => !!c);
-    if (children.length === 0) continue;
-    const pe = centerAt(n, 0.985);
-    const pn = normalAt(n, 0.985);
-    const ph = pathologyHalf(n, 0.985, 1);
-    const ptan = bezTangent(n, 1);
-    const a = densityAt(n.depthFrac1) * baseA;
-    octx.fillStyle = `rgba(${ink},${a})`;
-    const ordered = children
-      .map((c) => {
-        const cs = centerAt(c, 0.06);
-        return { c, side: (cs.x - pe.x) * pn.x + (cs.y - pe.y) * pn.y };
-      })
-      .sort((u, v) => v.side - u.side);
-    const pL = { x: pe.x + pn.x * ph, y: pe.y + pn.y * ph };
-    const pR = { x: pe.x - pn.x * ph, y: pe.y - pn.y * ph };
-    const carina = { x: pe.x + ptan.x * ph * 1.15, y: pe.y + ptan.y * ph * 1.15 };
-    octx.beginPath();
-    octx.moveTo(pL.x, pL.y);
-    ordered.forEach(({ c }, idx) => {
-      const cn = normalAt(c, 0.05);
-      const ch = pathologyHalf(c, 0.05, 1);
-      const cc = centerAt(c, 0.18);
-      const outer = idx === 0 ? 1 : -1;
-      const wallOut = { x: cc.x + cn.x * ch * outer, y: cc.y + cn.y * ch * outer };
-      const wallIn = { x: cc.x - cn.x * ch * outer, y: cc.y - cn.y * ch * outer };
-      const ctrlA = {
-        x: pe.x + ptan.x * ph * 0.6 + (idx === 0 ? pn.x : -pn.x) * ph,
-        y: pe.y + ptan.y * ph * 0.6 + (idx === 0 ? pn.y : -pn.y) * ph,
-      };
-      octx.quadraticCurveTo(ctrlA.x, ctrlA.y, wallOut.x, wallOut.y);
-      octx.lineTo(wallIn.x, wallIn.y);
-      const last = idx === ordered.length - 1;
-      octx.quadraticCurveTo(carina.x, carina.y, last ? pR.x : pe.x, last ? pR.y : pe.y);
-    });
-    octx.closePath();
-    withFilter(octx, 'blur(1.1px)', () => octx.fill());
+    fn([...poly, ...back]);
   }
+}
 
-  // 3. Continuous lumen body (width + density already matched at joins).
-  const tile = internalNoiseCanvas();
+// --- vessel contrast buffer (union mask + one global density field) --------
+
+function buildVesselBuffer(graph: Graph, cfg: PresetConfig): HTMLCanvasElement | null {
+  const octx = bufCtx('vbuf');
+  if (!octx || !cache.vbuf) return null;
+
+  // 1. UNION mask: every ribbon + carina fork + side branch at alpha 1, same
+  //    white, so overlaps merge (no per-segment accumulation bands or seams).
+  octx.fillStyle = '#ffffff';
   for (const id of graph.order) {
     const n = graph.nodes.get(id);
     if (!n) continue;
-    const occluded = n.seg.pathologyType === 'occlusion';
-    const lumenEnd = occluded ? 0.6 : 1;
-    const aProx = densityAt(n.depthFrac0) * baseA;
-    const aDist = densityAt(n.depthFrac1) * baseA;
-    const grad = octx.createLinearGradient(n.a.x, n.a.y, n.b.x, n.b.y);
-    grad.addColorStop(0, `rgba(${ink},${aProx * 0.82})`);
-    grad.addColorStop(1, `rgba(${ink},${aDist * 0.7})`);
-    ribbonPath(octx, n, 0, lumenEnd, 0.96);
-    octx.fillStyle = grad;
+    const end = n.seg.pathologyType === 'occlusion' ? 0.6 : 1;
+    ribbonPath(octx, n, 0, end, 0.98);
     octx.fill();
-
-    octx.save();
-    ribbonPath(octx, n, 0, lumenEnd, 0.96);
-    octx.clip();
-    if (tile) {
-      const pat = octx.createPattern(tile, 'repeat');
-      if (pat) {
-        octx.save();
-        octx.globalCompositeOperation = 'destination-out';
-        octx.globalAlpha = TUNING.internalNoise;
-        octx.fillStyle = pat;
-        octx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
-        octx.restore();
-      }
-    }
-    octx.restore();
-
-    if (occluded) {
-      const cut = centerAt(n, lumenEnd);
-      const cn = normalAt(n, lumenEnd);
-      const h = pathologyHalf(n, lumenEnd, 1) * 0.95;
-      octx.strokeStyle = `rgba(${ink},${aDist})`;
-      octx.lineWidth = 2;
+  }
+  for (const n of graph.nodes.values()) {
+    if (carinaPath(octx, n, graph)) octx.fill();
+  }
+  octx.save();
+  octx.globalAlpha = TUNING.sideBranchOpacity;
+  for (const n of graph.nodes.values()) {
+    sideBranches(n, (poly) => {
       octx.beginPath();
-      octx.moveTo(cut.x + cn.x * h, cut.y + cn.y * h);
-      octx.lineTo(cut.x - cn.x * h, cut.y - cn.y * h);
-      octx.stroke();
-      withFilter(octx, 'blur(4px)', () => {
-        ribbonPath(octx, n, 0.78, 1, 0.4);
-        octx.fillStyle = `rgba(${ink},${aDist * 0.12})`;
-        octx.fill();
-      });
+      poly.forEach((p, i) => (i === 0 ? octx.moveTo(p.x, p.y) : octx.lineTo(p.x, p.y)));
+      octx.closePath();
+      octx.fill();
+    });
+  }
+  octx.restore();
+
+  // 2. Replace the mask with ONE continuous global density field (ink-tinted,
+  //    proximal→distal vertical falloff). source-in keeps the mask shape, so
+  //    density is seamless across every join.
+  const minY = 110;
+  const maxY = 560;
+  octx.globalCompositeOperation = 'source-in';
+  const grad = octx.createLinearGradient(0, minY, 0, maxY);
+  const a0 = cfg.density * TUNING.vesselOpacity;
+  grad.addColorStop(0, `rgba(${cfg.ink},${a0})`);
+  grad.addColorStop(0.55, `rgba(${cfg.ink},${a0 * (1 - TUNING.contrastFalloff * 0.35)})`);
+  grad.addColorStop(1, `rgba(${cfg.ink},${a0 * (1 - TUNING.contrastFalloff * 0.62)})`);
+  octx.fillStyle = grad;
+  octx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+
+  // 3. Subtle internal density variation, clipped to the mask via source-atop
+  //    (no rectangular noise clips).
+  const tile = internalNoiseCanvas();
+  if (tile) {
+    octx.globalCompositeOperation = 'source-atop';
+    octx.globalAlpha = TUNING.internalNoise;
+    const pat = octx.createPattern(tile, 'repeat');
+    if (pat) {
+      octx.fillStyle = pat;
+      octx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
     }
+    octx.globalAlpha = 1;
+  }
+
+  // 4. Continuous central contrast column — one union of centerline strokes,
+  //    laid over the field via source-atop so it cannot escape the lumen and
+  //    the shared trunk is never stacked/over-painted.
+  const cctx = bufCtx('core');
+  if (cctx && cache.core) {
+    cctx.strokeStyle = '#ffffff';
+    cctx.lineCap = 'round';
+    cctx.lineJoin = 'round';
+    for (const id of graph.order) {
+      const n = graph.nodes.get(id);
+      if (!n) continue;
+      const end = n.seg.pathologyType === 'occlusion' ? 0.6 : 1;
+      cctx.lineWidth = Math.max(2, ((n.startHalf + n.endHalf) / 2) * 0.62);
+      cctx.beginPath();
+      for (let i = 0; i <= 22; i += 1) {
+        const p = centerAt(n, (i / 22) * end);
+        if (i === 0) cctx.moveTo(p.x, p.y);
+        else cctx.lineTo(p.x, p.y);
+      }
+      cctx.stroke();
+    }
+    octx.globalCompositeOperation = 'source-atop';
+    octx.globalAlpha = TUNING.centralColumnStrength;
+    withFilter(octx, 'blur(1.1px)', () => {
+      octx.fillStyle = `rgba(${cfg.ink},1)`;
+      // tint the core mask, then stamp it
+      const tmp = cctx;
+      tmp.globalCompositeOperation = 'source-in';
+      tmp.fillStyle = `rgba(${cfg.ink},1)`;
+      tmp.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+      tmp.globalCompositeOperation = 'source-over';
+      octx.drawImage(cache.core as HTMLCanvasElement, 0, 0);
+    });
+    octx.globalAlpha = 1;
+  }
+
+  // 5. Pathology that subtracts contrast (soft, clipped by the mask).
+  octx.globalCompositeOperation = 'destination-out';
+  for (const id of graph.order) {
+    const n = graph.nodes.get(id);
+    if (!n) continue;
     if (n.seg.pathologyType === 'aneurysm') {
-      octx.save();
-      ribbonPath(octx, n, 0.2, 0.8, 0.95);
-      octx.clip();
-      octx.globalCompositeOperation = 'destination-out';
-      withFilter(octx, 'blur(5px)', () => {
-        ribbonPath(octx, n, 0.22, 0.78, 0.9);
-        octx.fillStyle = 'rgba(0,0,0,0.4)';
+      withFilter(octx, 'blur(6px)', () => {
+        ribbonPath(octx, n, 0.24, 0.76, 0.84);
+        octx.fillStyle = 'rgba(0,0,0,0.42)';
         octx.fill();
       });
-      octx.restore();
-      withFilter(octx, 'blur(1.6px)', () => {
-        ribbonPath(octx, n, 0.16, 0.84, 0.3);
-        octx.fillStyle = `rgba(${ink},${aDist * 0.8})`;
-        octx.fill();
-      });
-    }
-    if (n.seg.pathologyType === 'thrombus') {
+    } else if (n.seg.pathologyType === 'thrombus') {
       const m = centerAt(n, 0.52);
       const cn = normalAt(n, 0.52);
-      octx.save();
-      octx.globalCompositeOperation = 'destination-out';
       withFilter(octx, 'blur(4px)', () => {
         octx.beginPath();
         octx.ellipse(
           m.x,
           m.y,
-          pathologyHalf(n, 0.52, 1) * 0.55,
-          pathologyHalf(n, 0.52, 1) * 1.4,
+          pathologyHalf(n, 0.52, 1) * 0.5,
+          pathologyHalf(n, 0.52, 1) * 1.35,
           Math.atan2(cn.x, -cn.y),
           0,
           Math.PI * 2,
@@ -730,13 +770,9 @@ function paintTreeMask(octx: CanvasRenderingContext2D, graph: Graph, cfg: Preset
         octx.fillStyle = 'rgba(0,0,0,0.5)';
         octx.fill();
       });
-      octx.restore();
-    }
-    if (n.seg.pathologyType === 'dissection') {
-      octx.save();
-      octx.globalCompositeOperation = 'destination-out';
-      octx.strokeStyle = 'rgba(0,0,0,0.5)';
+    } else if (n.seg.pathologyType === 'dissection') {
       octx.lineWidth = 1.5;
+      octx.strokeStyle = 'rgba(0,0,0,0.55)';
       octx.beginPath();
       for (let i = 0; i <= 22; i += 1) {
         const t = 0.16 + (0.68 * i) / 22;
@@ -749,71 +785,13 @@ function paintTreeMask(octx: CanvasRenderingContext2D, graph: Graph, cfg: Preset
         else octx.lineTo(x, y);
       }
       octx.stroke();
-      octx.restore();
     }
   }
-
-  // 4. Continuous central contrast column flowing root→leaf through joins.
-  for (const path of graph.rootPaths) {
-    const pts: Pt[] = [];
-    path.forEach((id) => {
-      const n = graph.nodes.get(id);
-      if (!n) return;
-      const end = n.seg.pathologyType === 'occlusion' ? 0.6 : 1;
-      for (let i = 0; i <= 16; i += 1) pts.push(centerAt(n, (i / 16) * end));
-    });
-    if (pts.length < 2) continue;
-    const head = graph.nodes.get(path[0]);
-    withFilter(octx, 'blur(1.3px)', () => {
-      octx.strokeStyle = `rgba(${ink},${baseA * TUNING.centralColumn})`;
-      octx.lineJoin = 'round';
-      octx.lineCap = 'round';
-      octx.lineWidth = Math.max(2, (head ? head.startHalf : 6) * 0.7);
-      octx.beginPath();
-      pts.forEach((p, i) => (i === 0 ? octx.moveTo(p.x, p.y) : octx.lineTo(p.x, p.y)));
-      octx.stroke();
-    });
-  }
-
-  // 5. Tangential side branches that emerge from the host wall, taper, fade.
-  for (const n of graph.nodes.values()) {
-    const vt = (n.seg.vesselType || '').toLowerCase();
-    if (!(vt.includes('aorta') || vt.includes('iliac') || vt.includes('femoral'))) continue;
-    const count = 1 + Math.floor(hash01(n.seed + 9) * 2);
-    for (let k = 0; k < count; k += 1) {
-      const t = 0.35 + 0.45 * hash01(n.seed + 31 + k);
-      const root = centerAt(n, t);
-      const tg = bezTangent(n, t);
-      const sideSign = hash01(n.seed + 51 + k) < 0.5 ? 1 : -1;
-      const nrm = { x: -tg.y * sideSign, y: tg.x * sideSign };
-      const dir = norm({ x: nrm.x + tg.x * 0.55, y: nrm.y + tg.y * 0.55 });
-      const length = pathologyHalf(n, t, 1) * (5 + hash01(n.seed + 71 + k) * 4);
-      withFilter(octx, 'blur(1.4px)', () => {
-        octx.beginPath();
-        for (let i = 0; i <= 10; i += 1) {
-          const f = i / 10;
-          const w = pathologyHalf(n, t, 1) * 0.4 * (1 - f) ** 1.4 + 0.6;
-          const bx = root.x + dir.x * length * f;
-          const by = root.y + dir.y * length * f;
-          if (i === 0) octx.moveTo(bx + nrm.x * w, by + nrm.y * w);
-          else octx.lineTo(bx + nrm.x * w, by + nrm.y * w);
-        }
-        for (let i = 10; i >= 0; i -= 1) {
-          const f = i / 10;
-          const w = pathologyHalf(n, t, 1) * 0.4 * (1 - f) ** 1.4 + 0.6;
-          const bx = root.x + dir.x * length * f;
-          const by = root.y + dir.y * length * f;
-          octx.lineTo(bx - nrm.x * w, by - nrm.y * w);
-        }
-        octx.closePath();
-        octx.fillStyle = `rgba(${ink},${baseA * 0.46})`;
-        octx.fill();
-      });
-    }
-  }
+  octx.globalCompositeOperation = 'source-over';
+  return cache.vbuf;
 }
 
-// --- devices conform to the continuous connected centerline ----------------
+// --- device radiopacity buffer + faint graft fabric ------------------------
 
 function devicePath(graph: Graph, object: ProceduralObject, steps: number): { pts: Pt[]; host: VNode } | null {
   const host = graph.nodes.get(object.segmentId);
@@ -827,8 +805,7 @@ function devicePath(graph: Graph, object: ProceduralObject, steps: number): { pt
   const endT = isWire ? object.t : clamp(object.t + lenFrac / 2, 0, 1);
   const startT = isWire ? 0 : clamp(object.t - lenFrac / 2, 0, 1);
   const pts: Pt[] = [];
-  const traversal =
-    isWire || object.objectType === 'catheter' || object.objectType === 'sheath';
+  const traversal = isWire || object.objectType === 'catheter' || object.objectType === 'sheath';
   if (chain.length > 1 && traversal) {
     chain.forEach((id, ci) => {
       const node = graph.nodes.get(id);
@@ -843,98 +820,72 @@ function devicePath(graph: Graph, object: ProceduralObject, steps: number): { pt
   return { pts, host };
 }
 
-function paintDevices(
-  octx: CanvasRenderingContext2D,
+function buildDeviceBuffer(
   graph: Graph,
   input: AngioRenderInput,
   cfg: PresetConfig,
-): void {
-  const dev = cfg.ink;
-  const dA = TUNING.deviceOpacity;
-  octx.save();
+): { dbuf: HTMLCanvasElement | null; grafts: Array<{ pts: Pt[]; half: number }> } {
+  const octx = bufCtx('dbuf');
+  const grafts: Array<{ pts: Pt[]; half: number }> = [];
+  if (!octx || !cache.dbuf) return { dbuf: null, grafts };
+
+  // Hardware union mask (white) — wires/catheters/sheaths/struts.
+  octx.strokeStyle = '#ffffff';
+  octx.fillStyle = '#ffffff';
   octx.lineCap = 'round';
   octx.lineJoin = 'round';
+  const markers: Array<{ p: Pt; tg: Pt; size: number }> = [];
 
   for (const object of input.proceduralObjects) {
-    const dp = devicePath(graph, object, 28);
+    const dp = devicePath(graph, object, 26);
     if (!dp || dp.pts.length < 2) continue;
     const { pts, host } = dp;
-    const half = clamp((host.startHalf + host.endHalf) * 0.42, 4, 24);
-    const strokePts = (w: number, alpha: number) => {
-      octx.strokeStyle = `rgba(${dev},${alpha})`;
+    const half = clamp((host.startHalf + host.endHalf) * 0.42, 4, 22);
+    const tangentAt = (i: number): Pt =>
+      norm({
+        x: pts[Math.min(pts.length - 1, i + 1)].x - pts[Math.max(0, i - 1)].x,
+        y: pts[Math.min(pts.length - 1, i + 1)].y - pts[Math.max(0, i - 1)].y,
+      });
+    const strokePts = (w: number) => {
       octx.lineWidth = w;
       octx.beginPath();
       pts.forEach((p, i) => (i === 0 ? octx.moveTo(p.x, p.y) : octx.lineTo(p.x, p.y)));
       octx.stroke();
     };
-    const tangentAt = (i: number): Pt => {
-      const a = pts[Math.max(0, i - 1)];
-      const b = pts[Math.min(pts.length - 1, i + 1)];
-      return norm({ x: b.x - a.x, y: b.y - a.y });
-    };
-    const bandAt = (frac: number, size: number) => {
+    const queueBand = (frac: number, size: number) => {
       const i = clamp(Math.round(frac * (pts.length - 1)), 0, pts.length - 1);
-      const tg = tangentAt(i);
-      octx.strokeStyle = `rgba(${dev},${Math.min(1, dA + 0.05)})`;
-      octx.lineWidth = 2.4;
-      octx.beginPath();
-      octx.moveTo(pts[i].x - tg.y * size, pts[i].y + tg.x * size);
-      octx.lineTo(pts[i].x + tg.y * size, pts[i].y - tg.x * size);
-      octx.stroke();
+      markers.push({ p: pts[i], tg: tangentAt(i), size });
     };
 
     if (object.objectType === 'guidewire') {
-      strokePts(1.1, dA);
-      octx.globalAlpha = 0.4;
-      strokePts(0.6, dA);
-      octx.globalAlpha = 1;
+      strokePts(1.1);
     } else if (object.objectType === 'catheter') {
-      strokePts(3, dA * 0.78);
-      strokePts(1.3, dA * 0.5);
-      bandAt(1, 4);
+      strokePts(2.6);
+      queueBand(1, 3.6);
     } else if (object.objectType === 'sheath') {
-      strokePts(5, dA * 0.6);
-      bandAt(0, 5);
+      strokePts(4.4);
+      queueBand(0, 4.6);
     } else if (object.objectType === 'balloon') {
-      strokePts(1.2, dA * 0.7);
+      strokePts(1.1);
       if (object.state === 'deployed') {
         const mid = Math.floor(pts.length / 2);
         const tg = tangentAt(mid);
         octx.save();
         octx.translate(pts[mid].x, pts[mid].y);
         octx.rotate(Math.atan2(tg.y, tg.x));
-        octx.fillStyle = `rgba(${dev},0.16)`;
         octx.beginPath();
-        octx.ellipse(0, 0, 20, 6.5, 0, 0, Math.PI * 2);
+        octx.ellipse(0, 0, 18, 5.5, 0, 0, Math.PI * 2);
         octx.fill();
         octx.restore();
       }
-      bandAt(0.18, 4.5);
-      bandAt(0.82, 4.5);
+      queueBand(0.2, 4);
+      queueBand(0.8, 4);
     } else if (object.objectType === 'stent' || object.objectType === 'stentGraft') {
       const isGraft = object.objectType === 'stentGraft';
-      if (isGraft) {
-        octx.save();
-        octx.globalAlpha = 0.22;
-        octx.fillStyle = `rgba(${dev},1)`;
-        octx.beginPath();
-        pts.forEach((p, i) => {
-          const tg = tangentAt(i);
-          const e = { x: p.x - tg.y * half, y: p.y + tg.x * half };
-          if (i === 0) octx.moveTo(e.x, e.y);
-          else octx.lineTo(e.x, e.y);
-        });
-        for (let i = pts.length - 1; i >= 0; i -= 1) {
-          const tg = tangentAt(i);
-          octx.lineTo(pts[i].x + tg.y * half, pts[i].y - tg.x * half);
-        }
-        octx.closePath();
-        octx.fill();
-        octx.restore();
-      }
-      const cells = isGraft ? 18 : 22;
-      octx.strokeStyle = `rgba(${dev},${dA * 0.7})`;
-      octx.lineWidth = isGraft ? 1 : 0.8;
+      if (isGraft) grafts.push({ pts, half });
+      // fine regular strut diamond (thin lines, not bars)
+      const cells = isGraft ? 22 : 26;
+      octx.lineWidth = 0.7;
       for (const d of [1, -1]) {
         octx.beginPath();
         for (let i = 0; i <= cells; i += 1) {
@@ -942,7 +893,7 @@ function paintDevices(
           const pi = clamp(Math.round(f * (pts.length - 1)), 0, pts.length - 1);
           const p = pts[pi];
           const tg = tangentAt(pi);
-          const amp = clamp(half * 0.82, 3, 15) * (i % 2 === 0 ? d : -d);
+          const amp = clamp(half * 0.8, 3, 15) * (i % 2 === 0 ? d : -d);
           const x = p.x - tg.y * amp;
           const y = p.y + tg.x * amp;
           if (i === 0) octx.moveTo(x, y);
@@ -950,22 +901,36 @@ function paintDevices(
         }
         octx.stroke();
       }
-      bandAt(0.02, clamp(half, 4, 15));
-      bandAt(0.98, clamp(half, 4, 15));
-      if (isGraft) bandAt(0.5, clamp(half * 0.6, 3, 9));
+      queueBand(0.02, half);
+      queueBand(0.98, half);
+      if (isGraft) queueBand(0.5, half * 0.62);
     }
   }
-
   for (const placement of input.devicePlacements) {
     const host = graph.nodes.get(placement.segmentId);
     if (!host) continue;
     const p = centerAt(host, clamp(placement.t, 0, 1));
-    octx.fillStyle = `rgba(${dev},${dA * 0.7})`;
     octx.beginPath();
-    octx.arc(p.x, p.y, 3.4, 0, Math.PI * 2);
+    octx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
     octx.fill();
   }
-  octx.restore();
+
+  // Tint the hardware union once (uniform device radiopacity, no stacking).
+  octx.globalCompositeOperation = 'source-in';
+  octx.fillStyle = `rgba(${cfg.ink},${TUNING.deviceOpacity})`;
+  octx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+  octx.globalCompositeOperation = 'source-over';
+
+  // Crisp bright marker bands on top (the most radiopaque parts).
+  for (const m of markers) {
+    octx.strokeStyle = `rgba(${cfg.ink},1)`;
+    octx.lineWidth = 2.4;
+    octx.beginPath();
+    octx.moveTo(m.p.x - m.tg.y * m.size, m.p.y + m.tg.x * m.size);
+    octx.lineTo(m.p.x + m.tg.y * m.size, m.p.y - m.tg.x * m.size);
+    octx.stroke();
+  }
+  return { dbuf: cache.dbuf, grafts };
 }
 
 function drawSilhouettes(ctx: CanvasRenderingContext2D, strength: number): void {
@@ -1012,6 +977,7 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
     });
     const graph = buildGraph(input, view);
 
+    // 1. Background + subtle detector exposure gradient.
     const bg = ctx.createRadialGradient(CX, CY * 0.86, 60, CX, CY, ANGIO_WORKSPACE_WIDTH * 0.74);
     bg.addColorStop(0, cfg.bg[0]);
     bg.addColorStop(0.5, cfg.bg[1]);
@@ -1019,35 +985,78 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
     const expo = ctx.createLinearGradient(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
-    expo.addColorStop(0, 'rgba(255,255,255,0.045)');
-    expo.addColorStop(0.5, 'rgba(0,0,0,0)');
-    expo.addColorStop(1, 'rgba(0,0,0,0.06)');
+    if (input.preset === 'dsa') {
+      expo.addColorStop(0, 'rgba(40,44,48,0.05)');
+      expo.addColorStop(0.5, 'rgba(0,0,0,0)');
+      expo.addColorStop(1, 'rgba(20,22,26,0.08)');
+    } else {
+      expo.addColorStop(0, 'rgba(255,255,255,0.04)');
+      expo.addColorStop(0.5, 'rgba(0,0,0,0)');
+      expo.addColorStop(1, 'rgba(0,0,0,0.06)');
+    }
     ctx.fillStyle = expo;
     ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
-    if (cfg.silhouettes) drawSilhouettes(ctx, TUNING.fluoroSoftTissueStrength);
+    if (cfg.silhouettes) drawSilhouettes(ctx, 0.055);
 
-    const scene = sceneCanvas();
-    const octx = scene.getContext('2d');
-    if (octx) {
-      octx.setTransform(1, 0, 0, 1, 0, 0);
-      octx.clearRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
-      paintTreeMask(octx, graph, cfg);
-      paintDevices(octx, graph, input, cfg);
+    // 2. Vessel buffer (continuous contrast).
+    const vbuf = buildVesselBuffer(graph, cfg);
+    const devices = buildDeviceBuffer(graph, input, cfg);
 
+    if (vbuf) {
+      // Roadmap persistent ghost — single faint copy, no muddy duplicates.
       if (cfg.roadmapGhost) {
         ctx.save();
-        ctx.globalAlpha = TUNING.roadmapTintStrength * 0.45;
-        withFilter(ctx, 'blur(2.2px)', () => ctx.drawImage(scene, -2, 1));
+        ctx.globalAlpha = 0.32;
+        withFilter(ctx, 'blur(2px)', () => ctx.drawImage(vbuf, -1.5, 1));
         ctx.restore();
       }
+      // Soft edge halo (local softness) then crisp interior — not a global blur.
       ctx.save();
-      if (cfg.roadmapGhost) ctx.globalAlpha = 0.92;
-      withFilter(ctx, `blur(${Math.min(cfg.softness, TUNING.motionSoftness + 0.4)}px)`, () =>
-        ctx.drawImage(scene, 0, 0),
-      );
+      ctx.globalAlpha = 0.55;
+      withFilter(ctx, `blur(${cfg.edgeBlur + 1}px)`, () => ctx.drawImage(vbuf, 0, 0));
+      ctx.restore();
+      withFilter(ctx, `blur(${cfg.edgeBlur}px)`, () => ctx.drawImage(vbuf, 0, 0));
+    }
+
+    // 3. Faint graft fabric (soft body, never a solid block) — between
+    //    contrast and hardware so the column still reads through it.
+    if (devices.grafts.length > 0) {
+      ctx.save();
+      ctx.globalAlpha = TUNING.graftBodyOpacity;
+      ctx.fillStyle = `rgba(${cfg.ink},1)`;
+      withFilter(ctx, 'blur(1.4px)', () => {
+        for (const g of devices.grafts) {
+          const tg = (i: number): Pt =>
+            norm({
+              x: g.pts[Math.min(g.pts.length - 1, i + 1)].x - g.pts[Math.max(0, i - 1)].x,
+              y: g.pts[Math.min(g.pts.length - 1, i + 1)].y - g.pts[Math.max(0, i - 1)].y,
+            });
+          ctx.beginPath();
+          g.pts.forEach((p, i) => {
+            const t = tg(i);
+            const e = { x: p.x - t.y * g.half, y: p.y + t.x * g.half };
+            if (i === 0) ctx.moveTo(e.x, e.y);
+            else ctx.lineTo(e.x, e.y);
+          });
+          for (let i = g.pts.length - 1; i >= 0; i -= 1) {
+            const t = tg(i);
+            ctx.lineTo(g.pts[i].x + t.y * g.half, g.pts[i].y - t.x * g.half);
+          }
+          ctx.closePath();
+          ctx.fill();
+        }
+      });
       ctx.restore();
     }
 
+    // 4. Crisp device radiopacity buffer.
+    if (devices.dbuf) {
+      withFilter(ctx, input.preset === 'dsa' ? 'none' : 'blur(0.4px)', () =>
+        ctx.drawImage(devices.dbuf as HTMLCanvasElement, 0, 0),
+      );
+    }
+
+    // 5. Selection highlight on the continuous centerline.
     if (input.selectedId) {
       const seg = graph.nodes.get(input.selectedId);
       const obj = input.proceduralObjects.find((o) => o.id === input.selectedId);
@@ -1075,10 +1084,12 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
       ctx.restore();
     }
 
+    // 6. Scatter haze (avoids pure black/white blocks).
     ctx.fillStyle =
       input.preset === 'dsa' ? `rgba(70,72,76,${cfg.haze})` : `rgba(120,128,140,${cfg.haze})`;
     ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
 
+    // 7. Detector banding.
     const band = bandingCanvas();
     if (band && cfg.banding > 0) {
       const pat = ctx.createPattern(band, 'repeat');
@@ -1092,6 +1103,7 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
       }
     }
 
+    // 8. Detector grain.
     const nz = grainCanvas(cfg.noise);
     if (nz) {
       const pat = ctx.createPattern(nz, 'repeat');
@@ -1104,6 +1116,7 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
       }
     }
 
+    // 9. Vignette.
     const vig = ctx.createRadialGradient(
       CX,
       CY,
