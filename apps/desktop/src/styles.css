@@ -704,6 +704,8 @@ button.key-finding-row, .key-finding-row button { cursor: pointer; }
 /* Vessel composer (v0.14) */
 .composer-page { gap: 16px; }
 .composer-toolbar { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 16px; background: rgba(0,0,0,0.22); }
+.composer-scope-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; }
+.composer-scope-card .row-actions { flex-wrap: wrap; justify-content: flex-end; }
 .composer-toolbar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .composer-toolbar-secondary { padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.07); gap: 14px; }
 .composer-toolbar-spacer { flex: 1; }

@@ -86,7 +86,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
     setProceduralPlan(null);
     setActiveProceduralStepId('');
     setWorkspaceView('imaging');
-    void listVesselCompositions(vascCase.id)
+    void listVesselCompositions({ caseId: vascCase.id, scope: 'reference' })
       .then((rows) => {
         if (cancelled) return;
         const plan = rows[0] ?? null;

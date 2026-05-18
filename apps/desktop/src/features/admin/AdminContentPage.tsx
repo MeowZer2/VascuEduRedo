@@ -355,7 +355,7 @@ export function AdminContentPage({
       return;
     }
     let cancelled = false;
-    void listVesselCompositions(selectedCaseId)
+    void listVesselCompositions({ caseId: selectedCaseId, scope: 'reference' })
       .then((rows) => {
         if (!cancelled) setSelectedCasePlans(rows);
       })
@@ -853,7 +853,7 @@ export function AdminContentPage({
                 <h3>{creatingNewCase ? 'New case' : selectedCase ? 'Edit case' : 'Select a case'}</h3>
                 {!creatingNewCase && selectedCase && (
                   <span className={`health-pill ${selectedCasePlans.length > 0 ? 'ok' : 'warning'}`}>
-                    {selectedCasePlans.length > 0 ? 'Vessel plan linked' : 'No vessel plan'}
+                    {selectedCasePlans.length > 0 ? 'Reference plan linked' : 'No reference plan'}
                   </span>
                 )}
               </div>
@@ -883,9 +883,9 @@ export function AdminContentPage({
                       className="secondary-button small"
                       onClick={() => onOpenVesselComposer(selectedCase.id)}
                       disabled={busy}
-                      title="Open this case in the vessel composer"
+                      title="Edit the global reference plan for this case"
                     >
-                      {selectedCasePlans.length > 0 ? 'Open Plan' : 'Create Plan'}
+                      {selectedCasePlans.length > 0 ? 'Edit Reference Plan' : 'Create Reference Plan'}
                     </button>
                   </>
                 )}

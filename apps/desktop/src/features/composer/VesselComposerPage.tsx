@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { listDevices, type Device } from '../../lib/devices';
+import { useProfiles } from '../../lib/profileContext';
 import { friendlyError, useUnsavedChangesGuard } from '../../lib/productionState';
 import {
   ANATOMY_TEMPLATES,
@@ -53,6 +54,7 @@ import {
   type VascularPlanningEntity,
   type VesselCompositionData,
   type VesselCompositionRow,
+  type VesselPlanScope,
   type VesselSegment,
 } from '../../lib/vesselComposer';
 import type { VascCase } from '../../types';
@@ -74,6 +76,8 @@ type AngiogramVisualPreset = 'dsa' | 'fluoro' | 'roadmap';
 interface VesselComposerPageProps {
   cases: VascCase[];
   initialCaseId: string | null;
+  initialScope?: VesselPlanScope;
+  entryContext?: 'learner' | 'admin';
   onOpenCase: (caseId: string) => void;
 }
 
@@ -106,6 +110,8 @@ interface DraftEnvelope {
   compositionId: string | null;
   compositionName: string;
   caseId: string;
+  scope: VesselPlanScope;
+  profileId: string | null;
   data: PlanState;
   savedAt: string;
 }
@@ -113,8 +119,11 @@ interface DraftEnvelope {
 export function VesselComposerPage({
   cases,
   initialCaseId,
+  initialScope = 'learner',
+  entryContext = 'learner',
   onOpenCase,
 }: VesselComposerPageProps) {
+  const { activeProfileId } = useProfiles();
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [tool, setTool] = useState<ComposerTool>('select');
   const [segments, setSegments] = useState<VesselSegment[]>([]);
@@ -128,7 +137,10 @@ export function VesselComposerPage({
   const [drag, setDrag] = useState<DragState | null>(null);
   const [compositionId, setCompositionId] = useState<string | null>(null);
   const [compositionName, setCompositionName] = useState('Untitled vessel plan');
+  const [planScope, setPlanScope] = useState<VesselPlanScope>(initialScope);
   const [caseId, setCaseId] = useState<string>(initialCaseId ?? '');
+  const [referencePlan, setReferencePlan] = useState<VesselCompositionRow | null>(null);
+  const [learnerDraft, setLearnerDraft] = useState<VesselCompositionRow | null>(null);
   const [savedRows, setSavedRows] = useState<VesselCompositionRow[]>([]);
   const [loadId, setLoadId] = useState('');
   const [devices, setDevices] = useState<Device[]>([]);
@@ -243,6 +255,9 @@ export function VesselComposerPage({
   );
   const canUndo = undoStackRef.current.length > 0;
   const canRedo = redoStackRef.current.length > 0;
+  const referenceReadOnly = planScope === 'reference' && entryContext !== 'admin';
+  const canModifyPlan = !referenceReadOnly;
+  const planScopeLabel = planScope === 'reference' ? 'Reference plan' : 'My plan';
 
   useUnsavedChangesGuard(
     'vessel-composer',
@@ -274,6 +289,7 @@ export function VesselComposerPage({
   useEffect(() => {
     if (!initializedRef.current) return;
     if (!isDirty) return;
+    if (referenceReadOnly) return;
     if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = window.setTimeout(() => {
       try {
@@ -281,10 +297,12 @@ export function VesselComposerPage({
           compositionId,
           compositionName,
           caseId,
+          scope: planScope,
+          profileId: planScope === 'learner' ? activeProfileId : null,
           data: stateRef.current,
           savedAt: new Date().toISOString(),
         };
-        window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+        window.localStorage.setItem(draftStorageKey(planScope, activeProfileId, caseId), JSON.stringify(draft));
       } catch {
         // localStorage may be unavailable; silently skip.
       }
@@ -294,9 +312,12 @@ export function VesselComposerPage({
     };
   }, [
     caseId,
+    activeProfileId,
     compositionId,
     compositionName,
     isDirty,
+    planScope,
+    referenceReadOnly,
     segments,
     bifurcations,
     devicePlacements,
@@ -333,17 +354,29 @@ export function VesselComposerPage({
     let cancelled = false;
     async function boot() {
       try {
-        const rows = await listVesselCompositions();
+        const referenceRows = await listVesselCompositions({ scope: 'reference' });
+        const learnerRows = await listVesselCompositions({ scope: 'learner', profileId: activeProfileId });
         if (cancelled) return;
+        const scope = entryContext === 'admin' ? 'reference' : initialScope;
+        setPlanScope(scope);
+        const rows = scope === 'learner' ? learnerRows : referenceRows;
         setSavedRows(rows);
-        const draft = readDraft();
-        const linked = initialCaseId
-          ? rows.find((row) => row.caseId === initialCaseId)
-          : rows[0] ?? null;
+        const linkedReference = initialCaseId
+          ? referenceRows.find((row) => row.caseId === initialCaseId) ?? null
+          : referenceRows[0] ?? null;
+        const linkedLearner = initialCaseId
+          ? learnerRows.find((row) => row.caseId === initialCaseId) ?? null
+          : learnerRows[0] ?? null;
+        setReferencePlan(linkedReference);
+        setLearnerDraft(linkedLearner);
+        const draft = readDraft(scope, initialCaseId ?? '', activeProfileId);
+        const linked = scope === 'learner' ? linkedLearner : linkedReference;
 
         if (
           draft &&
           (!initialCaseId || draft.caseId === initialCaseId) &&
+          draft.scope === scope &&
+          (scope !== 'learner' || draft.profileId === activeProfileId) &&
           window.confirm(
             `Restore unsaved vessel plan draft "${draft.compositionName}"\nfrom ${new Date(draft.savedAt).toLocaleString()}?`,
           )
@@ -352,9 +385,12 @@ export function VesselComposerPage({
           setStatus('Restored unsaved draft.');
         } else if (linked) {
           applyComposition(linked);
-          if (initialCaseId) setStatus('Loaded linked vessel plan.');
+          if (initialCaseId) setStatus(scope === 'learner' ? 'Loaded my plan.' : 'Loaded reference plan.');
         } else {
-          startNewComposition(initialCaseId ?? '');
+          startNewComposition(initialCaseId ?? '', scope);
+          if (scope === 'learner' && linkedReference) {
+            setStatus('Reference plan available. Start my plan blank or copy the reference.');
+          }
         }
       } catch (e) {
         if (!cancelled) setError(messageFromError(e));
@@ -367,7 +403,7 @@ export function VesselComposerPage({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialCaseId]);
+  }, [activeProfileId, entryContext, initialCaseId, initialScope]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -568,9 +604,15 @@ export function VesselComposerPage({
     }
   }
 
-  function readDraft(): DraftEnvelope | null {
+  function draftStorageKey(scope = planScope, profileId = activeProfileId, linkedCaseId = caseId): string {
+    const casePart = linkedCaseId || 'unlinked';
+    const profilePart = scope === 'learner' ? profileId : 'reference';
+    return `${DRAFT_KEY}.${scope}.${profilePart}.${casePart}`;
+  }
+
+  function readDraft(scope = planScope, linkedCaseId = caseId, profileId = activeProfileId): DraftEnvelope | null {
     try {
-      const raw = window.localStorage.getItem(DRAFT_KEY);
+      const raw = window.localStorage.getItem(draftStorageKey(scope, profileId, linkedCaseId));
       if (!raw) return null;
       const parsed = JSON.parse(raw) as DraftEnvelope;
       if (!parsed?.data || !Array.isArray(parsed.data.segments)) return null;
@@ -582,7 +624,7 @@ export function VesselComposerPage({
 
   function discardDraft() {
     try {
-      window.localStorage.removeItem(DRAFT_KEY);
+      window.localStorage.removeItem(draftStorageKey());
     } catch {
       // ignore
     }
@@ -592,6 +634,7 @@ export function VesselComposerPage({
     setCompositionId(draft.compositionId);
     setCompositionName(draft.compositionName);
     setCaseId(draft.caseId);
+    setPlanScope(draft.scope ?? 'reference');
     ignoreNextDirtyRef.current = true;
     setSegments(draft.data.segments);
     setBifurcations(draft.data.bifurcations);
@@ -612,6 +655,7 @@ export function VesselComposerPage({
     setCompositionId(row.id);
     setCompositionName(row.name);
     setCaseId(row.caseId ?? '');
+    setPlanScope(row.scope);
     ignoreNextDirtyRef.current = true;
     setSegments(row.data.segments);
     setBifurcations(row.data.bifurcations);
@@ -626,17 +670,22 @@ export function VesselComposerPage({
     setError(null);
     setIsDirty(false);
     clearHistory();
-    discardDraft();
+    try {
+      window.localStorage.removeItem(draftStorageKey(row.scope, row.profileId ?? activeProfileId, row.caseId ?? ''));
+    } catch {
+      // ignore
+    }
   }
 
-  function startNewComposition(nextCaseId = caseId) {
+  function startNewComposition(nextCaseId = caseId, nextScope = planScope) {
     if (isDirty && initializedRef.current) {
       const ok = window.confirm('Discard unsaved changes and start a new vessel plan?');
       if (!ok) return;
     }
     const targetCase = cases.find((item) => item.id === nextCaseId);
     setCompositionId(null);
-    setCompositionName(targetCase ? `${targetCase.title} vessel plan` : 'Untitled vessel plan');
+    setCompositionName(targetCase ? `${targetCase.title} ${nextScope === 'learner' ? 'my plan' : 'reference plan'}` : 'Untitled vessel plan');
+    setPlanScope(nextScope);
     setCaseId(nextCaseId);
     ignoreNextDirtyRef.current = true;
     setSegments([]);
@@ -658,12 +707,28 @@ export function VesselComposerPage({
   }
 
   async function refreshSavedRows(): Promise<VesselCompositionRow[]> {
-    const rows = await listVesselCompositions();
+    const rows = await listVesselCompositions({
+      scope: planScope,
+      profileId: planScope === 'learner' ? activeProfileId : null,
+    });
     setSavedRows(rows);
+    if (caseId) {
+      const [referenceRows, learnerRows] = await Promise.all([
+        listVesselCompositions({ caseId, scope: 'reference' }),
+        listVesselCompositions({ caseId, scope: 'learner', profileId: activeProfileId }),
+      ]);
+      setReferencePlan(referenceRows[0] ?? null);
+      setLearnerDraft(learnerRows[0] ?? null);
+    }
     return rows;
   }
 
   async function handleSave() {
+    if (!canModifyPlan) {
+      setStatus('Reference plan is view-only here. Open Admin to edit it.');
+      setError(null);
+      return;
+    }
     flushPendingPropertyHistory();
     const issues = validateVesselCompositionData(currentData, deviceIds);
     const blocking = issues.filter((issue) => issue.severity === 'error');
@@ -678,6 +743,8 @@ export function VesselComposerPage({
       const saved = await saveVesselComposition({
         id: compositionId,
         caseId: caseId || null,
+        profileId: planScope === 'learner' ? activeProfileId : null,
+        scope: planScope,
         name: compositionName,
         data: currentData,
       });
@@ -722,6 +789,69 @@ export function VesselComposerPage({
     }
   }
 
+  async function switchPlanScope(nextScope: VesselPlanScope) {
+    if (nextScope === planScope) return;
+    if (isDirty) {
+      const ok = window.confirm('Discard unsaved changes and switch plan mode?');
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      const rows = await listVesselCompositions({
+        scope: nextScope,
+        profileId: nextScope === 'learner' ? activeProfileId : null,
+      });
+      setSavedRows(rows);
+      const linked = caseId
+        ? rows.find((row) => row.caseId === caseId) ?? null
+        : rows[0] ?? null;
+      if (linked) {
+        applyComposition(linked);
+        setStatus(nextScope === 'learner' ? 'Loaded my plan.' : 'Loaded reference plan.');
+      } else {
+        startNewComposition(caseId, nextScope);
+        setStatus(nextScope === 'learner' && referencePlan ? 'Reference plan available. Start my plan blank or copy the reference.' : null);
+      }
+      setPlanScope(nextScope);
+      setError(null);
+    } catch (e) {
+      setError(`Plan mode switch failed: ${messageFromError(e)}`);
+      setStatus(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function createLearnerDraftFromReference() {
+    if (!referencePlan) return;
+    if (isDirty && !window.confirm('Discard unsaved changes and copy the reference plan?')) return;
+    setCompositionId(null);
+    setCompositionName(selectedCase ? `${selectedCase.title} my plan` : `${referencePlan.name} copy`);
+    setCaseId(referencePlan.caseId ?? caseId);
+    setPlanScope('learner');
+    ignoreNextDirtyRef.current = true;
+    setSegments(referencePlan.data.segments);
+    setBifurcations(referencePlan.data.bifurcations);
+    setDevicePlacements(referencePlan.data.devicePlacements);
+    setTreatmentMarkers(referencePlan.data.treatmentMarkers);
+    setProceduralObjects(referencePlan.data.proceduralObjects);
+    setProceduralSteps(referencePlan.data.proceduralSteps);
+    setCompositionMetadata({ ...(referencePlan.data.metadata ?? {}), copiedFromReferencePlanId: referencePlan.id });
+    setPendingSegmentStart(null);
+    setSelectedId(null);
+    setLoadId('');
+    setTool('select');
+    setError(null);
+    setStatus('Copied reference plan into my draft. Save when ready.');
+    setIsDirty(true);
+    clearHistory();
+  }
+
+  function startBlankLearnerDraft() {
+    startNewComposition(caseId, 'learner');
+    setStatus('Started a blank plan draft.');
+  }
+
   function maybeSnapPoint(point: ComposerPoint, opts?: { excludeSegmentId?: string | null }): ComposerPoint {
     const endpoint = findEndpointSnap(point, segments, opts?.excludeSegmentId ?? null, 14);
     if (endpoint) return endpoint;
@@ -736,6 +866,11 @@ export function VesselComposerPage({
 
   function handleCanvasPointerDown(event: ReactPointerEvent<SVGRectElement>) {
     event.preventDefault();
+    if (!canModifyPlan) {
+      setStatus('Reference plan is view-only here. Open Admin to edit it.');
+      setError(null);
+      return;
+    }
     const rawPoint = svgPoint(event);
     if (tool === 'segment') {
       handleSegmentCanvasClick(maybeSnapPoint(rawPoint));
@@ -764,6 +899,10 @@ export function VesselComposerPage({
   ) {
     event.preventDefault();
     event.stopPropagation();
+    if (!canModifyPlan) {
+      setSelectedId(segment.id);
+      return;
+    }
     captureComposerPointer(event);
     const point = svgPoint(event);
     if (tool === 'segment') {
@@ -784,6 +923,10 @@ export function VesselComposerPage({
   function handleObjectPointerDown(event: ReactPointerEvent<SVGGElement>, id: string) {
     event.preventDefault();
     event.stopPropagation();
+    if (!canModifyPlan) {
+      setSelectedId(id);
+      return;
+    }
     captureComposerPointer(event);
     beginDrag(id, svgPoint(event));
   }
@@ -850,6 +993,11 @@ export function VesselComposerPage({
   }
 
   function applyTemplate() {
+    if (!canModifyPlan) {
+      setStatus('Reference plan is view-only here. Open Admin to edit it.');
+      setError(null);
+      return;
+    }
     const hasExistingPlan =
       segments.length > 0 ||
       bifurcations.length > 0 ||
@@ -947,6 +1095,7 @@ export function VesselComposerPage({
   }
 
   function addDevicePlacement(segment: VesselSegment, point: ComposerPoint) {
+    if (!canModifyPlan) return;
     if (!selectedDevice) {
       setError('Choose a catalog device before placing it on a vessel segment.');
       setStatus(null);
@@ -969,6 +1118,7 @@ export function VesselComposerPage({
   }
 
   function addTreatmentMarker(segment: VesselSegment, point: ComposerPoint) {
+    if (!canModifyPlan) return;
     commitNow();
     const projection = projectPointToSegment(point, segment);
     const snappedT = snapNormalizedT(projection.t);
@@ -981,6 +1131,7 @@ export function VesselComposerPage({
   }
 
   function addProceduralObject() {
+    if (!canModifyPlan) return;
     const segment = segments.find((item) => item.id === proceduralSegmentId) ?? segments[0];
     if (!segment) {
       setError('Add a vessel segment before placing procedural equipment.');
@@ -1011,6 +1162,7 @@ export function VesselComposerPage({
   }
 
   function deleteSelected() {
+    if (!canModifyPlan) return;
     if (!selectedObject) return;
     if (!window.confirm(`Delete this ${selectionLabel(selectedObject.type)} from the procedural plan?`)) return;
     commitNow();
@@ -1050,6 +1202,7 @@ export function VesselComposerPage({
   }
 
   function duplicateSelected() {
+    if (!canModifyPlan) return;
     if (!selectedObject) return;
     commitNow();
     const offset = 28;
@@ -1132,6 +1285,7 @@ export function VesselComposerPage({
   }
 
   function patchSegment(id: string, patch: Partial<VesselSegment>) {
+    if (!canModifyPlan) return;
     commitPropertyChange();
     setSegments((current) =>
       current.map((segment) => {
@@ -1149,6 +1303,7 @@ export function VesselComposerPage({
   }
 
   function patchBifurcation(id: string, patch: Partial<BifurcationNode>) {
+    if (!canModifyPlan) return;
     commitPropertyChange();
     setBifurcations((current) =>
       current.map((node) => (node.id === id ? { ...node, ...patch } : node)),
@@ -1156,6 +1311,7 @@ export function VesselComposerPage({
   }
 
   function patchDevicePlacement(id: string, patch: Partial<DevicePlacement>) {
+    if (!canModifyPlan) return;
     commitPropertyChange();
     setDevicePlacements((current) =>
       current.map((placement) => (placement.id === id ? { ...placement, ...patch } : placement)),
@@ -1163,6 +1319,7 @@ export function VesselComposerPage({
   }
 
   function patchTreatmentMarker(id: string, patch: Partial<TreatmentMarker>) {
+    if (!canModifyPlan) return;
     commitPropertyChange();
     setTreatmentMarkers((current) =>
       current.map((marker) => (marker.id === id ? { ...marker, ...patch } : marker)),
@@ -1170,6 +1327,7 @@ export function VesselComposerPage({
   }
 
   function patchProceduralObject(id: string, patch: Partial<ProceduralObject>) {
+    if (!canModifyPlan) return;
     commitPropertyChange();
     setProceduralObjects((current) =>
       current.map((object) => {
@@ -1204,6 +1362,7 @@ export function VesselComposerPage({
   }
 
   function createProcedureStep(kind: ProceduralStep['kind']) {
+    if (!canModifyPlan) return;
     commitPropertyChange();
     const id = makeId('step');
     const labels: Record<ProceduralStep['kind'], string> = {
@@ -1224,6 +1383,7 @@ export function VesselComposerPage({
   }
 
   function patchMetadata(patch: Record<string, unknown>) {
+    if (!canModifyPlan) return;
     commitPropertyChange();
     setCompositionMetadata((current) => ({ ...current, ...patch }));
   }
@@ -1297,8 +1457,12 @@ export function VesselComposerPage({
       <header className="page-header split-header planning-hero">
         <div>
           <p className="eyebrow">Planning workspace</p>
-          <h2>Angiogram and procedural planning.</h2>
-          <p>Build case-linked vessel anatomy, procedural steps, and device strategy when a case needs planning context.</p>
+          <h2>{planScopeLabel}</h2>
+          <p>
+            {planScope === 'reference'
+              ? 'Shared teaching plan for the case. Learners can view it; Admin can edit it.'
+              : 'Profile-specific planning draft for practice. It will not overwrite the reference plan.'}
+          </p>
         </div>
         <div className="row-actions">
           {selectedCase && (
@@ -1313,13 +1477,55 @@ export function VesselComposerPage({
           <button
             type="button"
             className="secondary-button"
-            onClick={() => startNewComposition(caseId)}
-            disabled={busy}
+            onClick={() => startNewComposition(caseId, planScope)}
+            disabled={busy || !canModifyPlan}
+            title={!canModifyPlan ? 'Reference plan is view-only here' : 'Start a new plan'}
           >
-            New plan
+            New {planScope === 'learner' ? 'my plan' : 'reference plan'}
           </button>
         </div>
       </header>
+
+      <section className="card composer-scope-card">
+        <div>
+          <strong>{selectedCase ? selectedCase.title : 'Unlinked planning workspace'}</strong>
+          <p className="muted small">
+            {referencePlan ? 'Reference plan exists.' : 'No reference plan yet.'}
+            {' '}
+            {learnerDraft ? 'My plan exists for this profile.' : 'No saved plan for this profile yet.'}
+          </p>
+        </div>
+        <div className="row-actions">
+          <div className="segmented" role="group" aria-label="Plan mode">
+            <button
+              type="button"
+              className={planScope === 'reference' ? 'active' : ''}
+              onClick={() => void switchPlanScope('reference')}
+              disabled={busy}
+            >
+              Reference Plan
+            </button>
+            <button
+              type="button"
+              className={planScope === 'learner' ? 'active' : ''}
+              onClick={() => void switchPlanScope('learner')}
+              disabled={busy}
+            >
+              My Plan
+            </button>
+          </div>
+          {planScope === 'learner' && !learnerDraft && referencePlan ? (
+            <button type="button" className="secondary-button small" onClick={createLearnerDraftFromReference} disabled={busy}>
+              Create my draft from reference
+            </button>
+          ) : null}
+          {planScope === 'learner' && !learnerDraft ? (
+            <button type="button" className="secondary-button small" onClick={startBlankLearnerDraft} disabled={busy}>
+              Start blank draft
+            </button>
+          ) : null}
+        </div>
+      </section>
 
       <section className="composer-toolbar" aria-label="Vessel composer tools">
         <div className="composer-toolbar-row">
@@ -1342,23 +1548,23 @@ export function VesselComposerPage({
 
           <div className="composer-tool-group" role="group" aria-label="Drawing tools">
             <ToolButton tool={tool} value="select" label="Select" onSelect={setTool} title="Select / move (Esc to clear)" />
-            <ToolButton tool={tool} value="segment" label="Segment" onSelect={setTool} title="Add a vessel segment" />
-            <ToolButton tool={tool} value="bifurcation" label="Branch" onSelect={setTool} title="Add a bifurcation" />
+            <ToolButton tool={tool} value="segment" label="Segment" onSelect={setTool} title={canModifyPlan ? 'Add a vessel segment' : 'Reference plan is view-only here'} disabled={!canModifyPlan} />
+            <ToolButton tool={tool} value="bifurcation" label="Branch" onSelect={setTool} title={canModifyPlan ? 'Add a bifurcation' : 'Reference plan is view-only here'} disabled={!canModifyPlan} />
             <ToolButton
               tool={tool}
               value="device"
               label="Device"
               onSelect={setTool}
-              title={deviceToolTitle}
-              disabled={devices.length === 0 || segments.length === 0}
+              title={!canModifyPlan ? 'Reference plan is view-only here' : deviceToolTitle}
+              disabled={!canModifyPlan || devices.length === 0 || segments.length === 0}
             />
             <ToolButton
               tool={tool}
               value="marker"
               label="Marker"
               onSelect={setTool}
-              title={markerToolTitle}
-              disabled={segments.length === 0}
+              title={!canModifyPlan ? 'Reference plan is view-only here' : markerToolTitle}
+              disabled={!canModifyPlan || segments.length === 0}
             />
           </div>
 
@@ -1367,7 +1573,7 @@ export function VesselComposerPage({
               type="button"
               className="secondary-button small"
               onClick={duplicateSelected}
-              disabled={!selectedObject || busy}
+              disabled={!selectedObject || busy || !canModifyPlan}
               title="Duplicate selection (D)"
             >
               Duplicate
@@ -1376,7 +1582,7 @@ export function VesselComposerPage({
               type="button"
               className="secondary-button small"
               onClick={deleteSelected}
-              disabled={!selectedId || busy}
+              disabled={!selectedId || busy || !canModifyPlan}
               title="Delete selection (Del)"
             >
               Delete
@@ -1413,8 +1619,8 @@ export function VesselComposerPage({
               type="button"
               className="primary-button"
               onClick={() => void handleSave()}
-              disabled={busy}
-              title="Save (Ctrl+S)"
+              disabled={busy || !canModifyPlan}
+              title={canModifyPlan ? 'Save (Ctrl+S)' : 'Reference plan is view-only here'}
             >
               Save
             </button>
@@ -1450,7 +1656,7 @@ export function VesselComposerPage({
                 type="button"
                 className="secondary-button small"
                 onClick={applyTemplate}
-                disabled={busy}
+                disabled={busy || !canModifyPlan}
               >
                 Apply
               </button>
@@ -1536,6 +1742,7 @@ export function VesselComposerPage({
             onNameChange={setCompositionName}
             caseId={caseId}
             onCaseChange={setCaseId}
+            readOnly={!canModifyPlan}
             cases={cases}
             linkedCaseTitle={selectedCase?.title ?? null}
             segments={segments}
@@ -1936,6 +2143,7 @@ function PlanSummaryPanel({
   onNameChange,
   caseId,
   onCaseChange,
+  readOnly = false,
   cases,
   linkedCaseTitle,
   segments,
@@ -1950,6 +2158,7 @@ function PlanSummaryPanel({
   onNameChange: (value: string) => void;
   caseId: string;
   onCaseChange: (value: string) => void;
+  readOnly?: boolean;
   cases: VascCase[];
   linkedCaseTitle: string | null;
   segments: VesselSegment[];
@@ -1979,6 +2188,7 @@ function PlanSummaryPanel({
             className="text-input"
             value={compositionName}
             onChange={(event) => onNameChange(event.target.value)}
+            disabled={readOnly}
           />
         </label>
         <label className="field-label">
@@ -1987,6 +2197,7 @@ function PlanSummaryPanel({
             className="text-input"
             value={caseId}
             onChange={(event) => onCaseChange(event.target.value)}
+            disabled={readOnly}
           >
             <option value="">No case link</option>
             {cases.map((item) => (
@@ -2046,6 +2257,7 @@ function PlanSummaryPanel({
             className="text-input textarea compact"
             value={notes}
             onChange={(event) => onNotesChange(event.target.value)}
+            disabled={readOnly}
             placeholder="Approach, sequence, contingencies…"
           />
         </label>

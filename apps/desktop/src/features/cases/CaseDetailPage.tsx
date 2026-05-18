@@ -3,13 +3,15 @@ import { ProceduralPlanViewer } from '../../components/ProceduralPlanViewer';
 import { categories } from '../../data/sampleContent';
 import { getCaseCardArt, getTopicArt } from '../../lib/uiImages';
 import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
+import { useProfiles } from '../../lib/profileContext';
 import type { VascCase } from '../../types';
 
 interface CaseDetailPageProps {
   vascCase: VascCase;
   onBack: () => void;
   onStart: () => void;
-  onOpenComposer: () => void;
+  onOpenReferencePlan: () => void;
+  onOpenMyPlan: () => void;
 }
 
 function formatReviewedAt(iso?: string): string | null {
@@ -19,35 +21,42 @@ function formatReviewedAt(iso?: string): string | null {
   return d.toLocaleDateString();
 }
 
-export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: CaseDetailPageProps) {
+export function CaseDetailPage({ vascCase, onBack, onStart, onOpenReferencePlan, onOpenMyPlan }: CaseDetailPageProps) {
+  const { activeProfileId } = useProfiles();
   const teachingPoints = vascCase.teachingPoints ?? [];
   const references = vascCase.references ?? [];
   const reviewedAt = formatReviewedAt(vascCase.lastReviewedAt);
   const [linkedPlan, setLinkedPlan] = useState<VesselCompositionRow | null>(null);
+  const [learnerDraft, setLearnerDraft] = useState<VesselCompositionRow | null>(null);
   const [previewStepId, setPreviewStepId] = useState('');
   const category = categories.find((item) => item.id === vascCase.categoryId);
   const art = getCaseCardArt(vascCase) ?? getTopicArt(vascCase.categoryId);
 
   useEffect(() => {
     let cancelled = false;
-    void listVesselCompositions(vascCase.id)
-      .then((rows) => {
+    void Promise.all([
+      listVesselCompositions({ caseId: vascCase.id, scope: 'reference' }),
+      listVesselCompositions({ caseId: vascCase.id, scope: 'learner', profileId: activeProfileId }),
+    ])
+      .then(([referenceRows, learnerRows]) => {
         if (!cancelled) {
-          const plan = rows[0] ?? null;
+          const plan = referenceRows[0] ?? null;
           setLinkedPlan(plan);
+          setLearnerDraft(learnerRows[0] ?? null);
           setPreviewStepId(plan?.data.proceduralSteps[0]?.id ?? '');
         }
       })
       .catch(() => {
         if (!cancelled) {
           setLinkedPlan(null);
+          setLearnerDraft(null);
           setPreviewStepId('');
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [vascCase.id]);
+  }, [activeProfileId, vascCase.id]);
 
   return (
     <div className="page case-detail-redesign">
@@ -74,7 +83,10 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
             <span className="pill pill-mono">{vascCase.questions.length} questions</span>
             <span className="pill pill-mono">{vascCase.bookmarks?.length ?? 0} key images</span>
             <span className={linkedPlan ? 'pill success pill-mono' : 'pill pill-mono'}>
-              {linkedPlan ? 'Procedural plan' : 'No plan'}
+              {linkedPlan ? 'Reference plan' : 'No reference plan'}
+            </span>
+            <span className={learnerDraft ? 'pill success pill-mono' : 'pill pill-mono'}>
+              {learnerDraft ? 'My plan saved' : 'No my plan yet'}
             </span>
             {reviewedAt ? <span className="pill success pill-mono">Reviewed {reviewedAt}</span> : null}
           </div>
@@ -82,8 +94,17 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
             <button type="button" className="btn primary large" onClick={onStart}>
               Practice this case
             </button>
-            <button type="button" className="btn secondary" onClick={onOpenComposer}>
-              {linkedPlan ? 'Open procedural plan' : 'Create procedural plan'}
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={onOpenReferencePlan}
+              disabled={!linkedPlan}
+              title={!linkedPlan ? 'No reference plan has been authored for this case yet' : undefined}
+            >
+              {linkedPlan ? 'View reference plan' : 'Reference plan'}
+            </button>
+            <button type="button" className="btn secondary" onClick={onOpenMyPlan}>
+              {learnerDraft ? 'Open my plan' : 'Start my plan'}
             </button>
             <button type="button" className="btn ghost" onClick={onBack}>
               Back
@@ -208,15 +229,18 @@ export function CaseDetailPage({ vascCase, onBack, onStart, onOpenComposer }: Ca
         <section className="card">
           <div className="section-head">
             <div>
-              <h3>Procedural plan</h3>
-              <p>Linked angiogram plan and step sequence.</p>
+              <h3>Reference plan</h3>
+              <p>Shared angiogram plan and step sequence for teaching.</p>
             </div>
             <div className="flex">
               <button type="button" className="btn secondary small" onClick={onStart}>
                 Practice steps
               </button>
-              <button type="button" className="btn secondary small" onClick={onOpenComposer}>
-                Open plan
+              <button type="button" className="btn secondary small" onClick={onOpenReferencePlan}>
+                View reference
+              </button>
+              <button type="button" className="btn secondary small" onClick={onOpenMyPlan}>
+                {learnerDraft ? 'Open my plan' : 'Start my plan'}
               </button>
             </div>
           </div>

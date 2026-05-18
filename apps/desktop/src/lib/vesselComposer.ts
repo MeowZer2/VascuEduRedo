@@ -223,16 +223,28 @@ export interface VesselCompositionData {
 export interface VesselCompositionRow {
   id: string;
   caseId: string | null;
+  profileId: string | null;
+  scope: VesselPlanScope;
   name: string;
   data: VesselCompositionData;
   updatedAt: string;
 }
 
+export type VesselPlanScope = 'reference' | 'learner';
+
 export interface VesselCompositionInput {
   id?: string | null;
   caseId?: string | null;
+  profileId?: string | null;
+  scope?: VesselPlanScope;
   name: string;
   data: VesselCompositionData;
+}
+
+export interface VesselCompositionListOptions {
+  caseId?: string | null;
+  profileId?: string | null;
+  scope?: VesselPlanScope | 'all';
 }
 
 export interface PlanValidationIssue {
@@ -265,6 +277,8 @@ export interface LabelLayoutEntry {
 interface VesselCompositionWire {
   id: string;
   caseId: string | null;
+  profileId?: string | null;
+  scope?: string | null;
   name: string;
   data: unknown;
   updatedAt: string;
@@ -547,14 +561,19 @@ export function validateVesselCompositionData(
   return issues;
 }
 
-export async function listVesselCompositions(caseId?: string | null): Promise<VesselCompositionRow[]> {
+export async function listVesselCompositions(
+  optionsOrCaseId?: VesselCompositionListOptions | string | null,
+): Promise<VesselCompositionRow[]> {
+  const options = normalizeCompositionListOptions(optionsOrCaseId);
   if (isTauriDesktop()) {
     const rows = await safeInvoke<VesselCompositionWire[]>('list_vessel_compositions', {
-      caseId: caseId ?? null,
+      caseId: options.caseId ?? null,
+      profileId: options.profileId ?? null,
+      scope: options.scope ?? 'reference',
     });
     if (rows) return rows.map(fromWire);
   }
-  return readLocalRows(caseId);
+  return readLocalRows(options);
 }
 
 export async function getVesselComposition(compositionId: string): Promise<VesselCompositionRow | null> {
@@ -570,8 +589,15 @@ export async function getVesselComposition(compositionId: string): Promise<Vesse
 export async function saveVesselComposition(
   input: VesselCompositionInput,
 ): Promise<VesselCompositionRow> {
+  const scope = input.scope ?? 'reference';
+  const profileId = scope === 'learner' ? input.profileId?.trim() || null : null;
+  if (scope === 'learner' && !profileId) {
+    throw new Error('A learner profile is required to save my plan.');
+  }
   if (isTauriDesktop()) {
-    const row = await safeInvoke<VesselCompositionWire>('save_vessel_composition', { input });
+    const row = await safeInvoke<VesselCompositionWire>('save_vessel_composition', {
+      input: { ...input, scope, profileId },
+    });
     if (!row) throw new Error('save_vessel_composition returned no row');
     return fromWire(row);
   }
@@ -582,6 +608,8 @@ export async function saveVesselComposition(
   const next: VesselCompositionRow = {
     id,
     caseId: input.caseId ?? null,
+    profileId,
+    scope,
     name: input.name.trim() || 'Untitled vessel plan',
     data: normalizeVesselCompositionData(input.data),
     updatedAt: now,
@@ -975,23 +1003,46 @@ function templateSegment(
 }
 
 function fromWire(row: VesselCompositionWire): VesselCompositionRow {
+  const scope = row.scope === 'learner' ? 'learner' : 'reference';
   return {
     id: row.id,
     caseId: row.caseId ?? null,
+    profileId: scope === 'learner' ? row.profileId ?? null : null,
+    scope,
     name: row.name,
     data: normalizeVesselCompositionData(row.data),
     updatedAt: row.updatedAt,
   };
 }
 
-function readLocalRows(caseId?: string | null): VesselCompositionRow[] {
+function readLocalRows(options: VesselCompositionListOptions = {}): VesselCompositionRow[] {
   const rows = readJson<VesselCompositionWire[]>(LOCAL_KEY, []);
+  const scope = options.scope ?? 'reference';
   const normalized = rows
     .filter((row) => row && typeof row.id === 'string')
     .map(fromWire)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  if (caseId === undefined || caseId === null || caseId === '') return normalized;
-  return normalized.filter((row) => row.caseId === caseId);
+  return normalized.filter((row) => {
+    if (options.caseId !== undefined && options.caseId !== null && options.caseId !== '' && row.caseId !== options.caseId) {
+      return false;
+    }
+    if (scope !== 'all' && row.scope !== scope) return false;
+    if (scope === 'learner' && options.profileId && row.profileId !== options.profileId) return false;
+    return true;
+  });
+}
+
+function normalizeCompositionListOptions(
+  optionsOrCaseId?: VesselCompositionListOptions | string | null,
+): VesselCompositionListOptions {
+  if (typeof optionsOrCaseId === 'string' || optionsOrCaseId === null) {
+    return { caseId: optionsOrCaseId ?? null, scope: 'reference' };
+  }
+  return {
+    caseId: optionsOrCaseId?.caseId ?? null,
+    profileId: optionsOrCaseId?.profileId ?? null,
+    scope: optionsOrCaseId?.scope ?? 'reference',
+  };
 }
 
 function migrateOldObjects(rawObjects: unknown): {

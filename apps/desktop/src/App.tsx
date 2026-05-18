@@ -15,6 +15,7 @@ import { applyThemeMode, getStoredThemeMode } from './lib/appearance';
 import { loadCases } from './lib/content';
 import { ProfileProvider, useProfiles } from './lib/profileContext';
 import { UnsavedChangesProvider } from './lib/productionState';
+import type { VesselPlanScope } from './lib/vesselComposer';
 import type { VascCase } from './types';
 
 export type Screen =
@@ -46,6 +47,8 @@ function AppInner() {
   const [cases, setCases] = useState<VascCase[]>(sampleCases);
   const [selectedCaseId, setSelectedCaseId] = useState<string>(sampleCases[0]?.id ?? '');
   const [composerCaseId, setComposerCaseId] = useState<string | null>(null);
+  const [composerScope, setComposerScope] = useState<VesselPlanScope>('learner');
+  const [composerEntryContext, setComposerEntryContext] = useState<'learner' | 'admin'>('learner');
   // Bumped each time an attempt completes so the Progress page refetches its SQLite stats.
   const [progressRefreshKey, setProgressRefreshKey] = useState(0);
   const selectedCase = useMemo<VascCase | undefined>(
@@ -103,16 +106,22 @@ function AppInner() {
     setScreen('training-session');
   }
 
-  function openVesselComposer(caseId?: string | null) {
+  function openVesselComposer(caseId?: string | null, scope: VesselPlanScope = 'learner', entryContext: 'learner' | 'admin' = 'learner') {
     if (!confirmNavigation()) return;
     setComposerCaseId(caseId ?? null);
+    setComposerScope(scope);
+    setComposerEntryContext(entryContext);
     if (caseId) setSelectedCaseId(caseId);
     setScreen('vessel-composer');
   }
 
   function handleNavigate(nextScreen: Screen) {
     if (nextScreen !== screen && !confirmNavigation()) return;
-    if (nextScreen === 'vessel-composer') setComposerCaseId(null);
+    if (nextScreen === 'vessel-composer') {
+      setComposerCaseId(null);
+      setComposerScope('learner');
+      setComposerEntryContext('learner');
+    }
     setScreen(nextScreen);
   }
 
@@ -161,7 +170,8 @@ function AppInner() {
             vascCase={selectedCase}
             onBack={() => setScreen('cases')}
             onStart={() => startCase(selectedCase.id)}
-            onOpenComposer={() => openVesselComposer(selectedCase.id)}
+            onOpenReferencePlan={() => openVesselComposer(selectedCase.id, 'reference', 'learner')}
+            onOpenMyPlan={() => openVesselComposer(selectedCase.id, 'learner', 'learner')}
           />
         )}
         {screen === 'training' && (
@@ -186,6 +196,8 @@ function AppInner() {
           <VesselComposerPage
             cases={cases}
             initialCaseId={composerCaseId}
+            initialScope={composerScope}
+            entryContext={composerEntryContext}
             onOpenCase={(caseId) => {
               setSelectedCaseId(caseId);
               setScreen('case-detail');
@@ -203,7 +215,7 @@ function AppInner() {
             onOpenInTraining={(caseId) => {
               void openCaseInTraining(caseId);
             }}
-            onOpenVesselComposer={(caseId) => openVesselComposer(caseId)}
+            onOpenVesselComposer={(caseId) => openVesselComposer(caseId, 'reference', 'admin')}
           />
         )}
         {screen === 'settings' && <SettingsPage />}

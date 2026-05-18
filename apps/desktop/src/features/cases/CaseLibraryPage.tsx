@@ -43,7 +43,7 @@ export function CaseLibraryPage({
     async function loadPlanBadges() {
       const entries = await Promise.all(
         cases.map(
-          async (item) => [item.id, (await listVesselCompositions(item.id)).length > 0] as const,
+          async (item) => [item.id, (await listVesselCompositions({ caseId: item.id, scope: 'reference' })).length > 0] as const,
         ),
       );
       if (cancelled) return;

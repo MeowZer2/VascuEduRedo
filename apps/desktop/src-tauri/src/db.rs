@@ -139,9 +139,9 @@ pub fn export_app_backup(state: State<DbState>) -> Result<AppBackup, String> {
         )?,
         vessel_compositions: query_json_rows(
             &conn,
-            "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions ORDER BY updated_at DESC",
-            &["id", "caseId", "name", "data", "updatedAt"],
-            &[JsonColumn::Text, JsonColumn::NullableText, JsonColumn::Text, JsonColumn::Json, JsonColumn::Text],
+            "SELECT id, case_id, profile_id, scope, name, data_json, updated_at FROM vessel_compositions ORDER BY updated_at DESC",
+            &["id", "caseId", "profileId", "scope", "name", "data", "updatedAt"],
+            &[JsonColumn::Text, JsonColumn::NullableText, JsonColumn::NullableText, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json, JsonColumn::Text],
         )?,
         devices: query_json_rows(
             &conn,
@@ -294,6 +294,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS vessel_compositions (
             id TEXT PRIMARY KEY,
             case_id TEXT REFERENCES cases(id) ON DELETE SET NULL,
+            profile_id TEXT,
+            scope TEXT NOT NULL DEFAULT 'reference',
             name TEXT NOT NULL,
             data_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -321,6 +323,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("Schema init failed: {e}"))?;
     ensure_question_response_columns(conn)?;
     ensure_attempt_profile_column(conn)?;
+    ensure_vessel_composition_scope_columns(conn)?;
     Ok(())
 }
 
@@ -366,6 +369,41 @@ fn ensure_question_response_columns(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("question_responses add column {name} failed: {e}"))?;
         }
     }
+    Ok(())
+}
+
+fn ensure_vessel_composition_scope_columns(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "vessel_compositions", "profile_id")? {
+        conn.execute("ALTER TABLE vessel_compositions ADD COLUMN profile_id TEXT", [])
+            .map_err(|e| format!("vessel_compositions add column profile_id failed: {e}"))?;
+    }
+    if !table_has_column(conn, "vessel_compositions", "scope")? {
+        conn.execute(
+            "ALTER TABLE vessel_compositions ADD COLUMN scope TEXT NOT NULL DEFAULT 'reference'",
+            [],
+        )
+        .map_err(|e| format!("vessel_compositions add column scope failed: {e}"))?;
+    }
+    conn.execute(
+        "UPDATE vessel_compositions SET scope = 'reference' WHERE scope IS NULL OR scope = ''",
+        [],
+    )
+    .map_err(|e| format!("vessel_compositions scope backfill failed: {e}"))?;
+    conn.execute(
+        "UPDATE vessel_compositions SET profile_id = NULL WHERE scope = 'reference'",
+        [],
+    )
+    .map_err(|e| format!("vessel_compositions reference profile cleanup failed: {e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vessel_compositions_scope_case ON vessel_compositions(scope, case_id)",
+        [],
+    )
+    .map_err(|e| format!("vessel_compositions scope/case index failed: {e}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vessel_compositions_learner ON vessel_compositions(scope, profile_id, case_id)",
+        [],
+    )
+    .map_err(|e| format!("vessel_compositions learner index failed: {e}"))?;
     Ok(())
 }
 
@@ -2721,6 +2759,8 @@ pub fn admin_import_case(
 pub struct VesselCompositionRow {
     pub id: String,
     pub case_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub scope: String,
     pub name: String,
     pub data: Value,
     pub updated_at: String,
@@ -2733,6 +2773,10 @@ pub struct VesselCompositionInput {
     pub id: Option<String>,
     #[serde(default)]
     pub case_id: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
     pub name: String,
     #[serde(default = "empty_object")]
     pub data: Value,
@@ -2781,6 +2825,8 @@ pub struct CaseBookmarkInput {
 fn parse_vessel_composition_row(
     id: String,
     case_id: Option<String>,
+    profile_id: Option<String>,
+    scope: String,
     name: String,
     data_json: String,
     updated_at: String,
@@ -2790,6 +2836,8 @@ fn parse_vessel_composition_row(
     Ok(VesselCompositionRow {
         id,
         case_id,
+        profile_id,
+        scope,
         name,
         data,
         updated_at,
@@ -2802,7 +2850,7 @@ fn fetch_vessel_composition_row(
 ) -> Result<Option<VesselCompositionRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions WHERE id = ?1 LIMIT 1",
+            "SELECT id, case_id, profile_id, scope, name, data_json, updated_at FROM vessel_compositions WHERE id = ?1 LIMIT 1",
         )
         .map_err(|e| format!("fetch_vessel_composition_row prepare failed: {e}"))?;
     let mut rows = stmt
@@ -2820,6 +2868,8 @@ fn fetch_vessel_composition_row(
         row.get(2).map_err(|e| e.to_string())?,
         row.get(3).map_err(|e| e.to_string())?,
         row.get(4).map_err(|e| e.to_string())?,
+        row.get(5).map_err(|e| e.to_string())?,
+        row.get(6).map_err(|e| e.to_string())?,
     )?))
 }
 
@@ -2827,62 +2877,75 @@ fn fetch_vessel_composition_row(
 pub fn list_vessel_compositions(
     state: State<DbState>,
     case_id: Option<String>,
+    profile_id: Option<String>,
+    scope: Option<String>,
 ) -> Result<Vec<VesselCompositionRow>, String> {
     let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let case_filter = case_id
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let profile_filter = profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let scope_filter = scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("reference");
+    if !matches!(scope_filter, "reference" | "learner" | "all") {
+        return Err("Plan scope must be reference, learner, or all.".into());
+    }
 
-    let mut out = Vec::new();
+    let mut conditions: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
     if let Some(case_id) = case_filter {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions WHERE case_id = ?1 ORDER BY updated_at DESC, name ASC",
-            )
-            .map_err(|e| format!("list_vessel_compositions prepare failed: {e}"))?;
-        let rows = stmt
-            .query_map(params![case_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(|e| format!("list_vessel_compositions query failed: {e}"))?;
-        for row in rows {
-            let (id, case_id, name, data_json, updated_at) =
-                row.map_err(|e| format!("list_vessel_compositions row failed: {e}"))?;
-            out.push(parse_vessel_composition_row(
-                id, case_id, name, data_json, updated_at,
-            )?);
+        conditions.push("case_id = ?".to_string());
+        values.push(case_id.to_string());
+    }
+    if scope_filter != "all" {
+        conditions.push("scope = ?".to_string());
+        values.push(scope_filter.to_string());
+    }
+    if scope_filter == "learner" {
+        if let Some(profile_id) = profile_filter {
+            conditions.push("profile_id = ?".to_string());
+            values.push(profile_id.to_string());
         }
-    } else {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, case_id, name, data_json, updated_at FROM vessel_compositions ORDER BY updated_at DESC, name ASC",
-            )
-            .map_err(|e| format!("list_vessel_compositions prepare failed: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(|e| format!("list_vessel_compositions query failed: {e}"))?;
-        for row in rows {
-            let (id, case_id, name, data_json, updated_at) =
-                row.map_err(|e| format!("list_vessel_compositions row failed: {e}"))?;
-            out.push(parse_vessel_composition_row(
-                id, case_id, name, data_json, updated_at,
-            )?);
-        }
+    }
+
+    let mut sql = "SELECT id, case_id, profile_id, scope, name, data_json, updated_at FROM vessel_compositions".to_string();
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" ORDER BY updated_at DESC, name ASC");
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("list_vessel_compositions prepare failed: {e}"))?;
+    let params = rusqlite::params_from_iter(values.iter());
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|e| format!("list_vessel_compositions query failed: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, case_id, profile_id, scope, name, data_json, updated_at) =
+            row.map_err(|e| format!("list_vessel_compositions row failed: {e}"))?;
+        out.push(parse_vessel_composition_row(
+            id, case_id, profile_id, scope, name, data_json, updated_at,
+        )?);
     }
     Ok(out)
 }
@@ -2927,6 +2990,27 @@ pub fn save_vessel_composition(
         }
     }
 
+    let scope = input
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("reference");
+    if !matches!(scope, "reference" | "learner") {
+        return Err("Plan scope must be reference or learner.".into());
+    }
+    let profile_id = if scope == "learner" {
+        let profile = input
+            .profile_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "A learner profile is required to save my plan.".to_string())?;
+        Some(profile.to_string())
+    } else {
+        None
+    };
+
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let updated_at = now_iso();
     let data_json = input.data.to_string();
@@ -2940,14 +3024,14 @@ pub fn save_vessel_composition(
 
     if existing > 0 {
         conn.execute(
-            "UPDATE vessel_compositions SET case_id = ?1, name = ?2, data_json = ?3, updated_at = ?4 WHERE id = ?5",
-            params![case_id, name, data_json, updated_at, id],
+            "UPDATE vessel_compositions SET case_id = ?1, profile_id = ?2, scope = ?3, name = ?4, data_json = ?5, updated_at = ?6 WHERE id = ?7",
+            params![case_id, profile_id, scope, name, data_json, updated_at, id],
         )
         .map_err(|e| format!("save_vessel_composition update failed: {e}"))?;
     } else {
         conn.execute(
-            "INSERT INTO vessel_compositions (id, case_id, name, data_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, case_id, name, data_json, updated_at],
+            "INSERT INTO vessel_compositions (id, case_id, profile_id, scope, name, data_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, case_id, profile_id, scope, name, data_json, updated_at],
         )
         .map_err(|e| format!("save_vessel_composition insert failed: {e}"))?;
     }
