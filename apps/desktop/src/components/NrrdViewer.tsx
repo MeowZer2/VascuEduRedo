@@ -955,6 +955,7 @@ export function NrrdViewer({
             disabled={recentFiles.length === 0}
             aria-haspopup="listbox"
             aria-expanded={recentMenuOpen}
+            title={recentFiles.length === 0 ? 'No recent studies yet' : 'Open a recent study'}
           >
             Recent ▾
           </button>
@@ -1040,6 +1041,8 @@ export function NrrdViewer({
                     : 'dicom-series-row'
                 }
                 onClick={() => handleSelectDicomSeries(series)}
+                disabled={Boolean(series.unsupportedReason)}
+                title={series.unsupportedReason ?? 'Open this CT series'}
               >
                 <span>
                   <strong>{describeDicomSeries(series)}</strong>
@@ -1191,7 +1194,13 @@ export function NrrdViewer({
             </button>
           </div>
           <div className="viewer-source-row">
-            <button type="button" className="secondary-button small" onClick={handleOpenLocalFile} disabled={!isTauriDesktop()}>
+            <button
+              type="button"
+              className="secondary-button small"
+              onClick={handleOpenLocalFile}
+              disabled={!isTauriDesktop()}
+              title={isTauriDesktop() ? 'Open a local scan file' : 'Native file picker requires the desktop build'}
+            >
               Open scan
             </button>
             <button
@@ -1199,6 +1208,7 @@ export function NrrdViewer({
               className="secondary-button small"
               onClick={handleOpenDicomFolder}
               disabled={!isTauriDesktop() || dicomImportStatus === 'scanning'}
+              title={isTauriDesktop() ? 'Import a CT DICOM series from a local folder' : 'Native folder picker requires the desktop build'}
             >
               {dicomImportStatus === 'scanning' ? 'Importing...' : 'Import study'}
             </button>
@@ -1210,6 +1220,7 @@ export function NrrdViewer({
                 disabled={recentFiles.length === 0}
                 aria-haspopup="listbox"
                 aria-expanded={recentMenuOpen}
+                title={recentFiles.length === 0 ? 'No recent studies yet' : 'Open a recent study'}
               >
                 Recent
               </button>

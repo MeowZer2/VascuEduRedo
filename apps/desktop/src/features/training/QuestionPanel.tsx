@@ -54,6 +54,7 @@ export function QuestionPanel({
   const [hintsUsed, setHintsUsed] = useState<Record<string, number>>({});
   const [results, setResults] = useState<QuestionResult[]>([]);
   const [submittedResult, setSubmittedResult] = useState<QuestionResult | null>(null);
+  const [advancing, setAdvancing] = useState(false);
   const [questionStartedAt, setQuestionStartedAt] = useState(() => Date.now());
 
   const question = vascCase.questions[index];
@@ -144,43 +145,49 @@ export function QuestionPanel({
   }
 
   async function next() {
-    if (!submittedResult) return;
-    const updatedResults = [...results, submittedResult];
-    setResults(updatedResults);
-    setSubmittedResult(null);
+    if (!submittedResult || advancing) return;
+    setAdvancing(true);
 
-    if (isLast) {
-      const score = updatedResults.reduce((sum, item) => sum + item.awardedPoints, 0);
-      const totalHintsUsed = updatedResults.reduce((sum, item) => sum + item.hintsUsed, 0);
-      const totalElapsedMs = updatedResults.reduce((sum, item) => sum + item.elapsedMs, 0);
-      const attempt: AttemptResult = {
-        id: attemptId ?? newAttemptId(),
-        caseId: vascCase.id,
-        caseTitle: vascCase.title,
-        completedAt: new Date().toISOString(),
-        score: Number(score.toFixed(2)),
-        maxScore: totalPossible,
-        percent: Number(((score / totalPossible) * 100).toFixed(1)),
-        correctCount: updatedResults.filter((item) => item.correct).length,
-        totalHintsUsed,
-        totalElapsedMs,
-        questionResults: updatedResults,
-      };
-      // Mark the SQLite attempt complete with the final score (no-op in browser mode).
-      // Await before navigating so the Progress page's first refetch sees the completed row.
-      if (attemptId) {
-        await completeAttempt(attemptId, attempt.score);
+    try {
+      const updatedResults = [...results, submittedResult];
+      setResults(updatedResults);
+      setSubmittedResult(null);
+
+      if (isLast) {
+        const score = updatedResults.reduce((sum, item) => sum + item.awardedPoints, 0);
+        const totalHintsUsed = updatedResults.reduce((sum, item) => sum + item.hintsUsed, 0);
+        const totalElapsedMs = updatedResults.reduce((sum, item) => sum + item.elapsedMs, 0);
+        const attempt: AttemptResult = {
+          id: attemptId ?? newAttemptId(),
+          caseId: vascCase.id,
+          caseTitle: vascCase.title,
+          completedAt: new Date().toISOString(),
+          score: Number(score.toFixed(2)),
+          maxScore: totalPossible,
+          percent: Number(((score / totalPossible) * 100).toFixed(1)),
+          correctCount: updatedResults.filter((item) => item.correct).length,
+          totalHintsUsed,
+          totalElapsedMs,
+          questionResults: updatedResults,
+        };
+        // Mark the SQLite attempt complete with the final score (no-op in browser mode).
+        // Await before navigating so the Progress page's first refetch sees the completed row.
+        if (attemptId) {
+          await completeAttempt(attemptId, attempt.score);
+        }
+        onComplete(attempt);
+        return;
       }
-      onComplete(attempt);
-      return;
-    }
 
-    const nextIndex = index + 1;
-    const nextQuestion = vascCase.questions[nextIndex];
-    setIndex(nextIndex);
-    setAnswer(defaultAnswer(nextQuestion));
-    setQuestionStartedAt(Date.now());
-    onQuestionChange(nextIndex);
+      const nextIndex = index + 1;
+      const nextQuestion = vascCase.questions[nextIndex];
+      setIndex(nextIndex);
+      setAnswer(defaultAnswer(nextQuestion));
+      setQuestionStartedAt(Date.now());
+      onQuestionChange(nextIndex);
+    } finally {
+      setAdvancing(false);
+    }
   }
 
   function renderAnswerInput() {
@@ -454,8 +461,8 @@ export function QuestionPanel({
             Submit answer
           </button>
         ) : (
-          <button className="primary-button" onClick={() => void next()}>
-            {isLast ? 'Finish case' : 'Next question'}
+          <button className="primary-button" onClick={() => void next()} disabled={advancing}>
+            {advancing ? 'Saving...' : isLast ? 'Finish case' : 'Next question'}
           </button>
         )}
       </div>

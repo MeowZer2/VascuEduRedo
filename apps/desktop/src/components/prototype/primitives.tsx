@@ -200,7 +200,19 @@ export function CaseCard({
   onOpen: () => void;
 }) {
   return (
-    <article className="case-card" onClick={onOpen} role="button" tabIndex={0}>
+    <article
+      className="case-card"
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${vascCase.title}`}
+    >
       <div className="case-thumb">
         <Thumb
           imageUrl={vascCase.imageUrl}

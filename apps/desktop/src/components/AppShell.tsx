@@ -3,6 +3,7 @@ import type { Screen } from '../App';
 import brandIcon from '../assets/brand/vascedu-icon.png';
 import { useProfiles } from '../lib/profileContext';
 import { deriveInitials, PROFILE_ROLES, type Profile } from '../lib/profiles';
+import { isTauriDesktop } from '../lib/tauri';
 
 interface AppShellProps {
   activeScreen: Screen;
@@ -137,6 +138,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
   const activeNav: Screen =
     activeScreen === 'case-detail' || activeScreen === 'training-session' ? 'cases' : activeScreen;
   const crumbs = useMemo(() => ['VascEdu', screenLabels[activeScreen]], [activeScreen]);
+  const runtimeLabel = isTauriDesktop() ? 'Tauri desktop - SQLite synced' : 'Browser preview - localStorage';
 
   useEffect(() => {
     localStorage.setItem('vascedu.sidebarCollapsed', collapsed ? '1' : '0');
@@ -191,7 +193,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
         <div className="sidebar-footer">
           <div className="sidebar-status">
             <span className="status-dot" />
-            <span>Tauri desktop · SQLite synced</span>
+            <span>{runtimeLabel}</span>
           </div>
           <ProfileMenu collapsed={collapsed} />
         </div>
@@ -277,6 +279,7 @@ function CommandPalette({
   const filtered = query.trim()
     ? commands.filter((item) => item.commandLabel.toLowerCase().includes(query.toLowerCase()))
     : commands;
+  const firstCommand = filtered[0];
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -295,6 +298,13 @@ function CommandPalette({
           autoFocus
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && firstCommand) {
+              event.preventDefault();
+              onNavigate(firstCommand.id);
+              onClose();
+            }
+          }}
         />
         <div className="palette-list">
           {filtered.map((item, index) => {
@@ -310,10 +320,14 @@ function CommandPalette({
               >
                 <Icon size={15} />
                 <span>{item.commandLabel}</span>
-                <span className="palette-shortcut">G {item.label[0]}</span>
               </button>
             );
           })}
+          {filtered.length === 0 ? (
+            <div className="palette-row palette-row-empty" role="status">
+              <span>No matching sections</span>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

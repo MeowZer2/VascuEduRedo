@@ -10,7 +10,6 @@ interface CaseLibraryPageProps {
   cases: VascCase[];
   onOpenCase: (caseId: string) => void;
   onStartCase: (caseId: string) => void;
-  onQuickPractice: (filters: { difficulty: string; topic: string }) => void;
 }
 
 const ANY = 'any';
@@ -31,7 +30,6 @@ export function CaseLibraryPage({
   cases,
   onOpenCase,
   onStartCase,
-  onQuickPractice,
 }: CaseLibraryPageProps) {
   const [search, setSearch] = useState('');
   const [difficulty, setDifficulty] = useState<string>(ANY);
@@ -106,9 +104,7 @@ export function CaseLibraryPage({
   function startQuickPractice() {
     if (filteredCases.length > 0) {
       onStartCase(filteredCases[0].id);
-      return;
     }
-    onQuickPractice({ difficulty, topic: topic === ALL ? ANY : topic });
   }
 
   function shortName(categoryId: string): string {
@@ -137,7 +133,12 @@ export function CaseLibraryPage({
           >
             Clear filters
           </button>
-          <button className="btn primary" onClick={startQuickPractice} disabled={cases.length === 0}>
+          <button
+            className="btn primary"
+            onClick={startQuickPractice}
+            disabled={filteredCases.length === 0}
+            title={filteredCases.length === 0 ? 'No cases match the current filters' : 'Start the first shown case'}
+          >
             <IcPlay size={14} /> Quick practice
           </button>
         </div>

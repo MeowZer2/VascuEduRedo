@@ -133,6 +133,14 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
     setCompletedAttempt(attempt);
   }
 
+  function handleChooseCase() {
+    if (!completedAttempt) {
+      const ok = window.confirm('Leave this practice session? The current incomplete attempt will not appear as completed progress.');
+      if (!ok) return;
+    }
+    onChooseCase();
+  }
+
   const jumpToBookmark = useCallback((bookmark: CaseBookmark) => {
     setActiveBookmark(bookmark);
     setJumpBookmark({ ...bookmark });
@@ -214,7 +222,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
                 </button>
               </div>
             ) : null}
-            <button className="secondary-button" onClick={onChooseCase}>Change case</button>
+            <button className="secondary-button" onClick={handleChooseCase}>Change case</button>
           </div>
         </div>
         {workspaceView === 'imaging' && isMeasurementQuestion && requiredPlane ? (

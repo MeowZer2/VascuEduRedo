@@ -1283,6 +1283,14 @@ export function VesselComposerPage({
     devicePlacements.length +
     treatmentMarkers.length +
     proceduralObjects.length;
+  const deviceToolTitle =
+    segments.length === 0
+      ? 'Add or select a vessel segment before placing a device'
+      : devices.length === 0
+        ? 'Device catalog is unavailable'
+        : 'Place a catalog device on a segment';
+  const markerToolTitle =
+    segments.length === 0 ? 'Add or select a vessel segment before placing a marker' : 'Place a treatment marker';
 
   return (
     <div className="page-stack composer-page">
@@ -1341,7 +1349,7 @@ export function VesselComposerPage({
               value="device"
               label="Device"
               onSelect={setTool}
-              title="Place a catalog device on a segment"
+              title={deviceToolTitle}
               disabled={devices.length === 0 || segments.length === 0}
             />
             <ToolButton
@@ -1349,7 +1357,7 @@ export function VesselComposerPage({
               value="marker"
               label="Marker"
               onSelect={setTool}
-              title="Place a treatment marker"
+              title={markerToolTitle}
               disabled={segments.length === 0}
             />
           </div>

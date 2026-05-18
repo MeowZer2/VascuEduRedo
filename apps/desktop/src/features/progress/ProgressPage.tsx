@@ -113,6 +113,7 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
         />
       </section>
 
+      {tab !== 'cases' && (
       <section className="grid grid-12">
         <article className="card col-7">
           <div className="section-head">
@@ -167,7 +168,9 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
           </div>
         </article>
       </section>
+      )}
 
+      {tab !== 'topics' && (
       <section className="card">
         <div className="section-head">
           <div>
@@ -212,13 +215,15 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
           </div>
         )}
       </section>
+      )}
 
+      {tab !== 'cases' && (
       <section className="grid grid-12">
         <article className="card col-7">
           <div className="section-head">
             <div>
               <h3>Recent attempts</h3>
-              <p>Open any row to review attempt details.</p>
+              <p>Use Review to open attempt details.</p>
             </div>
           </div>
           {recent.length === 0 ? (
@@ -298,6 +303,7 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
           </div>
         </article>
       </section>
+      )}
 
       {reviewingAttemptId && (
         <AttemptReview

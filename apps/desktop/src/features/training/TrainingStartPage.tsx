@@ -18,21 +18,24 @@ interface TrainingStartPageProps {
   onBrowseCases: () => void;
 }
 
-const modes: Array<{ id: PracticeMode; title: string; description: string }> = [
+const modes: Array<{ id: PracticeMode; title: string; description: string; enabled: boolean }> = [
   {
     id: 'guided',
     title: 'Guided case',
     description: 'Work through imaging, decisions, feedback, and teaching points.',
+    enabled: true,
   },
   {
     id: 'measurement',
     title: 'Measurement focus',
     description: 'Prioritize caliper practice and anatomy recognition.',
+    enabled: false,
   },
   {
     id: 'review',
     title: 'Rapid review',
     description: 'Short, focused pass for reinforcing a familiar topic.',
+    enabled: false,
   },
 ];
 
@@ -58,7 +61,7 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
     [cases, difficulty, topic],
   );
   const matchingCount = matchingCases.length;
-  const nextCase = matchingCases[0] ?? cases[0];
+  const nextCase = matchingCases[0] ?? null;
 
   const difficulties = useMemo(
     () => Array.from(new Set(cases.map((item) => item.difficulty))).filter(Boolean),
@@ -71,6 +74,7 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
   }, [cases]);
 
   function startSession() {
+    if (matchingCount === 0) return;
     onStart({ difficulty, topic, mode });
   }
 
@@ -108,14 +112,20 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
                   key={item.id}
                   type="button"
                   className={active ? 'practice-mode-option active' : 'practice-mode-option'}
-                  onClick={() => setMode(item.id)}
+                  onClick={() => {
+                    if (item.enabled) setMode(item.id);
+                  }}
+                  disabled={!item.enabled}
+                  title={!item.enabled ? 'Coming later - guided case mode is available now' : undefined}
                 >
                   <span className="practice-mode-token">{String(index + 1).padStart(2, '0')}</span>
                   <span>
                     <strong>{item.title}</strong>
                     <small>{item.description}</small>
                   </span>
-                  <span className="practice-mode-status">{active ? 'Selected' : 'Choose'}</span>
+                  <span className="practice-mode-status">
+                    {active ? 'Selected' : item.enabled ? 'Choose' : 'Coming later'}
+                  </span>
                 </button>
               );
             })}
@@ -158,7 +168,13 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
             </label>
             <label className="field">
               <span>Session length</span>
-              <select className="input" defaultValue="10">
+              <select
+                className="input"
+                defaultValue="case"
+                disabled
+                title="Session length follows the selected case in this build"
+              >
+                <option value="case">Case default</option>
                 <option value="5">~5 min</option>
                 <option value="10">~10 min</option>
                 <option value="20">~20 min</option>
@@ -177,14 +193,15 @@ export function TrainingStartPage({ cases, onStart, onBrowseCases }: TrainingSta
               <span className="muted">
                 {matchingCount > 0
                   ? 'Start launches the first matching case in your queue.'
-                  : 'VascEdu will fall back to the closest available case.'}
+                  : 'Adjust filters to choose an available case.'}
               </span>
             </div>
             <button
               type="button"
               className="btn primary large"
               onClick={startSession}
-              disabled={cases.length === 0}
+              disabled={matchingCount === 0}
+              title={matchingCount === 0 ? 'No cases match the current filters' : undefined}
             >
               Start session
             </button>

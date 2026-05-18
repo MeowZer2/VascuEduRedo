@@ -93,12 +93,11 @@ function AppInner() {
   }
 
   function startGuidedTraining(filters: TrainingFilters) {
-    const matching =
-      cases.find((item) => {
-        const difficultyOk = filters.difficulty === 'any' || item.difficulty === filters.difficulty;
-        const topicOk = filters.topic === 'any' || item.categoryId === filters.topic;
-        return difficultyOk && topicOk;
-      }) ?? cases[0];
+    const matching = cases.find((item) => {
+      const difficultyOk = filters.difficulty === 'any' || item.difficulty === filters.difficulty;
+      const topicOk = filters.topic === 'any' || item.categoryId === filters.topic;
+      return difficultyOk && topicOk;
+    });
     if (!matching) return;
     setSelectedCaseId(matching.id);
     setScreen('training-session');
@@ -155,9 +154,6 @@ function AppInner() {
             cases={cases}
             onOpenCase={openCase}
             onStartCase={startCase}
-            onQuickPractice={({ difficulty, topic }) =>
-              startGuidedTraining({ difficulty, topic, mode: 'guided' })
-            }
           />
         )}
         {screen === 'case-detail' && selectedCase && (

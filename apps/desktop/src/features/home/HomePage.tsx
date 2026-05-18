@@ -373,8 +373,10 @@ export function HomePage({
                       </span>
                     ) : null}
                   </td>
-                  <td style={{ textAlign: 'right', width: 24 }}>
-                    <IcArrowRight size={14} className="muted" />
+                  <td style={{ textAlign: 'right', width: 92 }}>
+                    <button type="button" className="btn ghost small" onClick={onOpenProgress}>
+                      Progress
+                    </button>
                   </td>
                 </tr>
               ))}

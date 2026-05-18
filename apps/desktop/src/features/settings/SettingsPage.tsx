@@ -27,7 +27,7 @@ const RELEASE_CHECKS: Array<{ ok: boolean; title: string; detail: string }> = [
   { ok: true, title: 'Desktop packaging', detail: 'Windows/macOS bundle metadata configured' },
   { ok: true, title: 'Privacy', detail: 'All learner data stored locally' },
   { ok: true, title: 'Content schema', detail: 'Zod-validated case packs' },
-  { ok: false, title: 'DICOM ingest', detail: 'Pending — sample NRRD only' },
+  { ok: true, title: 'DICOM ingest', detail: 'Desktop folder import available in the CT viewer' },
 ];
 
 export function SettingsPage() {
@@ -122,7 +122,7 @@ export function SettingsPage() {
                 <strong>Density</strong>
                 <p>Adjust spacing and card sizes across the workspace.</p>
                 <p className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
-                  Not yet wired — coming in a later build.
+                  Coming later - comfortable density is the active default for this build.
                 </p>
               </div>
               <div className="segmented" role="group" aria-label="Workspace density" aria-disabled>
@@ -132,7 +132,7 @@ export function SettingsPage() {
                     type="button"
                     className={item === 'Comfortable' ? 'active' : ''}
                     disabled
-                    title="Not yet wired — coming in a later build"
+                    title="Coming later - density presets are intentionally read-only in this build"
                   >
                     {item}
                   </button>
@@ -169,8 +169,7 @@ export function SettingsPage() {
               subtitle="How sessions and feedback are presented"
             />
             <p className="muted" style={{ fontSize: 11.5, margin: '0 0 6px' }}>
-              These preferences are not yet wired into the training flow — shown disabled so
-              they don&apos;t imply behavior that isn&apos;t implemented.
+              These preferences are coming later and are disabled so the current training behavior stays clear.
             </p>
             <ToggleRow
               title="Auto-advance after correct answer"
@@ -222,7 +221,7 @@ export function SettingsPage() {
                 <strong>Import content pack</strong>
                 <p>Add or update cases from a signed VascEdu content pack folder.</p>
               </div>
-              <button type="button" className="btn secondary" disabled title="Available in the desktop app">
+              <button type="button" className="btn secondary" disabled title="Coming later - use Admin import for case JSON today">
                 <IcUpload size={14} /> Import
               </button>
             </div>
@@ -239,7 +238,7 @@ export function SettingsPage() {
                 className="btn secondary"
                 style={{ color: 'var(--danger)', borderColor: 'rgba(236,107,120,0.3)' }}
                 disabled
-                title="Available in the desktop app"
+                title="Coming later - profile-scoped reset needs a dedicated confirmation flow"
               >
                 Reset
               </button>
@@ -367,7 +366,7 @@ function ToggleRow({
         aria-label={title}
         aria-pressed={enabled}
         disabled={disabled}
-        title={disabled ? 'Not yet wired — coming in a later build' : undefined}
+        title={disabled ? 'Coming later - this setting is intentionally read-only in this build' : undefined}
         onClick={disabled ? undefined : onToggle}
       />
     </div>
