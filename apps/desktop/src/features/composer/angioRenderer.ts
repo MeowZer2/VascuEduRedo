@@ -44,17 +44,23 @@ interface Pt {
 // --- internal quality / tuning knobs (no UI yet, kept easy to adjust) ------
 
 const TUNING = {
-  vesselDensity: 0.9,
-  edgeSoftness: 2.6,
-  internalNoise: 0.26,
-  contrastFalloff: 0.72,
+  vesselDensity: 0.94,
+  edgeSoftness: 2.05,
+  internalNoise: 0.2,
+  contrastFalloff: 0.62,
   backgroundNoise: 1,
   roadmapTintStrength: 0.55,
-  fluoroSoftTissueStrength: 0.06,
   deviceOpacity: 0.95,
-  motionSoftness: 0.9,
-  centralColumn: 0.3,
-  streakStrength: 0.12,
+  centralColumn: 0.42,
+  streakStrength: 0.16,
+  branchDensity: 0.72,
+  branchOpacity: 0.36,
+  branchMaxLength: 98,
+  dsaSharpness: 0.42,
+  fluoroSoftness: 0.95,
+  roadmapAlpha: 0.48,
+  sideBranchFade: 0.78,
+  backgroundContextStrength: 0.078,
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -167,13 +173,108 @@ function splineNormal(sp: Spline, t: number): Pt {
   return { x: -ty, y: tx };
 }
 
+function splineTangent(sp: Spline, t: number): Pt {
+  const u = 1 - t;
+  let tx = 2 * u * (sp.c.x - sp.a.x) + 2 * t * (sp.b.x - sp.c.x);
+  let ty = 2 * u * (sp.c.y - sp.a.y) + 2 * t * (sp.b.y - sp.c.y);
+  const m = Math.hypot(tx, ty) || 1;
+  tx /= m;
+  ty /= m;
+  return { x: tx, y: ty };
+}
+
+function normalizePoint(p: Pt): Pt {
+  const m = Math.hypot(p.x, p.y) || 1;
+  return { x: p.x / m, y: p.y / m };
+}
+
+// --- shared adaptive framing ----------------------------------------------
+
+export interface AngioViewTransform {
+  scale: number;
+  tx: number;
+  ty: number;
+}
+
+const IDENTITY_VIEW_TRANSFORM: AngioViewTransform = { scale: 1, tx: 0, ty: 0 };
+
+function applyViewPoint(p: Pt, view: AngioViewTransform): Pt {
+  return { x: p.x * view.scale + view.tx, y: p.y * view.scale + view.ty };
+}
+
+function applyViewContext(ctx: CanvasRenderingContext2D, view: AngioViewTransform): void {
+  ctx.translate(view.tx, view.ty);
+  ctx.scale(view.scale, view.scale);
+}
+
+export function projectAngioPoint(
+  p: Pt,
+  projection: AngioProjection,
+  view: AngioViewTransform = IDENTITY_VIEW_TRANSFORM,
+): Pt {
+  return applyViewPoint(projectPoint(p, projection), view);
+}
+
+export function computeAngioViewTransform(input: Pick<AngioRenderInput, 'segments' | 'projection'>): AngioViewTransform {
+  if (input.segments.length === 0) return IDENTITY_VIEW_TRANSFORM;
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  input.segments.forEach((segment) => {
+    const sp = makeSpline(segment, input.projection);
+    for (let i = 0; i <= 12; i += 1) {
+      const p = splineAt(sp, i / 12);
+      const pad = Math.max(baseDiameterPixels(segment, i / 12) * 0.75, 12);
+      minX = Math.min(minX, p.x - pad);
+      minY = Math.min(minY, p.y - pad);
+      maxX = Math.max(maxX, p.x + pad);
+      maxY = Math.max(maxY, p.y + pad);
+    }
+  });
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return IDENTITY_VIEW_TRANSFORM;
+  }
+
+  const width = Math.max(maxX - minX, 1);
+  const height = Math.max(maxY - minY, 1);
+  const margin = { left: 82, right: 126, top: 96, bottom: 62 };
+  const availW = ANGIO_WORKSPACE_WIDTH - margin.left - margin.right;
+  const availH = ANGIO_WORKSPACE_HEIGHT - margin.top - margin.bottom;
+  const fit = Math.min(availW / width, availH / height);
+  const scale = clamp(fit, 0.86, 1.34);
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const targetX = ANGIO_WORKSPACE_WIDTH * 0.5;
+  const targetY = ANGIO_WORKSPACE_HEIGHT * 0.53;
+  const minTx = ANGIO_WORKSPACE_WIDTH - margin.right - maxX * scale;
+  const maxTx = margin.left - minX * scale;
+  const minTy = ANGIO_WORKSPACE_HEIGHT - margin.bottom - maxY * scale;
+  const maxTy = margin.top - minY * scale;
+  const tx = clamp(targetX - centerX * scale, Math.min(minTx, maxTx), Math.max(minTx, maxTx));
+  const ty = clamp(targetY - centerY * scale, Math.min(minTy, maxTy), Math.max(minTy, maxTy));
+
+  return {
+    scale: Math.abs(scale - 1) < 0.015 ? 1 : scale,
+    tx: Math.abs(tx) < 0.5 ? 0 : tx,
+    ty: Math.abs(ty) < 0.5 ? 0 : ty,
+  };
+}
+
 // --- lumen profile ---------------------------------------------------------
+
+function baseDiameterPixels(segment: VesselSegment, t: number): number {
+  const prox = clamp(segment.proximalDiameterMm, 1.5, 30);
+  const dist = clamp(segment.distalDiameterMm, 1.2, 30);
+  return (prox + (dist - prox) * t) * 1.55 + 3;
+}
 
 function aneurysmExtra(segment: VesselSegment, t: number): number {
   if (segment.pathologyType !== 'aneurysm') return 0;
-  const prox = clamp(segment.proximalDiameterMm, 1.5, 30);
-  const dist = clamp(segment.distalDiameterMm, 1.2, 30);
-  const base = (prox + (dist - prox) * t) * 1.55 + 3;
+  const base = baseDiameterPixels(segment, t);
   return base * 1.05 * gaussian(t, 0.5, 0.2);
 }
 
@@ -185,9 +286,7 @@ function isSaccular(segment: VesselSegment): boolean {
 }
 
 function baseHalf(segment: VesselSegment, t: number): number {
-  const prox = clamp(segment.proximalDiameterMm, 1.5, 30);
-  const dist = clamp(segment.distalDiameterMm, 1.2, 30);
-  const base = (prox + (dist - prox) * t) * 1.55 + 3;
+  const base = baseDiameterPixels(segment, t);
   const lesion = gaussian(t, 0.5, 0.13);
   switch (segment.pathologyType) {
     case 'stenosis': {
@@ -247,10 +346,10 @@ function presetConfig(preset: AngioPreset): PresetConfig {
       return {
         bg: ['#edeff0', '#dde0e1', '#c8ccce'],
         ink: '20,22,26',
-        density: 0.92,
-        haze: 0.04,
-        noise: 0.03,
-        banding: 0.015,
+        density: 0.98,
+        haze: 0.018,
+        noise: 0.022,
+        banding: 0.01,
         silhouettes: false,
         roadmapGhost: false,
         tint: null,
@@ -260,9 +359,9 @@ function presetConfig(preset: AngioPreset): PresetConfig {
       return {
         bg: ['#0e1620', '#091018', '#04080d'],
         ink: '150,170,178',
-        density: 0.58,
+        density: 0.52,
         haze: 0.05,
-        noise: 0.09,
+        noise: 0.08,
         banding: 0.03,
         silhouettes: true,
         roadmapGhost: true,
@@ -313,8 +412,17 @@ interface Cached {
   grain: { c: HTMLCanvasElement; key: string } | null;
   internal: HTMLCanvasElement | null;
   banding: HTMLCanvasElement | null;
+  branches: Map<string, SyntheticBranch[]>;
+  branchOrder: string[];
 }
-const cache: Cached = { scene: null, grain: null, internal: null, banding: null };
+const cache: Cached = {
+  scene: null,
+  grain: null,
+  internal: null,
+  banding: null,
+  branches: new Map(),
+  branchOrder: [],
+};
 
 function sceneCanvas(): HTMLCanvasElement | null {
   if (cache.scene) return cache.scene;
@@ -393,6 +501,407 @@ function bandingCanvas(): HTMLCanvasElement | null {
   return c;
 }
 
+// --- procedural visual-only runoff branches -------------------------------
+
+type BranchKind = 'aorta' | 'iliac' | 'lower' | 'visceral' | 'carotid' | 'dialysis' | 'generic';
+
+interface BranchProfile {
+  kind: BranchKind;
+  baseCount: number;
+  maxCount: number;
+  minT: number;
+  maxT: number;
+  lengthMin: number;
+  lengthMax: number;
+  widthFactor: number;
+  opacity: number;
+  forwardBias: number;
+  sideBias: number;
+  arborize: number;
+  terminalRunoff: boolean;
+}
+
+interface SyntheticBranch {
+  id: string;
+  segmentId: string;
+  parentT: number;
+  points: Pt[];
+  width0: number;
+  width1: number;
+  opacity: number;
+  generation: number;
+}
+
+const BRANCH_CACHE_LIMIT = 18;
+
+function branchProfile(segment: VesselSegment): BranchProfile {
+  const text = `${segment.vesselType} ${segment.label} ${segment.notes ?? ''}`.toLowerCase();
+  if (text.includes('carotid') || text.includes('vertebral') || text.includes('cerebral')) {
+    return {
+      kind: 'carotid',
+      baseCount: 3,
+      maxCount: 5,
+      minT: 0.2,
+      maxT: 0.9,
+      lengthMin: 32,
+      lengthMax: 68,
+      widthFactor: 0.15,
+      opacity: 0.44,
+      forwardBias: 0.45,
+      sideBias: 0.9,
+      arborize: 1,
+      terminalRunoff: false,
+    };
+  }
+  if (
+    text.includes('dialysis') ||
+    text.includes('access') ||
+    text.includes('fistula') ||
+    text.includes('graft') ||
+    text.includes('brachial') ||
+    text.includes('radial') ||
+    text.includes('ulnar') ||
+    text.includes('cephalic') ||
+    text.includes('basilic')
+  ) {
+    return {
+      kind: 'dialysis',
+      baseCount: 2,
+      maxCount: 3,
+      minT: 0.18,
+      maxT: 0.9,
+      lengthMin: 28,
+      lengthMax: 58,
+      widthFactor: 0.13,
+      opacity: 0.34,
+      forwardBias: 0.35,
+      sideBias: 0.8,
+      arborize: 0,
+      terminalRunoff: false,
+    };
+  }
+  if (
+    text.includes('renal') ||
+    text.includes('sma') ||
+    text.includes('celiac') ||
+    text.includes('mesenteric') ||
+    text.includes('visceral')
+  ) {
+    return {
+      kind: 'visceral',
+      baseCount: 5,
+      maxCount: 8,
+      minT: 0.32,
+      maxT: 0.96,
+      lengthMin: 36,
+      lengthMax: 78,
+      widthFactor: 0.17,
+      opacity: 0.5,
+      forwardBias: 0.54,
+      sideBias: 0.78,
+      arborize: 2,
+      terminalRunoff: false,
+    };
+  }
+  if (
+    text.includes('femoral') ||
+    text.includes('profunda') ||
+    text.includes('popliteal') ||
+    text.includes('tibial') ||
+    text.includes('peroneal')
+  ) {
+    return {
+      kind: 'lower',
+      baseCount: 4,
+      maxCount: 7,
+      minT: 0.14,
+      maxT: 0.96,
+      lengthMin: 48,
+      lengthMax: 105,
+      widthFactor: 0.18,
+      opacity: 0.46,
+      forwardBias: 0.5,
+      sideBias: 0.7,
+      arborize: 1,
+      terminalRunoff: true,
+    };
+  }
+  if (text.includes('iliac')) {
+    return {
+      kind: 'iliac',
+      baseCount: 3,
+      maxCount: 5,
+      minT: 0.18,
+      maxT: 0.9,
+      lengthMin: 42,
+      lengthMax: 86,
+      widthFactor: 0.16,
+      opacity: 0.42,
+      forwardBias: 0.34,
+      sideBias: 0.86,
+      arborize: 1,
+      terminalRunoff: false,
+    };
+  }
+  if (text.includes('aorta')) {
+    const visceral = text.includes('visceral') || text.includes('abdominal');
+    return {
+      kind: 'aorta',
+      baseCount: visceral ? 3 : 2,
+      maxCount: visceral ? 5 : 4,
+      minT: 0.16,
+      maxT: 0.88,
+      lengthMin: 40,
+      lengthMax: 84,
+      widthFactor: 0.12,
+      opacity: 0.38,
+      forwardBias: 0.06,
+      sideBias: 1,
+      arborize: 0,
+      terminalRunoff: false,
+    };
+  }
+  return {
+    kind: 'generic',
+    baseCount: 1,
+    maxCount: 2,
+    minT: 0.25,
+    maxT: 0.82,
+    lengthMin: 30,
+    lengthMax: 58,
+    widthFactor: 0.13,
+    opacity: 0.32,
+    forwardBias: 0.42,
+    sideBias: 0.78,
+    arborize: 0,
+    terminalRunoff: false,
+  };
+}
+
+function branchCacheKey(input: AngioRenderInput): string {
+  return JSON.stringify({
+    projection: input.projection,
+    segments: input.segments.map((s) => [
+      s.id,
+      s.label,
+      s.vesselType,
+      s.start.x,
+      s.start.y,
+      s.end.x,
+      s.end.y,
+      s.proximalDiameterMm,
+      s.distalDiameterMm,
+      s.lengthMm,
+    ]),
+  });
+}
+
+function getSyntheticBranches(input: AngioRenderInput, splines: Map<string, Spline>): SyntheticBranch[] {
+  const key = branchCacheKey(input);
+  const cached = cache.branches.get(key);
+  if (cached) return cached;
+
+  const branches: SyntheticBranch[] = [];
+  input.segments.forEach((segment) => {
+    const sp = splines.get(segment.id);
+    if (!sp) return;
+    branches.push(...generateBranchesForSegment(segment, sp));
+  });
+
+  cache.branches.set(key, branches);
+  cache.branchOrder.push(key);
+  while (cache.branchOrder.length > BRANCH_CACHE_LIMIT) {
+    const stale = cache.branchOrder.shift();
+    if (stale) cache.branches.delete(stale);
+  }
+  return branches;
+}
+
+function generateBranchesForSegment(segment: VesselSegment, sp: Spline): SyntheticBranch[] {
+  const profile = branchProfile(segment);
+  const seed = sp.seed ^ seedFromId(`${segment.vesselType}:${segment.label}`);
+  const lengthFactor = clamp(Math.sqrt(Math.max(segment.lengthMm, sp.len) / 110), 0.75, 1.55);
+  const jitter = 0.82 + hash01(seed + 17) * 0.42;
+  const count = clamp(
+    Math.round(profile.baseCount * lengthFactor * jitter * TUNING.branchDensity),
+    profile.baseCount > 1 ? 1 : 0,
+    profile.maxCount,
+  );
+  const out: SyntheticBranch[] = [];
+
+  for (let i = 0; i < count; i += 1) {
+    const branchSeed = seed + i * 9973;
+    const slot = (i + 0.24 + hash01(branchSeed + 3) * 0.52) / Math.max(count, 1);
+    const t = clamp(profile.minT + (profile.maxT - profile.minT) * slot, 0.06, 0.98);
+    const side = (i % 2 === 0 ? 1 : -1) * (hash01(branchSeed + 11) < 0.18 ? -1 : 1) as 1 | -1;
+    out.push(makeBranch(segment, sp, profile, branchSeed, t, side, 1));
+  }
+
+  if (profile.terminalRunoff && count > 0) {
+    for (let i = 0; i < 2; i += 1) {
+      const branchSeed = seed + 40111 + i * 1877;
+      const t = clamp(0.78 + i * 0.12 + hash01(branchSeed) * 0.04, 0.74, 0.98);
+      const side = (i === 0 ? 1 : -1) as 1 | -1;
+      out.push(makeBranch(segment, sp, profile, branchSeed, t, side, 1, 1.12));
+    }
+  }
+
+  const children: SyntheticBranch[] = [];
+  out.forEach((branch, index) => {
+    if (profile.arborize <= 0 || branch.generation !== 1) return;
+    const childCount = profile.arborize === 2 && hash01(seed + index * 43) > 0.35 ? 2 : 1;
+    for (let i = 0; i < childCount; i += 1) {
+      const childSeed = seed + index * 593 + i * 1777;
+      const base = branch.points[Math.min(branch.points.length - 2, 2 + i)] ?? branch.points[branch.points.length - 1];
+      const tip = branch.points[Math.min(branch.points.length - 1, 3 + i)] ?? branch.points[branch.points.length - 1];
+      const dir = normalizePoint({ x: tip.x - base.x, y: tip.y - base.y });
+      const side = (hash01(childSeed) < 0.5 ? 1 : -1) as 1 | -1;
+      const nrm = { x: -dir.y * side, y: dir.x * side };
+      const len = Math.min(TUNING.branchMaxLength * 0.55, branchLength(profile, childSeed) * 0.46);
+      const points = [base];
+      const bend = (hash01(childSeed + 5) - 0.5) * len * 0.22;
+      for (let j = 1; j <= 3; j += 1) {
+        const u = j / 3;
+        points.push({
+          x: base.x + (dir.x * 0.75 + nrm.x * 0.7) * len * u + nrm.y * bend * Math.sin(u * Math.PI),
+          y: base.y + (dir.y * 0.75 + nrm.y * 0.7) * len * u - nrm.x * bend * Math.sin(u * Math.PI),
+        });
+      }
+      children.push({
+        id: `${branch.id}-a${i}`,
+        segmentId: branch.segmentId,
+        parentT: branch.parentT,
+        points,
+        width0: Math.max(0.45, branch.width0 * 0.58),
+        width1: Math.max(0.25, branch.width1 * 0.55),
+        opacity: branch.opacity * 0.62,
+        generation: 2,
+      });
+    }
+  });
+
+  return [...out, ...children].slice(0, 12);
+}
+
+function branchLength(profile: BranchProfile, seed: number): number {
+  const base = profile.lengthMin + (profile.lengthMax - profile.lengthMin) * hash01(seed + 29);
+  return Math.min(TUNING.branchMaxLength, base);
+}
+
+function makeBranch(
+  segment: VesselSegment,
+  sp: Spline,
+  profile: BranchProfile,
+  seed: number,
+  t: number,
+  side: 1 | -1,
+  generation: number,
+  lengthBoost = 1,
+): SyntheticBranch {
+  const anchor = splineAt(sp, t);
+  const tan = splineTangent(sp, t);
+  const nrm = splineNormal(sp, t);
+  const sideBias = profile.sideBias * side * (0.74 + hash01(seed + 7) * 0.46);
+  const forwardBias = profile.forwardBias + (hash01(seed + 13) - 0.5) * 0.34;
+  const dir = normalizePoint({
+    x: tan.x * forwardBias + nrm.x * sideBias,
+    y: tan.y * forwardBias + nrm.y * sideBias,
+  });
+  const perp = { x: -dir.y, y: dir.x };
+  const len = branchLength(profile, seed) * lengthBoost;
+  const bend = (hash01(seed + 23) - 0.5) * len * 0.34 + side * len * 0.08;
+  const points = [anchor];
+  const samples = profile.kind === 'visceral' || profile.kind === 'lower' ? 5 : 4;
+
+  for (let i = 1; i <= samples; i += 1) {
+    const u = i / samples;
+    const fine = valueNoise(seed + 301, u * 3.5) * len * 0.05;
+    points.push({
+      x: anchor.x + dir.x * len * Math.pow(u, 0.95) + perp.x * (bend * Math.sin(u * Math.PI) + fine),
+      y: anchor.y + dir.y * len * Math.pow(u, 0.95) + perp.y * (bend * Math.sin(u * Math.PI) + fine),
+    });
+  }
+
+  const width0 = clamp(baseHalf(segment, t) * profile.widthFactor * (0.78 + hash01(seed + 41) * 0.5), 0.65, 3.2);
+  return {
+    id: `${segment.id}-runoff-${seed >>> 0}-${generation}`,
+    segmentId: segment.id,
+    parentT: t,
+    points,
+    width0,
+    width1: Math.max(0.28, width0 * (0.22 + hash01(seed + 47) * 0.12)),
+    opacity: profile.opacity * (generation === 1 ? 1 : 0.64),
+    generation,
+  };
+}
+
+function flowDensity(segment: VesselSegment, t: number, preset: AngioPreset): number {
+  if (segment.pathologyType === 'occlusion') {
+    if (t <= 0.6) return 1;
+    if (preset === 'roadmap') return clamp((1 - (t - 0.6) / 0.4) * 0.16, 0, 0.16);
+    return 0;
+  }
+  if (segment.pathologyType === 'stenosis') {
+    const sev = clamp(segment.severityPercent ?? 65, 10, 95) / 100;
+    if (sev <= 0.68 || t < 0.5) return 1;
+    const distal = smoothstep(clamp((t - 0.5) / 0.42, 0, 1));
+    return 1 - clamp((sev - 0.68) * 0.55, 0, 0.16) * distal;
+  }
+  return 1;
+}
+
+function paintSyntheticBranches(
+  octx: CanvasRenderingContext2D,
+  branches: SyntheticBranch[],
+  segments: VesselSegment[],
+  cfg: PresetConfig,
+  preset: AngioPreset,
+): void {
+  if (branches.length === 0) return;
+  const segmentMap = new Map(segments.map((s) => [s.id, s]));
+  const presetFactor = preset === 'dsa' ? 1.05 : preset === 'roadmap' ? TUNING.roadmapAlpha : 0.72;
+  const blur = preset === 'dsa' ? 0.55 : preset === 'roadmap' ? 1.35 : TUNING.fluoroSoftness;
+
+  octx.save();
+  octx.lineCap = 'round';
+  octx.lineJoin = 'round';
+  branches.forEach((branch) => {
+    const segment = segmentMap.get(branch.segmentId);
+    if (!segment) return;
+    const flow = flowDensity(segment, branch.parentT, preset);
+    if (flow <= 0.01) return;
+    drawBranchStroke(octx, branch, cfg.ink, branch.opacity * TUNING.branchOpacity * presetFactor * flow, blur, true);
+    drawBranchStroke(octx, branch, cfg.ink, branch.opacity * TUNING.branchOpacity * presetFactor * flow * 1.35, 0, false);
+  });
+  octx.restore();
+}
+
+function drawBranchStroke(
+  octx: CanvasRenderingContext2D,
+  branch: SyntheticBranch,
+  ink: string,
+  alpha: number,
+  blur: number,
+  soft: boolean,
+): void {
+  const paint = () => {
+    for (let i = 0; i < branch.points.length - 1; i += 1) {
+      const a = branch.points[i];
+      const b = branch.points[i + 1];
+      const u = (i + 1) / (branch.points.length - 1);
+      const fade = clamp(1 - TUNING.sideBranchFade * Math.pow(u, 1.05), 0.08, 1);
+      octx.strokeStyle = `rgba(${ink},${alpha * fade})`;
+      octx.lineWidth = (branch.width0 + (branch.width1 - branch.width0) * u) * (soft ? 2.2 : 1);
+      octx.beginPath();
+      octx.moveTo(a.x, a.y);
+      octx.lineTo(b.x, b.y);
+      octx.stroke();
+    }
+  };
+  if (blur > 0) withFilter(octx, `blur(${blur}px)`, paint);
+  else paint();
+}
+
 // --- scene painting (into the offscreen density buffer) --------------------
 
 function ribbonPath(
@@ -431,14 +940,20 @@ function paintSegment(
   segment: VesselSegment,
   sp: Spline,
   cfg: PresetConfig,
+  preset: AngioPreset,
 ): void {
   const occluded = segment.pathologyType === 'occlusion';
   const lumenEnd = occluded ? 0.6 : 1;
   const ink = cfg.ink;
   const baseA = cfg.density * TUNING.vesselDensity;
+  const edgeSoftness =
+    preset === 'dsa' ? Math.max(1.1, TUNING.edgeSoftness - 0.75) : preset === 'roadmap' ? 2.3 : TUNING.edgeSoftness;
+  const centralBlur = preset === 'dsa' ? TUNING.dsaSharpness : preset === 'roadmap' ? 1.15 : 0.85;
+  const centralScale = preset === 'dsa' ? 0.34 : 0.42;
+  const densityAt = (t: number) => lengthDensity(t) * flowDensity(segment, t, preset);
 
   // Soft outer margin (edge falloff — no hard vector edge).
-  withFilter(octx, `blur(${TUNING.edgeSoftness}px)`, () => {
+  withFilter(octx, `blur(${edgeSoftness}px)`, () => {
     ribbonPath(octx, segment, sp, 0, lumenEnd, 1.06);
     octx.fillStyle = `rgba(${ink},${baseA * 0.34})`;
     octx.fill();
@@ -447,8 +962,8 @@ function paintSegment(
   // Body density with proximal→distal falloff (gradient along the chord).
   const grad = octx.createLinearGradient(sp.a.x, sp.a.y, sp.b.x, sp.b.y);
   grad.addColorStop(0, `rgba(${ink},${baseA * 0.86})`);
-  grad.addColorStop(0.55, `rgba(${ink},${baseA * 0.7 * lengthDensity(0.55)})`);
-  grad.addColorStop(1, `rgba(${ink},${baseA * 0.6 * lengthDensity(1)})`);
+  grad.addColorStop(0.55, `rgba(${ink},${baseA * 0.74 * densityAt(0.55)})`);
+  grad.addColorStop(1, `rgba(${ink},${baseA * 0.64 * densityAt(lumenEnd)})`);
   ribbonPath(octx, segment, sp, 0, lumenEnd, 0.96);
   octx.fillStyle = grad;
   octx.fill();
@@ -472,9 +987,9 @@ function paintSegment(
   }
 
   // Brighter central contrast column down the lumen.
-  withFilter(octx, 'blur(1.4px)', () => {
-    ribbonPath(octx, segment, sp, 0, lumenEnd, 0.42);
-    octx.fillStyle = `rgba(${ink},${baseA * TUNING.centralColumn})`;
+  withFilter(octx, `blur(${centralBlur}px)`, () => {
+    ribbonPath(octx, segment, sp, 0, lumenEnd, centralScale);
+    octx.fillStyle = `rgba(${ink},${baseA * TUNING.centralColumn * (preset === 'dsa' ? 1.26 : 1)})`;
     octx.fill();
   });
 
@@ -553,11 +1068,13 @@ function paintSegment(
     octx.moveTo(cut.x + nrm.x * h, cut.y + nrm.y * h);
     octx.lineTo(cut.x - nrm.x * h, cut.y - nrm.y * h);
     octx.stroke();
-    withFilter(octx, 'blur(4px)', () => {
-      ribbonPath(octx, segment, sp, 0.78, 1, 0.42);
-      octx.fillStyle = `rgba(${ink},${baseA * 0.12})`;
-      octx.fill();
-    });
+    if (preset === 'roadmap') {
+      withFilter(octx, 'blur(4px)', () => {
+        ribbonPath(octx, segment, sp, 0.78, 1, 0.42);
+        octx.fillStyle = `rgba(${ink},${baseA * 0.1})`;
+        octx.fill();
+      });
+    }
   }
 
   if (segment.pathologyType === 'thrombus') {
@@ -638,13 +1155,76 @@ function paintJunctions(
   });
 }
 
+function objectPathIds(object: ProceduralObject, input: AngioRenderInput): string[] {
+  const raw = object.pathSegmentIds.length > 0 ? object.pathSegmentIds : [object.segmentId];
+  const ids = raw.filter((id) => input.segments.some((segment) => segment.id === id));
+  if (!ids.includes(object.segmentId) && input.segments.some((segment) => segment.id === object.segmentId)) {
+    ids.push(object.segmentId);
+  }
+  return Array.from(new Set(ids));
+}
+
+function pathLengthForSegment(segment: VesselSegment): number {
+  return Math.max(segment.lengthMm, 1);
+}
+
+function procedureProgressMm(object: ProceduralObject, input: AngioRenderInput): number {
+  const ids = objectPathIds(object, input);
+  let cursor = 0;
+  for (const id of ids) {
+    const segment = input.segments.find((item) => item.id === id);
+    if (!segment) continue;
+    const len = pathLengthForSegment(segment);
+    if (id === object.segmentId) return cursor + len * clamp(object.t, 0, 1);
+    cursor += len;
+  }
+  return cursor;
+}
+
+function sampleProcedurePath(
+  object: ProceduralObject,
+  input: AngioRenderInput,
+  splines: Map<string, Spline>,
+  startMm: number,
+  endMm: number,
+): Pt[] {
+  const ids = objectPathIds(object, input);
+  const pts: Pt[] = [];
+  let cursor = 0;
+  ids.forEach((id) => {
+    const segment = input.segments.find((item) => item.id === id);
+    const sp = splines.get(id);
+    if (!segment || !sp) return;
+    const len = pathLengthForSegment(segment);
+    const a = Math.max(startMm, cursor);
+    const b = Math.min(endMm, cursor + len);
+    if (b < a) {
+      cursor += len;
+      return;
+    }
+    const t1 = clamp((a - cursor) / len, 0, 1);
+    const t2 = clamp((b - cursor) / len, 0, 1);
+    const steps = Math.max(3, Math.ceil(Math.abs(t2 - t1) * 18));
+    for (let i = 0; i <= steps; i += 1) {
+      if (pts.length > 0 && i === 0) continue;
+      pts.push(splineAt(sp, t1 + (t2 - t1) * (i / steps)));
+    }
+    cursor += len;
+  });
+  return pts;
+}
+
 function paintDevice(
   octx: CanvasRenderingContext2D,
   object: ProceduralObject,
-  segment: VesselSegment,
-  sp: Spline,
+  input: AngioRenderInput,
+  splines: Map<string, Spline>,
   cfg: PresetConfig,
 ): void {
+  const segment = input.segments.find((s) => s.id === object.segmentId);
+  const sp = segment && splines.get(segment.id);
+  if (!segment || !sp) return;
+
   const lenFrac = clamp(object.lengthMm / Math.max(segment.lengthMm, 1), 0.04, 0.95);
   const isWire = object.objectType === 'guidewire';
   const t1 = isWire ? 0 : clamp(object.t - lenFrac / 2, 0, 1);
@@ -652,12 +1232,13 @@ function paintDevice(
   const dev = cfg.ink;
   const dA = TUNING.deviceOpacity;
 
-  const path = (steps: number): Pt[] => {
+  const localPath = (steps: number): Pt[] => {
     const out: Pt[] = [];
     for (let i = 0; i <= steps; i += 1) out.push(splineAt(sp, t1 + (t2 - t1) * (i / steps)));
     return out;
   };
   const stroke = (pts: Pt[], width: number, alpha: number) => {
+    if (pts.length < 2) return;
     octx.strokeStyle = `rgba(${dev},${alpha})`;
     octx.lineWidth = width;
     octx.beginPath();
@@ -668,63 +1249,72 @@ function paintDevice(
     const c = splineAt(sp, clamp(t, 0, 1));
     const nrm = splineNormal(sp, clamp(t, 0, 1));
     octx.strokeStyle = `rgba(${dev},${Math.min(1, dA + 0.05)})`;
-    octx.lineWidth = 2.4;
+    octx.lineWidth = 1.9;
     octx.beginPath();
     octx.moveTo(c.x + nrm.x * size, c.y + nrm.y * size);
     octx.lineTo(c.x - nrm.x * size, c.y - nrm.y * size);
     octx.stroke();
   };
 
+  const tipProgress = procedureProgressMm(object, input);
+  const pathStart =
+    object.objectType === 'guidewire' ? 0 : Math.max(0, tipProgress - Math.max(object.lengthMm, segment.lengthMm * 0.15));
+  const devicePath = sampleProcedurePath(object, input, splines, pathStart, tipProgress);
+
   octx.save();
   octx.lineCap = 'round';
   octx.lineJoin = 'round';
 
   if (object.objectType === 'guidewire') {
-    stroke(path(28), 1.1, dA);
-    // slightly noisy / aliased look
-    octx.globalAlpha = 0.4;
-    stroke(path(28), 0.6, dA);
+    const pts = devicePath.length >= 2 ? devicePath : localPath(28);
+    stroke(pts, 1.05, dA);
+    octx.globalAlpha = 0.38;
+    stroke(pts, 0.55, dA);
     octx.globalAlpha = 1;
-    stroke([splineAt(sp, clamp(t2 - 0.05, 0, 1)), splineAt(sp, t2)], 1.7, dA);
+    stroke(pts.slice(-3), 1.65, dA);
   } else if (object.objectType === 'catheter') {
-    stroke(path(24), 3, dA * 0.78);
-    stroke(path(24), 1.4, dA * 0.5);
-    band(t2, 4);
+    const pts = devicePath.length >= 2 ? devicePath : localPath(24);
+    stroke(pts, 3, dA * 0.76);
+    stroke(pts, 1.25, dA * 0.48);
+    band(object.t, 3.8);
   } else if (object.objectType === 'sheath') {
-    stroke(path(20), 5, dA * 0.62);
-    stroke([splineAt(sp, (t1 + t2) / 2), splineAt(sp, t2)], 3, dA * 0.7);
-    band(t1, 5);
+    const pts = devicePath.length >= 2 ? devicePath : localPath(20);
+    stroke(pts, 4.8, dA * 0.6);
+    stroke(pts.slice(Math.max(0, pts.length - 5)), 2.7, dA * 0.68);
+    band(object.t, 4.8);
   } else if (object.objectType === 'balloon') {
     const inflated = object.state === 'deployed';
-    stroke(path(20), 1.2, dA * 0.7);
+    stroke(localPath(20), 1.15, dA * 0.68);
     if (inflated) {
       const m = splineAt(sp, object.t);
-      const nrm = splineNormal(sp, object.t);
+      const tan = splineTangent(sp, object.t);
       octx.save();
       octx.translate(m.x, m.y);
-      octx.rotate(Math.atan2(nrm.y, nrm.x) + Math.PI / 2);
-      octx.fillStyle = `rgba(${dev},0.18)`;
+      octx.rotate(Math.atan2(tan.y, tan.x));
+      octx.fillStyle = `rgba(${dev},0.16)`;
+      octx.strokeStyle = `rgba(${dev},0.54)`;
+      octx.lineWidth = 1.2;
       octx.beginPath();
-      octx.ellipse(0, 0, 22, 7, 0, 0, Math.PI * 2);
+      octx.ellipse(0, 0, 22, 6.6, 0, 0, Math.PI * 2);
       octx.fill();
+      octx.stroke();
       octx.restore();
     }
-    band(object.t - lenFrac * 0.4, 4.5);
-    band(object.t + lenFrac * 0.4, 4.5);
+    band(object.t - lenFrac * 0.4, 4.2);
+    band(object.t + lenFrac * 0.4, 4.2);
   } else if (object.objectType === 'stent' || object.objectType === 'stentGraft') {
     const isGraft = object.objectType === 'stentGraft';
     if (isGraft) {
       octx.save();
-      octx.globalAlpha = 0.22;
+      octx.globalAlpha = 0.18;
       ribbonPath(octx, segment, sp, t1, t2, 0.92);
       octx.fillStyle = `rgba(${dev},1)`;
       octx.fill();
       octx.restore();
     }
-    // fine diamond strut mesh (two phases), thin lines
     const cells = isGraft ? 16 : 20;
     octx.strokeStyle = `rgba(${dev},${dA * 0.7})`;
-    octx.lineWidth = isGraft ? 1 : 0.8;
+    octx.lineWidth = isGraft ? 0.9 : 0.72;
     for (const dir of [1, -1]) {
       octx.beginPath();
       for (let i = 0; i <= cells; i += 1) {
@@ -748,21 +1338,139 @@ function paintDevice(
 
 // --- acquisition + background ---------------------------------------------
 
-function drawSilhouettes(ctx: CanvasRenderingContext2D, strength: number): void {
+type AnatomyContext = 'aortoiliac' | 'thoracic' | 'carotid' | 'lower' | 'dialysis' | 'mesenteric' | 'generic';
+
+function inferAnatomyContext(input: AngioRenderInput): AnatomyContext {
+  const text = input.segments
+    .map((segment) => `${segment.vesselType} ${segment.label} ${segment.notes ?? ''}`)
+    .join(' ')
+    .toLowerCase();
+  if (text.includes('carotid') || text.includes('vertebral') || text.includes('cerebral')) return 'carotid';
+  if (
+    text.includes('dialysis') ||
+    text.includes('access') ||
+    text.includes('fistula') ||
+    text.includes('graft') ||
+    text.includes('brachial') ||
+    text.includes('radial') ||
+    text.includes('ulnar') ||
+    text.includes('cephalic') ||
+    text.includes('basilic')
+  ) return 'dialysis';
+  if (text.includes('thoracic') || text.includes('arch')) return 'thoracic';
+  if (text.includes('renal') || text.includes('sma') || text.includes('celiac') || text.includes('mesenteric')) return 'mesenteric';
+  if (text.includes('femoral') || text.includes('profunda') || text.includes('popliteal') || text.includes('tibial')) return 'lower';
+  if (text.includes('aorta') || text.includes('iliac')) return 'aortoiliac';
+  return 'generic';
+}
+
+function transformedVesselBounds(input: AngioRenderInput, view: AngioViewTransform): { cx: number; cy: number; minY: number; maxY: number } {
+  if (input.segments.length === 0) return { cx: CX, cy: CY, minY: 90, maxY: ANGIO_WORKSPACE_HEIGHT - 70 };
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  input.segments.forEach((segment) => {
+    for (const raw of [segment.start, segment.end]) {
+      const p = projectAngioPoint(raw, input.projection, view);
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+  });
+  return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, minY, maxY };
+}
+
+function drawBoneColumn(ctx: CanvasRenderingContext2D, x: number, y1: number, y2: number, strength: number): void {
+  const h = Math.max(60, y2 - y1);
+  ctx.fillStyle = `rgba(164,170,176,${strength})`;
+  ctx.fillRect(x - 16, y1, 32, h);
+  ctx.fillStyle = `rgba(210,215,218,${strength * 0.46})`;
+  for (let y = y1 + 14; y < y2 - 8; y += 32) ctx.fillRect(x - 28, y, 56, 4);
+}
+
+function drawAnatomicalContext(
+  ctx: CanvasRenderingContext2D,
+  input: AngioRenderInput,
+  view: AngioViewTransform,
+  preset: AngioPreset,
+  strength: number,
+): void {
+  if (strength <= 0.001) return;
+  const territory = inferAnatomyContext(input);
+  const bounds = transformedVesselBounds(input, view);
+  const cx = clamp(bounds.cx, 180, ANGIO_WORKSPACE_WIDTH - 180);
+  const cy = clamp(bounds.cy, 145, ANGIO_WORKSPACE_HEIGHT - 100);
+  const top = clamp(bounds.minY - 54, 28, ANGIO_WORKSPACE_HEIGHT - 160);
+  const bottom = clamp(bounds.maxY + 54, 160, ANGIO_WORKSPACE_HEIGHT - 36);
+  const s = preset === 'roadmap' ? strength * 0.46 : strength;
+
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   withFilter(ctx, 'blur(9px)', () => {
-    ctx.fillStyle = `rgba(150,156,166,${strength})`;
-    ctx.fillRect(CX - 30, 30, 60, ANGIO_WORKSPACE_HEIGHT - 60);
-    ctx.fillStyle = `rgba(150,156,166,${strength * 0.8})`;
-    ctx.beginPath();
-    ctx.ellipse(CX - 155, ANGIO_WORKSPACE_HEIGHT - 115, 135, 100, 0.3, 0, Math.PI * 2);
-    ctx.ellipse(CX + 155, ANGIO_WORKSPACE_HEIGHT - 115, 135, 100, -0.3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = `rgba(120,126,134,${strength * 0.5})`;
-    ctx.beginPath();
-    ctx.ellipse(CX, CY - 30, 330, 240, 0, 0, Math.PI * 2);
-    ctx.fill();
+    if (territory === 'carotid') {
+      drawBoneColumn(ctx, cx, top + 72, bottom, s * 0.7);
+      ctx.fillStyle = `rgba(160,166,176,${s * 0.8})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, top + 44, 138, 48, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(120,126,136,${s * 0.5})`;
+      ctx.fillRect(cx - 72, top + 78, 144, Math.max(90, bottom - top - 94));
+    } else if (territory === 'lower') {
+      const legX = cx + 42;
+      ctx.fillStyle = `rgba(172,176,178,${s})`;
+      ctx.beginPath();
+      ctx.ellipse(legX, cy - 70, 34, 180, 0.05, 0, Math.PI * 2);
+      ctx.ellipse(legX - 10, cy + 178, 24, 150, -0.05, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(106,112,120,${s * 0.42})`;
+      ctx.beginPath();
+      ctx.ellipse(legX + 58, cy + 178, 18, 132, 0.05, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (territory === 'dialysis') {
+      ctx.fillStyle = `rgba(164,170,174,${s * 0.9})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 260, 44, -0.12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(106,112,120,${s * 0.48})`;
+      ctx.beginPath();
+      ctx.ellipse(cx - 190, cy - 6, 74, 54, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (territory === 'thoracic') {
+      drawBoneColumn(ctx, cx, top, bottom, s * 0.68);
+      ctx.fillStyle = `rgba(132,138,146,${s * 0.62})`;
+      ctx.beginPath();
+      ctx.ellipse(cx - 145, cy, 150, 225, -0.12, 0, Math.PI * 2);
+      ctx.ellipse(cx + 145, cy, 150, 225, 0.12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(180,186,190,${s * 0.36})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy - 26, 86, 170, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (territory === 'mesenteric') {
+      drawBoneColumn(ctx, cx, top, bottom, s * 0.74);
+      ctx.fillStyle = `rgba(126,132,138,${s * 0.62})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 315, 235, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(184,176,170,${s * 0.44})`;
+      ctx.beginPath();
+      ctx.ellipse(cx - 128, cy + 20, 70, 110, -0.2, 0, Math.PI * 2);
+      ctx.ellipse(cx + 128, cy + 20, 70, 110, 0.2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      drawBoneColumn(ctx, cx, top, bottom, s * 0.78);
+      ctx.fillStyle = `rgba(150,156,166,${s * 0.78})`;
+      ctx.beginPath();
+      ctx.ellipse(cx - 155, bottom - 72, 135, 94, 0.3, 0, Math.PI * 2);
+      ctx.ellipse(cx + 155, bottom - 72, 135, 94, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(120,126,134,${s * 0.44})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy - 30, 318, 235, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
   });
   ctx.restore();
 }
@@ -787,8 +1495,10 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
     ctx.scale(pxW / ANGIO_WORKSPACE_WIDTH, pxH / ANGIO_WORKSPACE_HEIGHT);
 
     const cfg = presetConfig(input.preset);
+    const view = computeAngioViewTransform(input);
     const splines = new Map<string, Spline>();
     input.segments.forEach((s) => splines.set(s.id, makeSpline(s, input.projection)));
+    const branches = getSyntheticBranches(input, splines);
 
     // 1. Background field + exposure non-uniformity.
     const grad = ctx.createRadialGradient(CX, CY * 0.86, 60, CX, CY, ANGIO_WORKSPACE_WIDTH * 0.74);
@@ -805,7 +1515,9 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
     ctx.fillStyle = expo;
     ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
 
-    if (cfg.silhouettes) drawSilhouettes(ctx, TUNING.fluoroSoftTissueStrength);
+    if (cfg.silhouettes) {
+      drawAnatomicalContext(ctx, input, view, input.preset, TUNING.backgroundContextStrength);
+    }
 
     // 2. Paint the whole vascular + device scene into one density buffer.
     const scene = sceneCanvas();
@@ -813,15 +1525,16 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
     if (scene && octx) {
       octx.setTransform(1, 0, 0, 1, 0, 0);
       octx.clearRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+      octx.save();
+      applyViewContext(octx, view);
+      paintSyntheticBranches(octx, branches, input.segments, cfg, input.preset);
       paintJunctions(octx, input, splines, cfg);
       input.segments.forEach((s) => {
         const sp = splines.get(s.id);
-        if (sp) paintSegment(octx, s, sp, cfg);
+        if (sp) paintSegment(octx, s, sp, cfg, input.preset);
       });
       input.proceduralObjects.forEach((object) => {
-        const seg = input.segments.find((s) => s.id === object.segmentId);
-        const sp = seg && splines.get(seg.id);
-        if (seg && sp) paintDevice(octx, object, seg, sp, cfg);
+        paintDevice(octx, object, input, splines, cfg);
       });
       input.devicePlacements.forEach((placement) => {
         const seg = input.segments.find((s) => s.id === placement.segmentId);
@@ -833,6 +1546,7 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
         octx.arc(p.x, p.y, 3.6, 0, Math.PI * 2);
         octx.fill();
       });
+      octx.restore();
 
       // Roadmap "prior contrast" ghost: a faint, offset, tinted copy.
       if (cfg.roadmapGhost && cfg.tint) {
@@ -846,7 +1560,9 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
       //    captured image so devices/vessels are one exposure, not stacked.
       ctx.save();
       if (cfg.tint) ctx.globalAlpha = 0.9;
-      withFilter(ctx, `blur(${TUNING.motionSoftness}px)`, () => ctx.drawImage(scene, 0, 0));
+      const acquisitionBlur =
+        input.preset === 'dsa' ? TUNING.dsaSharpness : input.preset === 'roadmap' ? 1.15 : TUNING.fluoroSoftness;
+      withFilter(ctx, `blur(${acquisitionBlur}px)`, () => ctx.drawImage(scene, 0, 0));
       ctx.restore();
     }
 
@@ -855,8 +1571,9 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
       const seg = input.segments.find((s) => s.id === input.selectedId);
       const obj = input.proceduralObjects.find((o) => o.id === input.selectedId);
       ctx.save();
+      applyViewContext(ctx, view);
       ctx.strokeStyle = 'rgba(120,200,255,0.7)';
-      ctx.lineWidth = 1.8;
+      ctx.lineWidth = 1.8 / view.scale;
       ctx.setLineDash([5, 4]);
       const sseg = seg && splines.get(seg.id);
       if (seg && sseg) {
@@ -871,10 +1588,19 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
         const oseg = input.segments.find((s) => s.id === obj.segmentId);
         const osp = oseg && splines.get(oseg.id);
         if (osp) {
-          const p = splineAt(osp, clamp(obj.t, 0, 1));
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
-          ctx.stroke();
+          const progress = procedureProgressMm(obj, input);
+          const start = obj.objectType === 'guidewire' ? 0 : Math.max(0, progress - Math.max(obj.lengthMm, 1));
+          const pts = sampleProcedurePath(obj, input, splines, start, progress);
+          if (pts.length >= 2 && (obj.objectType === 'guidewire' || obj.objectType === 'catheter' || obj.objectType === 'sheath')) {
+            ctx.beginPath();
+            pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+            ctx.stroke();
+          } else {
+            const p = splineAt(osp, clamp(obj.t, 0, 1));
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 14 / view.scale, 0, Math.PI * 2);
+            ctx.stroke();
+          }
         }
       }
       ctx.restore();

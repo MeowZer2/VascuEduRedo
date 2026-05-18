@@ -1429,6 +1429,11 @@ select.text-input:disabled {
 }
 .angio-overlay-svg .angiogram-segment-label {
   pointer-events: none;
+  fill: rgba(224,235,247,0.48);
+  stroke: rgba(0,0,0,0.58);
+  stroke-width: 2px;
+  font-size: 9.5px;
+  opacity: 0.72;
 }
 .angio-overlay-svg .angiogram-empty text {
   pointer-events: none;

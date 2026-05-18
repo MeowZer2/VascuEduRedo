@@ -17,10 +17,12 @@ import type {
 import {
   ANGIO_WORKSPACE_HEIGHT,
   ANGIO_WORKSPACE_WIDTH,
-  projectPoint,
+  computeAngioViewTransform,
+  projectAngioPoint,
   renderAngiogram,
   type AngioPreset,
   type AngioProjection,
+  type AngioViewTransform,
 } from './angioRenderer';
 
 interface AdvancedAngiogramCanvasProps {
@@ -46,6 +48,56 @@ function clamp(v: number, lo: number, hi: number): number {
 
 function lerp(a: { x: number; y: number }, b: { x: number; y: number }, t: number) {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+function projectedPoint(
+  point: { x: number; y: number },
+  projection: AngioProjection,
+  view: AngioViewTransform,
+) {
+  return projectAngioPoint(point, projection, view);
+}
+
+function segmentPoint(
+  segment: VesselSegment,
+  t: number,
+  projection: AngioProjection,
+  view: AngioViewTransform,
+) {
+  return lerp(projectedPoint(segment.start, projection, view), projectedPoint(segment.end, projection, view), t);
+}
+
+function proceduralHitPoints(
+  object: ProceduralObject,
+  segments: VesselSegment[],
+  projection: AngioProjection,
+  view: AngioViewTransform,
+) {
+  const segment = segments.find((s) => s.id === object.segmentId);
+  if (!segment) return [];
+  const lengthFraction = clamp(object.lengthMm / Math.max(segment.lengthMm, 1), 0.04, 0.95);
+  const startT = object.objectType === 'guidewire' ? 0 : clamp(object.t - lengthFraction / 2, 0, 1);
+  const endT = object.objectType === 'guidewire' ? object.t : clamp(object.t + lengthFraction / 2, 0, 1);
+
+  if (object.objectType === 'guidewire' || object.objectType === 'catheter' || object.objectType === 'sheath') {
+    const ids = object.pathSegmentIds.length > 0 ? object.pathSegmentIds : [object.segmentId];
+    const currentIndex = ids.indexOf(object.segmentId);
+    if (currentIndex >= 0) {
+      const points: Array<{ x: number; y: number }> = [];
+      ids.slice(0, currentIndex + 1).forEach((id) => {
+        const pathSegment = segments.find((s) => s.id === id);
+        if (!pathSegment) return;
+        if (points.length === 0) points.push(segmentPoint(pathSegment, 0, projection, view));
+        points.push(segmentPoint(pathSegment, id === object.segmentId ? endT : 1, projection, view));
+      });
+      if (points.length >= 2) return points;
+    }
+  }
+
+  return [
+    segmentPoint(segment, startT, projection, view),
+    segmentPoint(segment, endT, projection, view),
+  ];
 }
 
 function projLabel(p: AngioProjection): string {
@@ -75,19 +127,25 @@ export function AdvancedAngiogramCanvas(props: AdvancedAngiogramCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState(false);
+  const viewTransform = useMemo(
+    () => computeAngioViewTransform({ segments, projection }),
+    [segments, projection],
+  );
 
   // Only re-render the image when something that affects pixels changes.
   const renderKey = useMemo(
     () =>
       JSON.stringify({
         s: segments.map((s) => [s.id, s.start, s.end, s.proximalDiameterMm, s.distalDiameterMm, s.pathologyType, s.severityPercent, s.lengthMm]),
-        d: proceduralObjects.map((o) => [o.id, o.objectType, o.segmentId, o.t, o.lengthMm, o.state]),
+        v: segments.map((s) => [s.id, s.label, s.vesselType, s.notes]),
+        b: bifurcations.map((b) => [b.id, b.position, b.parentSegmentId, b.childSegmentIds]),
+        d: proceduralObjects.map((o) => [o.id, o.objectType, o.segmentId, o.t, o.lengthMm, o.state, o.pathSegmentIds, o.branchSegmentId]),
         p: devicePlacements.map((p) => [p.id, p.segmentId, p.t]),
         proj: projection,
         preset: visualPreset,
         sel: selectedId,
       }),
-    [segments, proceduralObjects, devicePlacements, projection, visualPreset, selectedId],
+    [segments, bifurcations, proceduralObjects, devicePlacements, projection, visualPreset, selectedId],
   );
 
   useEffect(() => {
@@ -191,8 +249,8 @@ export function AdvancedAngiogramCanvas(props: AdvancedAngiogramCanvasProps) {
         {/* Transparent interaction hit targets (image is on the canvas). */}
         <g className="angio-hit-layer">
           {segments.map((segment) => {
-            const a = projectPoint(segment.start, projection);
-            const b = projectPoint(segment.end, projection);
+            const a = projectedPoint(segment.start, projection, viewTransform);
+            const b = projectedPoint(segment.end, projection, viewTransform);
             const w = clamp((segment.proximalDiameterMm + segment.distalDiameterMm) / 2, 4, 28);
             return (
               <line
@@ -211,21 +269,12 @@ export function AdvancedAngiogramCanvas(props: AdvancedAngiogramCanvasProps) {
           })}
 
           {proceduralObjects.map((object) => {
-            const seg = segments.find((s) => s.id === object.segmentId);
-            if (!seg) return null;
-            const a = projectPoint(seg.start, projection);
-            const b = projectPoint(seg.end, projection);
-            const lenFrac = clamp(object.lengthMm / Math.max(seg.lengthMm, 1), 0.04, 0.95);
-            const isWire = object.objectType === 'guidewire';
-            const p1 = lerp(a, b, isWire ? 0 : clamp(object.t - lenFrac / 2, 0, 1));
-            const p2 = lerp(a, b, isWire ? object.t : clamp(object.t + lenFrac / 2, 0, 1));
+            const points = proceduralHitPoints(object, segments, projection, viewTransform);
+            if (points.length < 2) return null;
             return (
-              <line
+              <polyline
                 key={object.id}
-                x1={p1.x}
-                y1={p1.y}
-                x2={p2.x}
-                y2={p2.y}
+                points={points.map((p) => `${p.x},${p.y}`).join(' ')}
                 strokeWidth={22}
                 onPointerDown={(event) => {
                   event.stopPropagation();
@@ -238,11 +287,7 @@ export function AdvancedAngiogramCanvas(props: AdvancedAngiogramCanvasProps) {
           {treatmentMarkers.map((marker) => {
             const seg = segments.find((s) => s.id === marker.segmentId);
             if (!seg) return null;
-            const p = lerp(
-              projectPoint(seg.start, projection),
-              projectPoint(seg.end, projection),
-              clamp(marker.t, 0, 1),
-            );
+            const p = segmentPoint(seg, clamp(marker.t, 0, 1), projection, viewTransform);
             return (
               <circle
                 key={marker.id}
@@ -260,11 +305,7 @@ export function AdvancedAngiogramCanvas(props: AdvancedAngiogramCanvasProps) {
           {devicePlacements.map((placement) => {
             const seg = segments.find((s) => s.id === placement.segmentId);
             if (!seg) return null;
-            const p = lerp(
-              projectPoint(seg.start, projection),
-              projectPoint(seg.end, projection),
-              clamp(placement.t, 0, 1),
-            );
+            const p = segmentPoint(seg, clamp(placement.t, 0, 1), projection, viewTransform);
             return (
               <circle
                 key={placement.id}
@@ -280,7 +321,7 @@ export function AdvancedAngiogramCanvas(props: AdvancedAngiogramCanvasProps) {
           })}
         </g>
 
-        {sel ? <SelectedLabel sel={sel} segments={segments} projection={projection} /> : null}
+        {sel ? <SelectedLabel sel={sel} segments={segments} projection={projection} viewTransform={viewTransform} /> : null}
 
         {segments.length === 0 ? (
           <g className="angiogram-empty">
@@ -298,19 +339,25 @@ function SelectedLabel({
   sel,
   segments,
   projection,
+  viewTransform,
 }: {
   sel: VesselSegment | ProceduralObject | TreatmentMarker | DevicePlacement;
   segments: VesselSegment[];
   projection: AngioProjection;
+  viewTransform: AngioViewTransform;
 }) {
   let anchor = { x: ANGIO_WORKSPACE_WIDTH / 2, y: 40 };
   if ('start' in sel && 'end' in sel) {
-    anchor = lerp(projectPoint(sel.start, projection), projectPoint(sel.end, projection), 0.5);
+    anchor = lerp(
+      projectedPoint(sel.start, projection, viewTransform),
+      projectedPoint(sel.end, projection, viewTransform),
+      0.5,
+    );
   } else if ('segmentId' in sel) {
     const seg = segments.find((s) => s.id === sel.segmentId);
     if (seg) {
       const t = 't' in sel ? clamp(sel.t as number, 0, 1) : 0.5;
-      anchor = lerp(projectPoint(seg.start, projection), projectPoint(seg.end, projection), t);
+      anchor = segmentPoint(seg, t, projection, viewTransform);
     }
   }
   return (
