@@ -1,11 +1,33 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   isDeviceCatalogAvailable,
+  isSizingIncomplete,
+  isVerified,
   listDeviceCategories,
   listDevices,
+  NUMERIC_SPEC_FIELDS,
+  TEXT_SPEC_FIELDS,
   type Device,
 } from '../../lib/devices';
 import { friendlyError } from '../../lib/productionState';
+
+const SPEC_FIELD_LABELS: Record<string, string> = {
+  deviceFamily: 'Device family',
+  vascularTerritory: 'Vascular territory',
+  indicationsSummary: 'Indications',
+  deliverySystem: 'Delivery system',
+  mriCompatibility: 'MRI compatibility',
+  radiopaqueMarkers: 'Radiopaque markers',
+  sourceReference: 'Source reference',
+  sourceUrl: 'Source URL',
+  lastVerifiedAt: 'Last verified',
+  notes: 'Notes',
+  availableDiametersMm: 'Diameters (mm)',
+  availableLengthsMm: 'Lengths (mm)',
+  compatibleSheathFr: 'Compatible sheath (Fr)',
+  workingLengthCm: 'Working length (cm)',
+  wireCompatibilityInch: 'Wire compatibility (in)',
+};
 
 export function DevicesCatalogPage() {
   const available = isDeviceCatalogAvailable();
@@ -186,6 +208,20 @@ export function DevicesCatalogPage() {
                     </span>
                   </span>
                   <span className="device-meta">
+                    {isVerified(device) ? (
+                      <span className="pill pill-mono success" title="Has a source reference and verification date">
+                        verified
+                      </span>
+                    ) : (
+                      <span className="pill pill-mono" title="No source reference / verification date">
+                        unverified
+                      </span>
+                    )}
+                    {isSizingIncomplete(device) && (
+                      <span className="pill pill-mono warning" title="No sizes or numeric specifications">
+                        incomplete
+                      </span>
+                    )}
                     <span className="pill pill-mono">{device.sizes.length} sz</span>
                   </span>
                 </button>
@@ -228,6 +264,42 @@ export function DeviceDetail({ device }: { device: Device }) {
 
       <section className="grid grid-12 device-detail-grid">
         <div className="col-7">
+          {device.spec && (
+            <>
+              <h4 className="detail-kicker">Specifications</h4>
+              <dl className="def device-def">
+                {TEXT_SPEC_FIELDS.map((field) => {
+                  const value = device.spec?.[field];
+                  if (typeof value !== 'string' || !value) return null;
+                  return (
+                    <Fragment key={field}>
+                      <dt>{SPEC_FIELD_LABELS[field] ?? field}</dt>
+                      <dd>
+                        {field === 'sourceUrl' ? (
+                          <a href={value} target="_blank" rel="noreferrer">
+                            {value}
+                          </a>
+                        ) : (
+                          value
+                        )}
+                      </dd>
+                    </Fragment>
+                  );
+                })}
+                {NUMERIC_SPEC_FIELDS.map((field) => {
+                  const value = device.spec?.[field];
+                  if (!Array.isArray(value) || value.length === 0) return null;
+                  return (
+                    <Fragment key={field}>
+                      <dt>{SPEC_FIELD_LABELS[field] ?? field}</dt>
+                      <dd>{(value as number[]).join(' · ')}</dd>
+                    </Fragment>
+                  );
+                })}
+              </dl>
+            </>
+          )}
+
           {device.sizes.length > 0 && (
             <>
               <h4 className="detail-kicker">Available sizes</h4>
@@ -278,9 +350,15 @@ export function DeviceDetail({ device }: { device: Device }) {
             </p>
           </div>
           <div className="card flat pad-sm">
-            <div className="page-eyebrow">IFU note</div>
+            <div className="page-eyebrow">Verification</div>
             <p className="muted">
-              Confirm device IFU before clinical use. The catalog is an educational reference.
+              {isVerified(device)
+                ? `Source/verification recorded${device.spec?.lastVerifiedAt ? ` (last verified ${device.spec.lastVerifiedAt})` : ''}.`
+                : 'No source reference or verification date — treat specifications as unconfirmed.'}
+            </p>
+            <p className="muted">
+              Always confirm device IFU before clinical use. This catalog is an educational
+              reference, not a source of clinical truth.
             </p>
           </div>
         </aside>

@@ -6,10 +6,14 @@ import {
   isDeviceCatalogAvailable,
   listDeviceCategories,
   listDevices,
+  mergeSpecIntoProperties,
   type Device,
   type DeviceInput,
+  type DeviceSpec,
 } from '../../lib/devices';
+import { buildCatalogExport, type ImportSummary } from '../../lib/deviceCatalog';
 import { confirmDiscard, friendlyError, useUnsavedChangesGuard } from '../../lib/productionState';
+import { DeviceImportDialog } from './DeviceImportDialog';
 
 interface DeviceDraft {
   id: string | null;
@@ -23,6 +27,8 @@ interface DeviceDraft {
   propertyKeys: string[];
   propertyValues: string[];
   tags: string[];
+  /** Structured spec carried through manual edits so import data isn't lost. */
+  spec?: DeviceSpec;
 }
 
 const EMPTY_DRAFT: DeviceDraft = {
@@ -51,6 +57,7 @@ function deviceToDraft(d: Device): DeviceDraft {
     propertyKeys: keys,
     propertyValues: keys.map((k) => d.properties[k]),
     tags: [...d.tags],
+    spec: d.spec,
   };
 }
 
@@ -87,7 +94,8 @@ function draftToInput(draft: DeviceDraft): { ok: true; input: DeviceInput } | { 
       subtype: draft.subtype.trim() ? draft.subtype.trim() : null,
       description: draft.description.trim(),
       sizes: draft.sizes.map((s) => s.trim()).filter(Boolean),
-      properties,
+      // Re-attach the imported structured spec so manual edits don't drop it.
+      properties: mergeSpecIntoProperties(properties, draft.spec),
       tags: draft.tags.map((t) => t.trim()).filter(Boolean),
     },
   };
@@ -106,6 +114,7 @@ export function AdminDevicesTab() {
   const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showImport, setShowImport] = useState(false);
 
   const draftDirty = useMemo(() => {
     if (creating) return JSON.stringify(draft) !== JSON.stringify(EMPTY_DRAFT);
@@ -228,6 +237,40 @@ export function AdminDevicesTab() {
     }
   }
 
+  function exportCatalog() {
+    try {
+      const payload = buildCatalogExport(devices);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `vascedu-devices-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      flashStatus(`Exported ${devices.length} device${devices.length === 1 ? '' : 's'}.`);
+    } catch (e) {
+      flashError(`Export failed. ${friendlyError(e, 'Please try again.')}`);
+    }
+  }
+
+  async function handleImported(summary: ImportSummary) {
+    setShowImport(false);
+    await refresh();
+    const parts = [
+      `${summary.created} created`,
+      `${summary.updated} updated`,
+      `${summary.skipped} skipped`,
+    ];
+    if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+    if (summary.failed > 0) {
+      flashError(`Import finished with issues: ${parts.join(', ')}. ${summary.failures[0] ?? ''}`);
+    } else {
+      flashStatus(`Import complete: ${parts.join(', ')}.`);
+    }
+  }
+
   function patch<K extends keyof DeviceDraft>(key: K, value: DeviceDraft[K]) {
     setDraft((d) => ({ ...d, [key]: value }));
   }
@@ -278,15 +321,43 @@ export function AdminDevicesTab() {
         <aside className="admin-cases-panel">
           <div className="admin-panel-header">
             <h3>Devices</h3>
-            <button
-              type="button"
-              className="secondary-button small"
-              onClick={startNew}
-              disabled={busy}
-            >
-              + New
-            </button>
+            <div className="flex" style={{ gap: 6 }}>
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={() => setShowImport(true)}
+                disabled={busy}
+                title="Import a verified device catalog (JSON)"
+              >
+                Import…
+              </button>
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={exportCatalog}
+                disabled={busy || devices.length === 0}
+                title={
+                  devices.length === 0
+                    ? 'No devices to export'
+                    : 'Export the catalog as import-compatible JSON'
+                }
+              >
+                Export
+              </button>
+              <button
+                type="button"
+                className="secondary-button small"
+                onClick={startNew}
+                disabled={busy}
+              >
+                + New
+              </button>
+            </div>
           </div>
+          <p className="muted small" style={{ margin: '0 0 8px' }}>
+            Device specifications are an educational reference — verify against the manufacturer
+            IFU/source before clinical reasoning.
+          </p>
 
           <div className="admin-form" style={{ gap: 8 }}>
             <input
@@ -499,6 +570,14 @@ export function AdminDevicesTab() {
           )}
         </section>
       </div>
+
+      {showImport && (
+        <DeviceImportDialog
+          existingDevices={devices}
+          onClose={() => setShowImport(false)}
+          onImported={(summary) => void handleImported(summary)}
+        />
+      )}
     </div>
   );
 }
