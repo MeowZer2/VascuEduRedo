@@ -318,6 +318,12 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
 function BrowserFallbackProgress() {
   const progress = useMemo(() => getProgressSummary(), []);
   function resetProgress() {
+    const confirmed =
+      typeof window === 'undefined' ||
+      window.confirm(
+        "Clear this profile's local browser-preview attempts? This cannot be undone and does not affect other profiles or desktop data.",
+      );
+    if (!confirmed) return;
     clearAttempts();
     window.location.reload();
   }
