@@ -1,15 +1,17 @@
 // Advanced 2D synthetic angiogram renderer (Canvas 2D).
 //
-// Paints a believable grayscale DSA / fluoroscopy image from the existing
-// vessel-composer data model. Pure module: the React layer owns interaction;
-// this only draws pixels and is wrapped so any failure makes the caller fall
-// back to the legacy SVG renderer.
-//
-// v0.38: curved spline centerlines, seeded irregular lumen borders, smooth
-// bifurcation pooling, contour-deforming pathology, proximal→distal contrast
-// falloff, spline-following hardware, and tuned DSA/Fluoro/Roadmap presets.
+// Pure module: the React layer owns interaction; this only draws pixels and
+// is wrapped so any failure makes the caller fall back to the legacy SVG.
 // Public API (projectPoint / renderAngiogram / types / workspace consts) is
-// unchanged so the surrounding component and fallback architecture stay intact.
+// stable across v0.37–v0.39 so the surrounding component and fallback stay
+// intact.
+//
+// v0.39: the vessels + devices are painted into a single offscreen
+// "contrast-density" buffer (non-uniform internal density, central column,
+// streaking, edge falloff, irregular borders) which then receives one shared
+// acquisition pass (motion softness, exposure gradient, scatter haze,
+// detector grain/banding, vignette). This makes it read as a captured X-ray
+// image rather than stacked vector shapes.
 
 import type {
   BifurcationNode,
@@ -39,6 +41,22 @@ interface Pt {
   y: number;
 }
 
+// --- internal quality / tuning knobs (no UI yet, kept easy to adjust) ------
+
+const TUNING = {
+  vesselDensity: 0.9,
+  edgeSoftness: 2.6,
+  internalNoise: 0.26,
+  contrastFalloff: 0.72,
+  backgroundNoise: 1,
+  roadmapTintStrength: 0.55,
+  fluoroSoftTissueStrength: 0.06,
+  deviceOpacity: 0.95,
+  motionSoftness: 0.9,
+  centralColumn: 0.3,
+  streakStrength: 0.12,
+};
+
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -62,15 +80,11 @@ export function projectPoint(p: Pt, projection: AngioProjection): Pt {
   }
 }
 
-function lerpPoint(a: Pt, b: Pt, t: number): Pt {
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-}
-
 function gaussian(t: number, center: number, sigma: number): number {
   return Math.exp(-Math.pow((t - center) / sigma, 2));
 }
 
-// --- deterministic noise (stable between renders, keyed by segment id) -----
+// --- deterministic noise (stable between renders) --------------------------
 
 function seedFromId(id: string): number {
   let h = 2166136261;
@@ -92,16 +106,15 @@ function smoothstep(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
-// Smooth 1D value noise in [-0.5, 0.5], deterministic for (seed, x).
 function valueNoise(seed: number, x: number): number {
   const i = Math.floor(x);
   const f = x - i;
   const a = hash01(seed * 374761 + i * 668265263);
   const b = hash01(seed * 374761 + (i + 1) * 668265263);
-  return (a + (b - a) * smoothstep(f)) - 0.5;
+  return a + (b - a) * smoothstep(f) - 0.5;
 }
 
-// --- curved centerline (quadratic bezier + subtle wobble) ------------------
+// --- curved centerline -----------------------------------------------------
 
 interface Spline {
   a: Pt;
@@ -115,10 +128,10 @@ interface Spline {
 
 function vesselBow(vesselType: string): number {
   const v = (vesselType || '').toLowerCase();
-  if (v.includes('aorta')) return 0.35; // great vessels run fairly straight
+  if (v.includes('aorta')) return 0.35;
   if (v.includes('iliac')) return 0.7;
   if (v.includes('femoral') || v.includes('popliteal')) return 0.8;
-  return 1; // branches curve the most
+  return 1;
 }
 
 function makeSpline(segment: VesselSegment, projection: AngioProjection): Spline {
@@ -131,7 +144,6 @@ function makeSpline(segment: VesselSegment, projection: AngioProjection): Spline
   const ny = dx / len;
   const seed = seedFromId(segment.id);
   const sign = hash01(seed) < 0.5 ? -1 : 1;
-  // Gentle anatomical bow, proportional to length and vessel type.
   const bow = sign * len * 0.05 * vesselBow(segment.vesselType) * (0.55 + hash01(seed * 7));
   const c = { x: (a.x + b.x) / 2 + nx * bow, y: (a.y + b.y) / 2 + ny * bow };
   return { a, c, b, nx, ny, len, seed };
@@ -141,7 +153,6 @@ function splineAt(sp: Spline, t: number): Pt {
   const u = 1 - t;
   const bx = u * u * sp.a.x + 2 * u * t * sp.c.x + t * t * sp.b.x;
   const by = u * u * sp.a.y + 2 * u * t * sp.c.y + t * t * sp.b.y;
-  // Low-frequency centerline wobble — keeps it from looking machined.
   const w = valueNoise(sp.seed + 101, t * 2.4) * sp.len * 0.018;
   return { x: bx + sp.nx * w, y: by + sp.ny * w };
 }
@@ -156,14 +167,13 @@ function splineNormal(sp: Spline, t: number): Pt {
   return { x: -ty, y: tx };
 }
 
-// --- lumen profile (pathology-deformed, contour-level) ---------------------
+// --- lumen profile ---------------------------------------------------------
 
 function aneurysmExtra(segment: VesselSegment, t: number): number {
   if (segment.pathologyType !== 'aneurysm') return 0;
   const prox = clamp(segment.proximalDiameterMm, 1.5, 30);
   const dist = clamp(segment.distalDiameterMm, 1.2, 30);
   const base = (prox + (dist - prox) * t) * 1.55 + 3;
-  // Wider sigma → fusiform dilatation that flows into the vessel.
   return base * 1.05 * gaussian(t, 0.5, 0.2);
 }
 
@@ -174,8 +184,6 @@ function isSaccular(segment: VesselSegment): boolean {
   return text.includes('saccular');
 }
 
-// Symmetric base half-width (px) WITHOUT the aneurysm bulge (that is routed
-// per-side so saccular can be asymmetric).
 function baseHalf(segment: VesselSegment, t: number): number {
   const prox = clamp(segment.proximalDiameterMm, 1.5, 30);
   const dist = clamp(segment.distalDiameterMm, 1.2, 30);
@@ -186,7 +194,6 @@ function baseHalf(segment: VesselSegment, t: number): number {
       const sev = clamp(segment.severityPercent ?? 65, 10, 95) / 100;
       let h = base * (1 - sev * 0.82 * lesion);
       if (sev > 0.6) {
-        // Mild post-stenotic irregularity just distal to the lesion.
         const post = gaussian(t, 0.68, 0.07);
         h *= 1 + post * 0.12 * (valueNoise(seedFromId(segment.id) + 41, t * 9) + 0.5);
       }
@@ -199,21 +206,21 @@ function baseHalf(segment: VesselSegment, t: number): number {
   }
 }
 
-// Per-side offset including edge irregularity + aneurysm routing.
 function sideHalf(segment: VesselSegment, sp: Spline, t: number, side: 1 | -1): number {
   const h = baseHalf(segment, t);
-  // Two octaves of low-frequency, deterministic border waviness.
+  // Irregular, deterministic borders. Aneurysm gets a wavier wall.
+  const aneurysmWall = segment.pathologyType === 'aneurysm' ? 1.9 : 1;
   const n =
-    valueNoise(sp.seed + (side === 1 ? 7 : 23), t * 5) * 0.13 +
-    valueNoise(sp.seed + (side === 1 ? 53 : 71), t * 1.6) * 0.08;
+    valueNoise(sp.seed + (side === 1 ? 7 : 23), t * 5) * 0.13 * aneurysmWall +
+    valueNoise(sp.seed + (side === 1 ? 53 : 71), t * 1.6) * 0.08 * aneurysmWall;
   let half = h * (1 + n);
   const bulge = aneurysmExtra(segment, t);
   if (bulge > 0) {
     if (isSaccular(segment)) {
-      // Asymmetric out-pouching to one wall.
       half += side === 1 ? bulge * 1.05 : bulge * 0.12;
     } else {
-      half += bulge * 0.5; // fusiform: both walls dilate
+      // Fusiform: both walls dilate but asymmetrically (no perfect oval).
+      half += bulge * (side === 1 ? 0.58 : 0.44);
     }
   }
   return Math.max(1.2, half);
@@ -223,70 +230,58 @@ function sideHalf(segment: VesselSegment, sp: Spline, t: number, side: 1 | -1): 
 
 interface PresetConfig {
   bg: [string, string, string];
-  vessel: string;
-  vesselComposite: GlobalCompositeOperation;
-  coreAlpha: number;
-  softAlpha: number;
-  /** distal contrast loss: alpha multiplier at the distal end (0..1). */
-  distalFalloff: number;
-  softBlur: number;
-  device: string;
-  deviceAlpha: number;
-  noise: number;
-  roadmapGhost: boolean;
+  ink: string; // rgb of the contrast/device "exposure" in the scene buffer
+  density: number; // overall lumen density multiplier
+  haze: number; // scatter lift
+  noise: number; // detector grain
+  banding: number; // detector banding strength
   silhouettes: boolean;
+  roadmapGhost: boolean;
+  tint: string | null; // roadmap tint rgb
+  vignette: string;
 }
 
 function presetConfig(preset: AngioPreset): PresetConfig {
   switch (preset) {
     case 'dsa':
-      // Subtracted: clean pale field, dark contrast column, minimal bloom.
       return {
-        bg: ['#eceeef', '#dadddf', '#c4c8ca'],
-        vessel: '26,29,33',
-        vesselComposite: 'multiply',
-        coreAlpha: 0.95,
-        softAlpha: 0.2,
-        distalFalloff: 0.78,
-        softBlur: 1.8,
-        device: '10,11,13',
-        deviceAlpha: 0.97,
-        noise: 0.035,
-        roadmapGhost: false,
+        bg: ['#edeff0', '#dde0e1', '#c8ccce'],
+        ink: '20,22,26',
+        density: 0.92,
+        haze: 0.04,
+        noise: 0.03,
+        banding: 0.015,
         silhouettes: false,
+        roadmapGhost: false,
+        tint: null,
+        vignette: 'rgba(38,42,46,0.4)',
       };
     case 'roadmap':
-      // Persistent muted overlay, restrained cyan (no neon).
       return {
-        bg: ['#0d1620', '#080f17', '#03070c'],
-        vessel: '120,170,184',
-        vesselComposite: 'lighter',
-        coreAlpha: 0.5,
-        softAlpha: 0.16,
-        distalFalloff: 0.82,
-        softBlur: 2.2,
-        device: '226,236,242',
-        deviceAlpha: 0.95,
-        noise: 0.1,
+        bg: ['#0e1620', '#091018', '#04080d'],
+        ink: '150,170,178',
+        density: 0.58,
+        haze: 0.05,
+        noise: 0.09,
+        banding: 0.03,
+        silhouettes: true,
         roadmapGhost: true,
-        silhouettes: false,
+        tint: '95,150,165',
+        vignette: 'rgba(0,0,0,0.58)',
       };
     case 'fluoro':
     default:
-      // Darker, noisier, weaker vessel contrast, visible hardware + tissue.
       return {
-        bg: ['#11161c', '#0a0e13', '#040608'],
-        vessel: '205,213,219',
-        vesselComposite: 'lighter',
-        coreAlpha: 0.46,
-        softAlpha: 0.16,
-        distalFalloff: 0.7,
-        softBlur: 2.4,
-        device: '244,248,251',
-        deviceAlpha: 1,
-        noise: 0.17,
-        roadmapGhost: false,
+        bg: ['#12171d', '#0b0f14', '#050709'],
+        ink: '208,216,222',
+        density: 0.5,
+        haze: 0.06,
+        noise: 0.16,
+        banding: 0.035,
         silhouettes: true,
+        roadmapGhost: false,
+        tint: null,
+        vignette: 'rgba(0,0,0,0.6)',
       };
   }
 }
@@ -311,7 +306,94 @@ function withFilter(ctx: CanvasRenderingContext2D, filter: string, fn: () => voi
   }
 }
 
-// --- vessel ribbon ---------------------------------------------------------
+// --- cached offscreen layers ----------------------------------------------
+
+interface Cached {
+  scene: HTMLCanvasElement | null;
+  grain: { c: HTMLCanvasElement; key: string } | null;
+  internal: HTMLCanvasElement | null;
+  banding: HTMLCanvasElement | null;
+}
+const cache: Cached = { scene: null, grain: null, internal: null, banding: null };
+
+function sceneCanvas(): HTMLCanvasElement | null {
+  if (cache.scene) return cache.scene;
+  const c = document.createElement('canvas');
+  c.width = ANGIO_WORKSPACE_WIDTH;
+  c.height = ANGIO_WORKSPACE_HEIGHT;
+  cache.scene = c;
+  return c;
+}
+
+function grainCanvas(amount: number): HTMLCanvasElement | null {
+  const key = amount.toFixed(3);
+  if (cache.grain && cache.grain.key === key) return cache.grain.c;
+  const size = 240;
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const g = c.getContext('2d');
+  if (!g) return null;
+  const img = g.createImageData(size, size);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 128 + (Math.random() - 0.5) * 255;
+    img.data[i] = v;
+    img.data[i + 1] = v;
+    img.data[i + 2] = v;
+    img.data[i + 3] = Math.random() * 255 * amount;
+  }
+  g.putImageData(img, 0, 0);
+  cache.grain = { c, key };
+  return c;
+}
+
+// Low-frequency blotchy field used to break up flat lumen contrast.
+function internalNoiseCanvas(): HTMLCanvasElement | null {
+  if (cache.internal) return cache.internal;
+  const cells = 26;
+  const small = document.createElement('canvas');
+  small.width = cells;
+  small.height = cells;
+  const sg = small.getContext('2d');
+  if (!sg) return null;
+  const img = sg.createImageData(cells, cells);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = Math.random() * 255;
+    img.data[i] = v;
+    img.data[i + 1] = v;
+    img.data[i + 2] = v;
+    img.data[i + 3] = 255;
+  }
+  sg.putImageData(img, 0, 0);
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 256;
+  const g = c.getContext('2d');
+  if (!g) return null;
+  withFilter(g, 'blur(7px)', () => {
+    g.imageSmoothingEnabled = true;
+    g.drawImage(small, 0, 0, 256, 256);
+  });
+  cache.internal = c;
+  return c;
+}
+
+function bandingCanvas(): HTMLCanvasElement | null {
+  if (cache.banding) return cache.banding;
+  const c = document.createElement('canvas');
+  c.width = 6;
+  c.height = 6;
+  const g = c.getContext('2d');
+  if (!g) return null;
+  g.clearRect(0, 0, 6, 6);
+  g.fillStyle = 'rgba(255,255,255,0.5)';
+  g.fillRect(0, 0, 6, 1);
+  g.fillRect(0, 0, 1, 6);
+  cache.banding = c;
+  return c;
+}
+
+// --- scene painting (into the offscreen density buffer) --------------------
 
 function ribbonPath(
   ctx: CanvasRenderingContext2D,
@@ -339,95 +421,173 @@ function ribbonPath(
   ctx.closePath();
 }
 
-function falloffGradient(
-  ctx: CanvasRenderingContext2D,
-  sp: Spline,
-  rgb: string,
-  alpha: number,
-  distalFalloff: number,
-): CanvasGradient {
-  const g = ctx.createLinearGradient(sp.a.x, sp.a.y, sp.b.x, sp.b.y);
-  g.addColorStop(0, `rgba(${rgb},${alpha})`);
-  g.addColorStop(0.55, `rgba(${rgb},${alpha * (0.92 + 0.08 * distalFalloff)})`);
-  g.addColorStop(1, `rgba(${rgb},${alpha * distalFalloff})`);
-  return g;
+function lengthDensity(t: number): number {
+  // Strong inflow, gentle taper, weaker distal runoff.
+  return clamp(1 - TUNING.contrastFalloff * Math.pow(t, 1.35), 0.22, 1);
 }
 
-function drawSegment(
-  ctx: CanvasRenderingContext2D,
+function paintSegment(
+  octx: CanvasRenderingContext2D,
   segment: VesselSegment,
   sp: Spline,
   cfg: PresetConfig,
 ): void {
   const occluded = segment.pathologyType === 'occlusion';
-  const lumenEnd = occluded ? 0.62 : 1;
+  const lumenEnd = occluded ? 0.6 : 1;
+  const ink = cfg.ink;
+  const baseA = cfg.density * TUNING.vesselDensity;
 
-  // Soft contrast halo — single restrained pass (no cartoon glow).
-  withFilter(ctx, `blur(${cfg.softBlur}px)`, () => {
-    ribbonPath(ctx, segment, sp, 0, lumenEnd, 1.12);
-    ctx.fillStyle = `rgba(${cfg.vessel},${cfg.softAlpha})`;
-    ctx.fill();
+  // Soft outer margin (edge falloff — no hard vector edge).
+  withFilter(octx, `blur(${TUNING.edgeSoftness}px)`, () => {
+    ribbonPath(octx, segment, sp, 0, lumenEnd, 1.06);
+    octx.fillStyle = `rgba(${ink},${baseA * 0.34})`;
+    octx.fill();
   });
-  // Mid density.
-  withFilter(ctx, 'blur(0.9px)', () => {
-    ribbonPath(ctx, segment, sp, 0, lumenEnd, 0.98);
-    ctx.fillStyle = falloffGradient(ctx, sp, cfg.vessel, cfg.coreAlpha * 0.7, cfg.distalFalloff);
-    ctx.fill();
+
+  // Body density with proximal→distal falloff (gradient along the chord).
+  const grad = octx.createLinearGradient(sp.a.x, sp.a.y, sp.b.x, sp.b.y);
+  grad.addColorStop(0, `rgba(${ink},${baseA * 0.86})`);
+  grad.addColorStop(0.55, `rgba(${ink},${baseA * 0.7 * lengthDensity(0.55)})`);
+  grad.addColorStop(1, `rgba(${ink},${baseA * 0.6 * lengthDensity(1)})`);
+  ribbonPath(octx, segment, sp, 0, lumenEnd, 0.96);
+  octx.fillStyle = grad;
+  octx.fill();
+
+  octx.save();
+  ribbonPath(octx, segment, sp, 0, lumenEnd, 0.96);
+  octx.clip();
+
+  // Patchy internal density — breaks up the flat fill.
+  const tile = internalNoiseCanvas();
+  if (tile) {
+    const pat = octx.createPattern(tile, 'repeat');
+    if (pat) {
+      octx.save();
+      octx.globalCompositeOperation = 'destination-out';
+      octx.globalAlpha = TUNING.internalNoise;
+      octx.fillStyle = pat;
+      octx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+      octx.restore();
+    }
+  }
+
+  // Brighter central contrast column down the lumen.
+  withFilter(octx, 'blur(1.4px)', () => {
+    ribbonPath(octx, segment, sp, 0, lumenEnd, 0.42);
+    octx.fillStyle = `rgba(${ink},${baseA * TUNING.centralColumn})`;
+    octx.fill();
   });
-  // Bright lumen core with proximal→distal contrast falloff.
-  ribbonPath(ctx, segment, sp, 0, lumenEnd, 0.78);
-  ctx.fillStyle = falloffGradient(ctx, sp, cfg.vessel, cfg.coreAlpha, cfg.distalFalloff);
-  ctx.fill();
+
+  // Faint directional streaking along the vessel axis.
+  octx.globalAlpha = TUNING.streakStrength;
+  octx.strokeStyle = `rgba(${ink},1)`;
+  octx.lineWidth = 0.8;
+  for (let s = -2; s <= 2; s += 1) {
+    octx.beginPath();
+    for (let i = 0; i <= 18; i += 1) {
+      const t = (i / 18) * lumenEnd;
+      const c = splineAt(sp, t);
+      const nrm = splineNormal(sp, t);
+      const off = (s / 2) * baseHalf(segment, t) * 0.7 + valueNoise(sp.seed + s * 13, t * 6) * 2;
+      const x = c.x + nrm.x * off;
+      const y = c.y + nrm.y * off;
+      if (i === 0) octx.moveTo(x, y);
+      else octx.lineTo(x, y);
+    }
+    octx.stroke();
+  }
+  octx.globalAlpha = 1;
+  octx.restore();
+
+  if (segment.pathologyType === 'aneurysm') {
+    // Lower-density sac with an eccentric mural-thrombus-like crescent and a
+    // preserved central flow channel — not a uniformly opacified oval.
+    octx.save();
+    ribbonPath(octx, segment, sp, 0.18, 0.82, 1.0);
+    octx.clip();
+    // knock the sac density down so it isn't a solid blob
+    octx.globalCompositeOperation = 'destination-out';
+    withFilter(octx, 'blur(5px)', () => {
+      ribbonPath(octx, segment, sp, 0.2, 0.8, 0.95);
+      octx.fillStyle = 'rgba(0,0,0,0.42)';
+      octx.fill();
+    });
+    // eccentric thrombus crescent on one wall
+    const side = hash01(sp.seed + 5) < 0.5 ? 1 : -1;
+    withFilter(octx, 'blur(6px)', () => {
+      octx.beginPath();
+      for (let i = 0; i <= 22; i += 1) {
+        const t = 0.22 + (0.56 * i) / 22;
+        const c = splineAt(sp, t);
+        const nrm = splineNormal(sp, t);
+        const o = sideHalf(segment, sp, t, side === 1 ? 1 : -1) * (0.45 + 0.3 * gaussian(t, 0.5, 0.22));
+        octx.lineTo(c.x + nrm.x * o * side, c.y + nrm.y * o * side);
+      }
+      for (let i = 22; i >= 0; i -= 1) {
+        const t = 0.22 + (0.56 * i) / 22;
+        const c = splineAt(sp, t);
+        octx.lineTo(c.x, c.y);
+      }
+      octx.closePath();
+      octx.fillStyle = 'rgba(0,0,0,0.5)';
+      octx.fill();
+    });
+    octx.restore();
+    // central flow channel kept brighter
+    octx.save();
+    withFilter(octx, 'blur(1.6px)', () => {
+      ribbonPath(octx, segment, sp, 0.16, 0.84, 0.3);
+      octx.fillStyle = `rgba(${ink},${baseA * 0.8})`;
+      octx.fill();
+    });
+    octx.restore();
+  }
 
   if (occluded) {
     const cut = splineAt(sp, lumenEnd);
     const nrm = splineNormal(sp, lumenEnd);
-    const h = sideHalf(segment, sp, lumenEnd, 1) * 0.9;
-    ctx.strokeStyle = `rgba(${cfg.vessel},${cfg.coreAlpha})`;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(cut.x + nrm.x * h, cut.y + nrm.y * h);
-    ctx.lineTo(cut.x - nrm.x * h, cut.y - nrm.y * h);
-    ctx.stroke();
-    // Very faint distal ghost only (no full-bright distal vessel).
-    withFilter(ctx, 'blur(3px)', () => {
-      ribbonPath(ctx, segment, sp, 0.78, 1, 0.42);
-      ctx.fillStyle = `rgba(${cfg.vessel},${cfg.softAlpha * 0.45})`;
-      ctx.fill();
+    const h = sideHalf(segment, sp, lumenEnd, 1) * 0.95;
+    octx.strokeStyle = `rgba(${ink},${baseA})`;
+    octx.lineWidth = 2;
+    octx.beginPath();
+    octx.moveTo(cut.x + nrm.x * h, cut.y + nrm.y * h);
+    octx.lineTo(cut.x - nrm.x * h, cut.y - nrm.y * h);
+    octx.stroke();
+    withFilter(octx, 'blur(4px)', () => {
+      ribbonPath(octx, segment, sp, 0.78, 1, 0.42);
+      octx.fillStyle = `rgba(${ink},${baseA * 0.12})`;
+      octx.fill();
     });
   }
 
   if (segment.pathologyType === 'thrombus') {
-    // Soft-edged filling defect that subtracts contrast inside the lumen.
     const m = splineAt(sp, 0.52);
     const nrm = splineNormal(sp, 0.52);
-    const ang = Math.atan2(nrm.x, -nrm.y);
-    ctx.save();
-    ctx.globalCompositeOperation = 'destination-out';
-    withFilter(ctx, 'blur(3px)', () => {
-      ctx.beginPath();
-      ctx.ellipse(
+    octx.save();
+    octx.globalCompositeOperation = 'destination-out';
+    withFilter(octx, 'blur(4px)', () => {
+      octx.beginPath();
+      octx.ellipse(
         m.x,
         m.y,
-        baseHalf(segment, 0.52) * 0.62,
+        baseHalf(segment, 0.52) * 0.6,
         baseHalf(segment, 0.52) * 1.5,
-        ang,
+        Math.atan2(nrm.x, -nrm.y),
         0,
         Math.PI * 2,
       );
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fill();
+      octx.fillStyle = 'rgba(0,0,0,0.5)';
+      octx.fill();
     });
-    ctx.restore();
+    octx.restore();
   }
 
   if (segment.pathologyType === 'dissection') {
-    // Subtle intimal flap curving within the lumen + a faint false lumen.
-    ctx.save();
-    ctx.strokeStyle =
-      cfg.vesselComposite === 'multiply' ? 'rgba(110,114,120,0.65)' : 'rgba(8,12,18,0.5)';
-    ctx.lineWidth = 1.3;
-    ctx.beginPath();
+    octx.save();
+    octx.globalCompositeOperation = 'destination-out';
+    octx.lineWidth = 1.6;
+    octx.strokeStyle = 'rgba(0,0,0,0.5)';
+    octx.beginPath();
     for (let i = 0; i <= 22; i += 1) {
       const t = 0.16 + (0.68 * i) / 22;
       const c = splineAt(sp, t);
@@ -435,19 +595,18 @@ function drawSegment(
       const off = baseHalf(segment, t) * 0.42 * Math.sin(t * Math.PI);
       const x = c.x + nrm.x * off;
       const y = c.y + nrm.y * off;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+      if (i === 0) octx.moveTo(x, y);
+      else octx.lineTo(x, y);
     }
-    ctx.stroke();
-    ctx.restore();
+    octx.stroke();
+    octx.restore();
   }
 }
 
-// --- bifurcation pooling ---------------------------------------------------
-
-function drawJunctions(
-  ctx: CanvasRenderingContext2D,
+function paintJunctions(
+  octx: CanvasRenderingContext2D,
   input: AngioRenderInput,
+  splines: Map<string, Spline>,
   cfg: PresetConfig,
 ): void {
   input.bifurcations.forEach((node) => {
@@ -460,49 +619,27 @@ function drawJunctions(
       related.reduce(
         (acc, s) => Math.max(acc, baseHalf(s, s.id === node.parentSegmentId ? 1 : 0)),
         4,
-      ) * 1.55;
-    // Soft contrast pooling so the Y-junction blends instead of looking boxy.
-    withFilter(ctx, 'blur(2.4px)', () => {
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-      g.addColorStop(0, `rgba(${cfg.vessel},${cfg.coreAlpha * 0.85})`);
-      g.addColorStop(0.7, `rgba(${cfg.vessel},${cfg.coreAlpha * 0.45})`);
-      g.addColorStop(1, `rgba(${cfg.vessel},0)`);
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fill();
+      ) * 1.7;
+    // Organic contrast pooling — soft, slightly elliptical, no bright diamond.
+    octx.save();
+    octx.translate(p.x, p.y);
+    octx.rotate(hash01(seedFromId(node.id)) * Math.PI);
+    withFilter(octx, 'blur(4px)', () => {
+      const g = octx.createRadialGradient(0, 0, 0, 0, 0, r);
+      g.addColorStop(0, `rgba(${cfg.ink},${cfg.density * 0.6})`);
+      g.addColorStop(0.65, `rgba(${cfg.ink},${cfg.density * 0.3})`);
+      g.addColorStop(1, `rgba(${cfg.ink},0)`);
+      octx.fillStyle = g;
+      octx.beginPath();
+      octx.ellipse(0, 0, r * 1.05, r * 0.78, 0, 0, Math.PI * 2);
+      octx.fill();
     });
+    octx.restore();
   });
 }
 
-// --- fluoro soft-tissue / bone silhouettes ---------------------------------
-
-function drawSilhouettes(ctx: CanvasRenderingContext2D): void {
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  withFilter(ctx, 'blur(7px)', () => {
-    // Faint spinal column down the midline.
-    ctx.fillStyle = 'rgba(150,156,166,0.05)';
-    ctx.fillRect(CX - 26, 40, 52, ANGIO_WORKSPACE_HEIGHT - 80);
-    // Faint pelvic wings low in the field.
-    ctx.fillStyle = 'rgba(150,156,166,0.045)';
-    ctx.beginPath();
-    ctx.ellipse(CX - 150, ANGIO_WORKSPACE_HEIGHT - 120, 130, 95, 0.3, 0, Math.PI * 2);
-    ctx.ellipse(CX + 150, ANGIO_WORKSPACE_HEIGHT - 120, 130, 95, -0.3, 0, Math.PI * 2);
-    ctx.fill();
-    // Soft thoracic / abdominal tissue gradient block.
-    ctx.fillStyle = 'rgba(120,126,134,0.03)';
-    ctx.beginPath();
-    ctx.ellipse(CX, CY - 30, 320, 230, 0, 0, Math.PI * 2);
-    ctx.fill();
-  });
-  ctx.restore();
-}
-
-// --- devices (follow the curved spline) ------------------------------------
-
-function drawDevice(
-  ctx: CanvasRenderingContext2D,
+function paintDevice(
+  octx: CanvasRenderingContext2D,
   object: ProceduralObject,
   segment: VesselSegment,
   sp: Spline,
@@ -512,135 +649,122 @@ function drawDevice(
   const isWire = object.objectType === 'guidewire';
   const t1 = isWire ? 0 : clamp(object.t - lenFrac / 2, 0, 1);
   const t2 = isWire ? object.t : clamp(object.t + lenFrac / 2, 0, 1);
+  const dev = cfg.ink;
+  const dA = TUNING.deviceOpacity;
 
   const path = (steps: number): Pt[] => {
     const out: Pt[] = [];
     for (let i = 0; i <= steps; i += 1) out.push(splineAt(sp, t1 + (t2 - t1) * (i / steps)));
     return out;
   };
-  const stroke = (pts: Pt[], width: number, alpha = cfg.deviceAlpha) => {
-    ctx.strokeStyle = `rgba(${cfg.device},${alpha})`;
-    ctx.lineWidth = width;
-    ctx.beginPath();
-    pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-    ctx.stroke();
+  const stroke = (pts: Pt[], width: number, alpha: number) => {
+    octx.strokeStyle = `rgba(${dev},${alpha})`;
+    octx.lineWidth = width;
+    octx.beginPath();
+    pts.forEach((p, i) => (i === 0 ? octx.moveTo(p.x, p.y) : octx.lineTo(p.x, p.y)));
+    octx.stroke();
   };
-  const markerBand = (t: number, size: number) => {
+  const band = (t: number, size: number) => {
     const c = splineAt(sp, clamp(t, 0, 1));
     const nrm = splineNormal(sp, clamp(t, 0, 1));
-    ctx.strokeStyle = `rgba(${cfg.device},1)`;
-    ctx.lineWidth = 2.6;
-    ctx.beginPath();
-    ctx.moveTo(c.x + nrm.x * size, c.y + nrm.y * size);
-    ctx.lineTo(c.x - nrm.x * size, c.y - nrm.y * size);
-    ctx.stroke();
+    octx.strokeStyle = `rgba(${dev},${Math.min(1, dA + 0.05)})`;
+    octx.lineWidth = 2.4;
+    octx.beginPath();
+    octx.moveTo(c.x + nrm.x * size, c.y + nrm.y * size);
+    octx.lineTo(c.x - nrm.x * size, c.y - nrm.y * size);
+    octx.stroke();
   };
 
-  ctx.save();
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+  octx.save();
+  octx.lineCap = 'round';
+  octx.lineJoin = 'round';
 
   if (object.objectType === 'guidewire') {
-    stroke(path(26), 1.2);
-    stroke([splineAt(sp, clamp(t2 - 0.05, 0, 1)), splineAt(sp, t2)], 1.8);
-    const tip = splineAt(sp, t2);
-    ctx.fillStyle = `rgba(${cfg.device},1)`;
-    ctx.beginPath();
-    ctx.arc(tip.x, tip.y, 1.9, 0, Math.PI * 2);
-    ctx.fill();
+    stroke(path(28), 1.1, dA);
+    // slightly noisy / aliased look
+    octx.globalAlpha = 0.4;
+    stroke(path(28), 0.6, dA);
+    octx.globalAlpha = 1;
+    stroke([splineAt(sp, clamp(t2 - 0.05, 0, 1)), splineAt(sp, t2)], 1.7, dA);
   } else if (object.objectType === 'catheter') {
-    stroke(path(24), 3, cfg.deviceAlpha * 0.9);
-    markerBand(t2, 4);
+    stroke(path(24), 3, dA * 0.78);
+    stroke(path(24), 1.4, dA * 0.5);
+    band(t2, 4);
   } else if (object.objectType === 'sheath') {
-    stroke(path(20), 5.2, cfg.deviceAlpha * 0.85);
-    stroke([splineAt(sp, (t1 + t2) / 2), splineAt(sp, t2)], 3.2, cfg.deviceAlpha * 0.9);
-    const hub = splineAt(sp, t1);
-    const nrm = splineNormal(sp, t1);
-    ctx.save();
-    ctx.translate(hub.x, hub.y);
-    ctx.rotate(Math.atan2(-nrm.x, nrm.y));
-    ctx.fillStyle = `rgba(${cfg.device},${cfg.deviceAlpha})`;
-    ctx.fillRect(-2, -5, 11, 10);
-    ctx.restore();
+    stroke(path(20), 5, dA * 0.62);
+    stroke([splineAt(sp, (t1 + t2) / 2), splineAt(sp, t2)], 3, dA * 0.7);
+    band(t1, 5);
   } else if (object.objectType === 'balloon') {
     const inflated = object.state === 'deployed';
-    stroke(path(20), 1.3, cfg.deviceAlpha * 0.85);
-    const m = splineAt(sp, object.t);
-    const nrm = splineNormal(sp, object.t);
-    ctx.save();
-    ctx.translate(m.x, m.y);
-    ctx.rotate(Math.atan2(nrm.y, nrm.x) + Math.PI / 2);
-    ctx.fillStyle =
-      cfg.vesselComposite === 'multiply'
-        ? `rgba(70,74,82,${inflated ? 0.4 : 0.24})`
-        : `rgba(206,222,236,${inflated ? 0.34 : 0.2})`;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, inflated ? 24 : 13, inflated ? 8 : 5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    markerBand(object.t - lenFrac * 0.4, 4.5);
-    markerBand(object.t + lenFrac * 0.4, 4.5);
+    stroke(path(20), 1.2, dA * 0.7);
+    if (inflated) {
+      const m = splineAt(sp, object.t);
+      const nrm = splineNormal(sp, object.t);
+      octx.save();
+      octx.translate(m.x, m.y);
+      octx.rotate(Math.atan2(nrm.y, nrm.x) + Math.PI / 2);
+      octx.fillStyle = `rgba(${dev},0.18)`;
+      octx.beginPath();
+      octx.ellipse(0, 0, 22, 7, 0, 0, Math.PI * 2);
+      octx.fill();
+      octx.restore();
+    }
+    band(object.t - lenFrac * 0.4, 4.5);
+    band(object.t + lenFrac * 0.4, 4.5);
   } else if (object.objectType === 'stent' || object.objectType === 'stentGraft') {
     const isGraft = object.objectType === 'stentGraft';
     if (isGraft) {
-      // Translucent graft body sitting within the vessel (not pasted on top).
-      ctx.save();
-      ctx.globalAlpha = cfg.vesselComposite === 'multiply' ? 0.42 : 0.34;
-      ribbonPath(ctx, segment, sp, t1, t2, 0.92);
-      ctx.fillStyle =
-        cfg.vesselComposite === 'multiply' ? 'rgba(64,68,76,1)' : 'rgba(196,210,224,1)';
-      ctx.fill();
-      ctx.restore();
+      octx.save();
+      octx.globalAlpha = 0.22;
+      ribbonPath(octx, segment, sp, t1, t2, 0.92);
+      octx.fillStyle = `rgba(${dev},1)`;
+      octx.fill();
+      octx.restore();
     }
-    // Metallic strut zig-zag along the curved path.
-    const cells = 11;
-    ctx.strokeStyle = `rgba(${cfg.device},${cfg.deviceAlpha * 0.92})`;
-    ctx.lineWidth = isGraft ? 1.5 : 1.3;
+    // fine diamond strut mesh (two phases), thin lines
+    const cells = isGraft ? 16 : 20;
+    octx.strokeStyle = `rgba(${dev},${dA * 0.7})`;
+    octx.lineWidth = isGraft ? 1 : 0.8;
     for (const dir of [1, -1]) {
-      ctx.beginPath();
+      octx.beginPath();
       for (let i = 0; i <= cells; i += 1) {
         const t = t1 + (t2 - t1) * (i / cells);
         const c = splineAt(sp, t);
         const nrm = splineNormal(sp, t);
-        const amp = clamp(baseHalf(segment, t) * 0.8, 3, 16) * (i % 2 === 0 ? dir : -dir);
+        const amp = clamp(baseHalf(segment, t) * 0.78, 3, 16) * (i % 2 === 0 ? dir : -dir);
         const x = c.x + nrm.x * amp;
         const y = c.y + nrm.y * amp;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (i === 0) octx.moveTo(x, y);
+        else octx.lineTo(x, y);
       }
-      ctx.stroke();
+      octx.stroke();
     }
-    markerBand(t1, clamp(baseHalf(segment, t1) * 0.9, 4, 16));
-    markerBand((t1 + t2) / 2, clamp(baseHalf(segment, (t1 + t2) / 2) * 0.5, 3, 10));
-    markerBand(t2, clamp(baseHalf(segment, t2) * 0.9, 4, 16));
+    band(t1, clamp(baseHalf(segment, t1) * 0.85, 4, 15));
+    band(t2, clamp(baseHalf(segment, t2) * 0.85, 4, 15));
+    if (isGraft) band((t1 + t2) / 2, clamp(baseHalf(segment, (t1 + t2) / 2) * 0.5, 3, 9));
   }
-  ctx.restore();
+  octx.restore();
 }
 
-// --- film grain (cached texture) ------------------------------------------
+// --- acquisition + background ---------------------------------------------
 
-let noisePattern: { canvas: HTMLCanvasElement; key: string } | null = null;
-
-function noiseCanvas(amount: number): HTMLCanvasElement | null {
-  const key = amount.toFixed(3);
-  if (noisePattern && noisePattern.key === key) return noisePattern.canvas;
-  const size = 220;
-  const c = document.createElement('canvas');
-  c.width = size;
-  c.height = size;
-  const nctx = c.getContext('2d');
-  if (!nctx) return null;
-  const img = nctx.createImageData(size, size);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const v = 128 + (Math.random() - 0.5) * 255;
-    img.data[i] = v;
-    img.data[i + 1] = v;
-    img.data[i + 2] = v;
-    img.data[i + 3] = Math.random() * 255 * amount;
-  }
-  nctx.putImageData(img, 0, 0);
-  noisePattern = { canvas: c, key };
-  return c;
+function drawSilhouettes(ctx: CanvasRenderingContext2D, strength: number): void {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  withFilter(ctx, 'blur(9px)', () => {
+    ctx.fillStyle = `rgba(150,156,166,${strength})`;
+    ctx.fillRect(CX - 30, 30, 60, ANGIO_WORKSPACE_HEIGHT - 60);
+    ctx.fillStyle = `rgba(150,156,166,${strength * 0.8})`;
+    ctx.beginPath();
+    ctx.ellipse(CX - 155, ANGIO_WORKSPACE_HEIGHT - 115, 135, 100, 0.3, 0, Math.PI * 2);
+    ctx.ellipse(CX + 155, ANGIO_WORKSPACE_HEIGHT - 115, 135, 100, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = `rgba(120,126,134,${strength * 0.5})`;
+    ctx.beginPath();
+    ctx.ellipse(CX, CY - 30, 330, 240, 0, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.restore();
 }
 
 export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInput): boolean {
@@ -666,85 +790,88 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
     const splines = new Map<string, Spline>();
     input.segments.forEach((s) => splines.set(s.id, makeSpline(s, input.projection)));
 
-    // 1. Background field.
-    const grad = ctx.createRadialGradient(CX, CY * 0.9, 60, CX, CY, ANGIO_WORKSPACE_WIDTH * 0.72);
+    // 1. Background field + exposure non-uniformity.
+    const grad = ctx.createRadialGradient(CX, CY * 0.86, 60, CX, CY, ANGIO_WORKSPACE_WIDTH * 0.74);
     grad.addColorStop(0, cfg.bg[0]);
     grad.addColorStop(0.5, cfg.bg[1]);
     grad.addColorStop(1, cfg.bg[2]);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
 
-    // 2. Fluoro soft-tissue / bone silhouettes (kept faint).
-    if (cfg.silhouettes) drawSilhouettes(ctx);
+    const expo = ctx.createLinearGradient(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+    expo.addColorStop(0, 'rgba(255,255,255,0.05)');
+    expo.addColorStop(0.5, 'rgba(0,0,0,0)');
+    expo.addColorStop(1, 'rgba(0,0,0,0.07)');
+    ctx.fillStyle = expo;
+    ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
 
-    // 3. Roadmap ghost (faint persistent prior contrast).
-    if (cfg.roadmapGhost) {
-      ctx.save();
-      ctx.globalAlpha = 0.42;
-      ctx.globalCompositeOperation = 'lighter';
+    if (cfg.silhouettes) drawSilhouettes(ctx, TUNING.fluoroSoftTissueStrength);
+
+    // 2. Paint the whole vascular + device scene into one density buffer.
+    const scene = sceneCanvas();
+    const octx = scene && scene.getContext('2d');
+    if (scene && octx) {
+      octx.setTransform(1, 0, 0, 1, 0, 0);
+      octx.clearRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+      paintJunctions(octx, input, splines, cfg);
       input.segments.forEach((s) => {
         const sp = splines.get(s.id);
-        if (!sp) return;
-        withFilter(ctx, 'blur(2.6px)', () => {
-          ribbonPath(ctx, s, sp, 0, 1, 1.05);
-          ctx.fillStyle = 'rgba(70,108,122,0.34)';
-          ctx.fill();
-        });
+        if (sp) paintSegment(octx, s, sp, cfg);
       });
+      input.proceduralObjects.forEach((object) => {
+        const seg = input.segments.find((s) => s.id === object.segmentId);
+        const sp = seg && splines.get(seg.id);
+        if (seg && sp) paintDevice(octx, object, seg, sp, cfg);
+      });
+      input.devicePlacements.forEach((placement) => {
+        const seg = input.segments.find((s) => s.id === placement.segmentId);
+        const sp = seg && splines.get(seg.id);
+        if (!seg || !sp) return;
+        const p = splineAt(sp, clamp(placement.t, 0, 1));
+        octx.fillStyle = `rgba(${cfg.ink},${TUNING.deviceOpacity * 0.7})`;
+        octx.beginPath();
+        octx.arc(p.x, p.y, 3.6, 0, Math.PI * 2);
+        octx.fill();
+      });
+
+      // Roadmap "prior contrast" ghost: a faint, offset, tinted copy.
+      if (cfg.roadmapGhost && cfg.tint) {
+        ctx.save();
+        ctx.globalAlpha = TUNING.roadmapTintStrength * 0.5;
+        withFilter(ctx, 'blur(2.4px)', () => ctx.drawImage(scene, -2, 1));
+        ctx.restore();
+      }
+
+      // 3. Single shared acquisition pass: motion softness for the whole
+      //    captured image so devices/vessels are one exposure, not stacked.
+      ctx.save();
+      if (cfg.tint) ctx.globalAlpha = 0.9;
+      withFilter(ctx, `blur(${TUNING.motionSoftness}px)`, () => ctx.drawImage(scene, 0, 0));
       ctx.restore();
     }
 
-    // 4. Vessels + junction pooling + pathology.
-    ctx.save();
-    ctx.globalCompositeOperation = cfg.vesselComposite;
-    drawJunctions(ctx, input, cfg);
-    input.segments.forEach((s) => {
-      const sp = splines.get(s.id);
-      if (sp) drawSegment(ctx, s, sp, cfg);
-    });
-    ctx.restore();
-
-    // 5. Device radiopacity overlay.
-    ctx.save();
-    input.proceduralObjects.forEach((object) => {
-      const seg = input.segments.find((s) => s.id === object.segmentId);
-      const sp = seg && splines.get(seg.id);
-      if (seg && sp) drawDevice(ctx, object, seg, sp, cfg);
-    });
-    input.devicePlacements.forEach((placement) => {
-      const seg = input.segments.find((s) => s.id === placement.segmentId);
-      const sp = seg && splines.get(seg.id);
-      if (!seg || !sp) return;
-      const p = splineAt(sp, clamp(placement.t, 0, 1));
-      ctx.fillStyle = `rgba(${cfg.device},${cfg.deviceAlpha * 0.8})`;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-      ctx.fill();
-    });
-    ctx.restore();
-
-    // 6. Selection highlight (follows the curved centerline).
+    // 4. Selection highlight (follows the curved centerline).
     if (input.selectedId) {
       const seg = input.segments.find((s) => s.id === input.selectedId);
       const obj = input.proceduralObjects.find((o) => o.id === input.selectedId);
       ctx.save();
-      ctx.strokeStyle = 'rgba(120,200,255,0.85)';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(120,200,255,0.7)';
+      ctx.lineWidth = 1.8;
       ctx.setLineDash([5, 4]);
-      if (seg && splines.get(seg.id)) {
-        const sp = splines.get(seg.id) as Spline;
+      const sseg = seg && splines.get(seg.id);
+      if (seg && sseg) {
         ctx.beginPath();
         for (let i = 0; i <= 24; i += 1) {
-          const p = splineAt(sp, i / 24);
+          const p = splineAt(sseg, i / 24);
           if (i === 0) ctx.moveTo(p.x, p.y);
           else ctx.lineTo(p.x, p.y);
         }
         ctx.stroke();
       } else if (obj) {
         const oseg = input.segments.find((s) => s.id === obj.segmentId);
-        const sp = oseg && splines.get(oseg.id);
-        if (sp) {
-          const p = splineAt(sp, clamp(obj.t, 0, 1));
+        const osp = oseg && splines.get(oseg.id);
+        if (osp) {
+          const p = splineAt(osp, clamp(obj.t, 0, 1));
           ctx.beginPath();
           ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
           ctx.stroke();
@@ -753,30 +880,51 @@ export function renderAngiogram(canvas: HTMLCanvasElement, input: AngioRenderInp
       ctx.restore();
     }
 
-    // 7. Film grain.
-    const nz = noiseCanvas(cfg.noise);
-    if (nz) {
-      ctx.save();
-      ctx.globalAlpha = 0.5;
-      const pat = ctx.createPattern(nz, 'repeat');
+    // 5. Scatter haze (slight global lift, reduces pure black/white).
+    ctx.fillStyle =
+      input.preset === 'dsa'
+        ? `rgba(70,72,76,${cfg.haze})`
+        : `rgba(120,128,140,${cfg.haze})`;
+    ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+
+    // 6. Detector banding.
+    const band = bandingCanvas();
+    if (band && cfg.banding > 0) {
+      const pat = ctx.createPattern(band, 'repeat');
       if (pat) {
+        ctx.save();
+        ctx.globalAlpha = cfg.banding;
+        ctx.globalCompositeOperation = input.preset === 'dsa' ? 'multiply' : 'lighter';
         ctx.fillStyle = pat;
         ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+        ctx.restore();
       }
-      ctx.restore();
     }
 
-    // 8. Edge vignette (image-intensifier feel).
+    // 7. Detector grain.
+    const nz = grainCanvas(cfg.noise * TUNING.backgroundNoise);
+    if (nz) {
+      const pat = ctx.createPattern(nz, 'repeat');
+      if (pat) {
+        ctx.save();
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = pat;
+        ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
+        ctx.restore();
+      }
+    }
+
+    // 8. Vignette.
     const vig = ctx.createRadialGradient(
       CX,
       CY,
-      ANGIO_WORKSPACE_HEIGHT * 0.32,
+      ANGIO_WORKSPACE_HEIGHT * 0.34,
       CX,
       CY,
       ANGIO_WORKSPACE_WIDTH * 0.66,
     );
     vig.addColorStop(0, 'rgba(0,0,0,0)');
-    vig.addColorStop(1, input.preset === 'dsa' ? 'rgba(40,44,48,0.46)' : 'rgba(0,0,0,0.6)');
+    vig.addColorStop(1, cfg.vignette);
     ctx.fillStyle = vig;
     ctx.fillRect(0, 0, ANGIO_WORKSPACE_WIDTH, ANGIO_WORKSPACE_HEIGHT);
 
