@@ -106,6 +106,12 @@ export function AttemptReview({ attemptId, onClose }: AttemptReviewProps) {
           </p>
         )}
 
+        {details?.usesLegacyQuestionFallback && (
+          <p className="muted" role="note">
+            Legacy attempt — question content may reflect the current case version.
+          </p>
+        )}
+
         {details && (
           <>
             <section className="grid-4 review-stats">

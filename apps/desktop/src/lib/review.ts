@@ -71,11 +71,14 @@ export interface AttemptQuestionDetail {
   hintsUsed: number;
   elapsedMs: number | null;
   measurement: MeasurementDetail | null;
+  snapshotVersion: number | null;
+  legacyFallback: boolean;
 }
 
 export interface AttemptDetails {
   attempt: AttemptSummary;
   questions: AttemptQuestionDetail[];
+  usesLegacyQuestionFallback: boolean;
 }
 
 export const EMPTY_PROGRESS_SUMMARY: ProgressSummary = {

@@ -10,6 +10,8 @@
 // (case library, devices, admin-authored content, scan files) keeps its
 // original global keys and is intentionally NOT namespaced.
 
+import { isTauriDesktop, safeInvoke } from './tauri';
+
 const PROFILES_KEY = 'vascedu.profiles.v1';
 const ACTIVE_KEY = 'vascedu.activeProfileId.v1';
 const MIGRATION_FLAG = 'vascedu.profiles.legacyMigrated.v1';
@@ -46,6 +48,16 @@ export interface Profile {
   lastActiveAt: string;
   preferences?: Record<string, unknown>;
 }
+
+export interface ProfileLearnerDataCounts {
+  attempts: number;
+  responses: number;
+  learnerPlans: number;
+}
+
+type NativeProfileCleanup = (profileId: string) => Promise<ProfileLearnerDataCounts>;
+
+const VESSEL_COMPOSITIONS_KEY = 'vascedu.vesselCompositions.v0.13';
 
 const AVATAR_COLORS = [
   '#5dd4e6',
@@ -204,21 +216,57 @@ export function updateProfile(
  * Delete a profile. Refuses to delete the last remaining profile so the app
  * always has an active profile. Also clears that profile's scoped learner data.
  */
-export function deleteProfile(id: string): boolean {
+async function defaultNativeProfileCleanup(profileId: string): Promise<ProfileLearnerDataCounts> {
+  if (!isTauriDesktop()) return { attempts: 0, responses: 0, learnerPlans: 0 };
+  const counts = await safeInvoke<ProfileLearnerDataCounts>('delete_profile_learner_data', {
+    profileId,
+  });
+  if (!counts) throw new Error('The desktop learner-data cleanup did not complete.');
+  return counts;
+}
+
+function clearProfileBrowserData(profileId: string): void {
+  if (!hasWindow()) return;
+  const suffix = `::p:${profileId}`;
+  const keys: string[] = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (key?.endsWith(suffix)) keys.push(key);
+  }
+  keys.forEach((key) => window.localStorage.removeItem(key));
+
+  try {
+    const raw = window.localStorage.getItem(VESSEL_COMPOSITIONS_KEY);
+    if (!raw) return;
+    const rows = JSON.parse(raw) as unknown;
+    if (!Array.isArray(rows)) return;
+    const retained = rows.filter((row) => {
+      if (!row || typeof row !== 'object') return true;
+      const value = row as { scope?: unknown; profileId?: unknown };
+      return !(value.scope === 'learner' && value.profileId === profileId);
+    });
+    window.localStorage.setItem(VESSEL_COMPOSITIONS_KEY, JSON.stringify(retained));
+  } catch {
+    // A malformed shared plan cache is left untouched; profile registry removal
+    // still follows only after the durable desktop cleanup has succeeded.
+  }
+}
+
+export async function deleteProfile(
+  id: string,
+  cleanup: NativeProfileCleanup = defaultNativeProfileCleanup,
+): Promise<boolean> {
   const profiles = readProfiles();
   if (profiles.length <= 1) return false;
   const next = profiles.filter((p) => p.id !== id);
   if (next.length === profiles.length) return false;
+  // Native cleanup must succeed first. A rejection intentionally leaves the
+  // registry and active profile unchanged so failure cannot masquerade as deletion.
+  await cleanup(id);
   writeProfiles(next);
-  // Drop the deleted profile's scoped learner data.
-  if (hasWindow()) {
-    try {
-      window.localStorage.removeItem(profileScopedKey(LEGACY_ATTEMPTS_KEY, id));
-    } catch {
-      // best effort
-    }
-  }
-  if (getActiveProfileId() === id) {
+  clearProfileBrowserData(id);
+  const activeId = hasWindow() ? window.localStorage.getItem(ACTIVE_KEY) : null;
+  if (activeId === id) {
     persistActiveId(next[0].id);
   }
   emitChange();

@@ -203,8 +203,8 @@ export function SettingsPage() {
               <div>
                 <strong>Export app backup</strong>
                 <p>
-                  JSON snapshot of cases, questions, plans, devices, and attempts. Imaging files are
-                  referenced by path.
+                  Backup includes VascEdu records, learner ownership, profiles, and settings.
+                  Imaging files referenced from disk are listed but not embedded.
                 </p>
               </div>
               <button type="button" className="btn secondary" onClick={() => void exportBackup()}>
@@ -268,7 +268,7 @@ export function SettingsPage() {
               <dt>App</dt>
               <dd>{appInfo?.name ?? 'VascEdu'}</dd>
               <dt>Version</dt>
-              <dd className="mono">{appInfo?.version ?? '0.44.0-internal'}</dd>
+              <dd className="mono">{appInfo?.version ?? '0.45.0-internal'}</dd>
               <dt>Build</dt>
               <dd className="mono">{appInfo?.build ?? 'Browser preview'}</dd>
               <dt>Backend</dt>

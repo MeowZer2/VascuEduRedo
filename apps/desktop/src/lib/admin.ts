@@ -1,4 +1,5 @@
 import { isTauriDesktop, safeInvoke } from './tauri';
+import { listProfiles, type Profile } from './profiles';
 
 export interface AdminCaseRow {
   id: string;
@@ -170,17 +171,29 @@ export interface CaseExportPayload extends CaseImportPayload {
 }
 
 export interface AppBackupPayload {
-  app: string;
-  version: string;
-  exportedAt: string;
-  schema: string;
-  cases: unknown[];
-  questions: unknown[];
-  bookmarks: unknown[];
-  vesselCompositions: unknown[];
-  devices: unknown[];
-  attempts: unknown[];
-  questionResponses: unknown[];
+  format: 'vascedu-backup';
+  version: 2;
+  appVersion: string;
+  createdAt: string;
+  profiles: Profile[];
+  settings: Record<string, string | null>;
+  database: {
+    schema: string;
+    cases: unknown[];
+    questions: unknown[];
+    bookmarks: unknown[];
+    vesselCompositions: unknown[];
+    devices: unknown[];
+    attempts: unknown[];
+    questionResponses: unknown[];
+  };
+  externalFiles: Array<{
+    kind: 'volume';
+    caseId: string;
+    path: string;
+    existsAtExport: boolean;
+    embedded: false;
+  }>;
 }
 
 export interface ImportOptions {
@@ -209,7 +222,19 @@ export async function adminExportCase(caseId: string): Promise<CaseExportPayload
 
 export async function exportAppBackup(): Promise<AppBackupPayload | null> {
   ensureDesktop();
-  return (await safeInvoke<AppBackupPayload>('export_app_backup')) ?? null;
+  const settings = {
+    themeMode: window.localStorage.getItem('vascedu:theme-mode'),
+    displayConvention: window.localStorage.getItem('vascedu:viewer:display-convention'),
+    viewerLayout: window.localStorage.getItem('vascedu:viewer:last-layout'),
+    viewerTool: window.localStorage.getItem('vascedu:viewer:last-tool'),
+    sidebarCollapsed: window.localStorage.getItem('vascedu.sidebarCollapsed'),
+  };
+  return (
+    (await safeInvoke<AppBackupPayload>('export_app_backup', {
+      profiles: listProfiles(),
+      settings,
+    })) ?? null
+  );
 }
 
 export async function adminImportCase(

@@ -164,7 +164,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
           </div>
           <div className="brand-text">
             <strong>VascEdu</strong>
-            <small>v0.44 · INTERNAL LOCAL</small>
+            <small>v0.45 · INTERNAL LOCAL</small>
           </div>
           <button
             className="sidebar-collapse"
@@ -368,6 +368,8 @@ function ProfileMenu({
   const [name, setName] = useState('');
   const [role, setRole] = useState<string>('PGY-1');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
 
   function close() {
@@ -427,13 +429,25 @@ function ProfileMenu({
     setMode('menu');
   }
 
-  function doDelete() {
+  async function doDelete() {
     if (profileSwitchBlocked) {
       window.alert('Finish or leave the current practice session before switching profiles.');
       close();
       return;
     }
-    if (removeProfile(activeProfile.id)) close();
+    setDeletePending(true);
+    setDeleteError(null);
+    try {
+      if (await removeProfile(activeProfile.id)) close();
+    } catch (error) {
+      setDeleteError(
+        error instanceof Error
+          ? `Profile was not deleted: ${error.message}`
+          : 'Profile was not deleted because learner-data cleanup failed.',
+      );
+    } finally {
+      setDeletePending(false);
+    }
   }
 
   const others = profiles.filter((p) => p.id !== activeProfile.id);
@@ -509,11 +523,16 @@ function ProfileMenu({
                 {profiles.length > 1 ? (
                   confirmDelete ? (
                     <div className="profile-confirm">
-                      <span>Delete “{activeProfile.displayName}” and its local progress?</span>
+                      <span>
+                        This profile has local learning data. Delete “{activeProfile.displayName}”
+                        and its learner data?
+                      </span>
+                      {deleteError ? <span role="alert">{deleteError}</span> : null}
                       <div className="profile-confirm-actions">
                         <button
                           type="button"
                           className="btn ghost small"
+                          disabled={deletePending}
                           onClick={() => setConfirmDelete(false)}
                         >
                           Cancel
@@ -521,9 +540,10 @@ function ProfileMenu({
                         <button
                           type="button"
                           className="btn small profile-danger"
-                          onClick={doDelete}
+                          disabled={deletePending}
+                          onClick={() => void doDelete()}
                         >
-                          Delete
+                          {deletePending ? 'Deleting…' : 'Delete profile and learner data'}
                         </button>
                       </div>
                     </div>

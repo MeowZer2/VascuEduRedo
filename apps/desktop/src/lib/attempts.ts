@@ -13,6 +13,9 @@ export interface AttemptRow {
   startedAt: string;
   completedAt: string | null;
   score: number | null;
+  maxScoreAtCompletion?: number | null;
+  answeredQuestionCount?: number | null;
+  totalQuestionCountAtCompletion?: number | null;
 }
 
 /**

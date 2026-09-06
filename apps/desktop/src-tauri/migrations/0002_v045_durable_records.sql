@@ -1,0 +1,17 @@
+-- VascEdu v0.45 durable learner records
+--
+-- Runtime application is performed by the named, transactional migration in
+-- db.rs because SQLite has no portable `ADD COLUMN IF NOT EXISTS`. This file is
+-- the human-readable schema ledger for the additive columns introduced there.
+-- No historical values are backfilled or fabricated.
+
+-- questions.deleted_at TEXT
+-- attempts.max_score_at_completion REAL
+-- attempts.answered_question_count INTEGER
+-- attempts.total_question_count_at_completion INTEGER
+-- question_responses.question_snapshot_json TEXT
+-- question_responses.submitted_value_mm REAL
+-- question_responses.expected_value_mm REAL
+-- question_responses.absolute_error_mm REAL
+-- question_responses.tolerance_mm REAL
+-- schema_migrations(version, name, applied_at)

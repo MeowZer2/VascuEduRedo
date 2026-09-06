@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
@@ -54,6 +54,9 @@ pub struct AttemptRow {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub score: Option<f64>,
+    pub max_score_at_completion: Option<f64>,
+    pub answered_question_count: Option<i64>,
+    pub total_question_count_at_completion: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,14 +73,32 @@ pub struct QuestionResponseRow {
     pub hints_used: i64,
     pub elapsed_ms: i64,
     pub penalty_points: f64,
+    pub question_snapshot: QuestionSnapshotV1,
+    pub absolute_error_mm: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionSnapshotV1 {
+    pub version: i64,
+    pub question_id: String,
+    pub question_type: String,
+    pub order_index: i64,
+    pub prompt: String,
+    pub points: f64,
+    pub expected: Value,
+    pub explanation: String,
+    pub hints: Vec<String>,
+    pub unit: Option<String>,
+    pub tolerance: Option<f64>,
+    pub measurement_plane: Option<String>,
+    pub correct_device_id: Option<String>,
+    pub question_data: Value,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppBackup {
-    app: String,
-    version: String,
-    exported_at: String,
+pub struct DatabaseBackup {
     schema: String,
     cases: Vec<Value>,
     questions: Vec<Value>,
@@ -86,6 +107,29 @@ pub struct AppBackup {
     devices: Vec<Value>,
     attempts: Vec<Value>,
     question_responses: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalFileManifestEntry {
+    kind: String,
+    case_id: String,
+    path: String,
+    exists_at_export: bool,
+    embedded: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBackup {
+    format: String,
+    version: i64,
+    app_version: String,
+    created_at: String,
+    profiles: Vec<Value>,
+    settings: Value,
+    database: DatabaseBackup,
+    external_files: Vec<ExternalFileManifestEntry>,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -110,58 +154,95 @@ pub fn open_and_initialize(app: &AppHandle) -> Result<Connection, String> {
 }
 
 #[tauri::command]
-pub fn export_app_backup(state: State<DbState>) -> Result<AppBackup, String> {
+pub fn export_app_backup(
+    state: State<DbState>,
+    profiles: Option<Vec<Value>>,
+    settings: Option<Value>,
+) -> Result<AppBackup, String> {
     let conn = state
         .conn
         .lock()
         .map_err(|_| "Database is busy. Please try again.".to_string())?;
+    build_app_backup(
+        &conn,
+        profiles.unwrap_or_default(),
+        settings.unwrap_or_else(|| json!({})),
+    )
+}
+
+fn build_app_backup(
+    conn: &Connection,
+    profiles: Vec<Value>,
+    settings: Value,
+) -> Result<AppBackup, String> {
+    let cases = query_json_rows(
+        conn,
+        "SELECT id, slug, title, summary, category, volume_path, data_json FROM cases ORDER BY title",
+        &["id", "slug", "title", "summary", "category", "volumePath", "data"],
+        &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::Json],
+    )?;
+    let external_files = cases
+        .iter()
+        .filter_map(|case| {
+            let case_id = case.get("id")?.as_str()?.to_string();
+            let path = case.get("volumePath")?.as_str()?.to_string();
+            Some(ExternalFileManifestEntry {
+                kind: "volume".to_string(),
+                case_id,
+                exists_at_export: Path::new(&path).exists(),
+                path,
+                embedded: false,
+            })
+        })
+        .collect();
     Ok(AppBackup {
-        app: "VascEdu".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        exported_at: chrono::Utc::now().to_rfc3339(),
-        schema: "vascedu-app-backup-v1".to_string(),
-        cases: query_json_rows(
-            &conn,
-            "SELECT id, slug, title, summary, category, volume_path, data_json FROM cases ORDER BY title",
-            &["id", "slug", "title", "summary", "category", "volumePath", "data"],
-            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::Json],
-        )?,
+        format: "vascedu-backup".to_string(),
+        version: 2,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        profiles,
+        settings,
+        external_files,
+        database: DatabaseBackup {
+        schema: "vascedu-database@0.45".to_string(),
+        cases,
         questions: query_json_rows(
-            &conn,
-            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions ORDER BY case_id, order_index",
-            &["id", "caseId", "orderIndex", "type", "prompt", "data"],
-            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Integer, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json],
+            conn,
+            "SELECT id, case_id, order_index, type, prompt, data_json, deleted_at FROM questions ORDER BY case_id, order_index",
+            &["id", "caseId", "orderIndex", "type", "prompt", "data", "deletedAt"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Integer, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json, JsonColumn::NullableText],
         )?,
         bookmarks: query_json_rows(
-            &conn,
+            conn,
             "SELECT id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json, updated_at FROM case_bookmarks ORDER BY case_id, order_index",
             &["id", "caseId", "orderIndex", "title", "note", "plane", "sliceIndex", "windowWidth", "windowLevel", "zoom", "crosshair", "tags", "updatedAt"],
             &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Integer, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Integer, JsonColumn::Real, JsonColumn::Real, JsonColumn::NullableReal, JsonColumn::NullableJson, JsonColumn::Json, JsonColumn::Text],
         )?,
         vessel_compositions: query_json_rows(
-            &conn,
+            conn,
             "SELECT id, case_id, profile_id, scope, name, data_json, updated_at FROM vessel_compositions ORDER BY updated_at DESC",
             &["id", "caseId", "profileId", "scope", "name", "data", "updatedAt"],
             &[JsonColumn::Text, JsonColumn::NullableText, JsonColumn::NullableText, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json, JsonColumn::Text],
         )?,
         devices: query_json_rows(
-            &conn,
+            conn,
             "SELECT id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json FROM devices ORDER BY category, manufacturer, name",
             &["id", "name", "manufacturer", "category", "subtype", "description", "sizes", "properties", "tags"],
             &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::Text, JsonColumn::Json, JsonColumn::Json, JsonColumn::Json],
         )?,
         attempts: query_json_rows(
-            &conn,
-            "SELECT id, case_id, started_at, completed_at, score FROM attempts ORDER BY started_at DESC",
-            &["id", "caseId", "startedAt", "completedAt", "score"],
-            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::NullableReal],
+            conn,
+            "SELECT id, case_id, profile_id, started_at, completed_at, score, max_score_at_completion, answered_question_count, total_question_count_at_completion FROM attempts ORDER BY started_at DESC",
+            &["id", "caseId", "profileId", "startedAt", "completedAt", "score", "maxScoreAtCompletion", "answeredQuestionCount", "totalQuestionCountAtCompletion"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::NullableText, JsonColumn::NullableReal, JsonColumn::NullableReal, JsonColumn::NullableInteger, JsonColumn::NullableInteger],
         )?,
         question_responses: query_json_rows(
-            &conn,
-            "SELECT id, attempt_id, question_id, answer_json, is_correct, submitted_at, awarded_points, max_points, hints_used, elapsed_ms, penalty_points FROM question_responses ORDER BY submitted_at DESC",
-            &["id", "attemptId", "questionId", "answer", "isCorrect", "submittedAt", "awardedPoints", "maxPoints", "hintsUsed", "elapsedMs", "penaltyPoints"],
-            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json, JsonColumn::BooleanInteger, JsonColumn::Text, JsonColumn::Real, JsonColumn::Real, JsonColumn::Integer, JsonColumn::Integer, JsonColumn::Real],
+            conn,
+            "SELECT id, attempt_id, question_id, answer_json, is_correct, submitted_at, awarded_points, max_points, hints_used, elapsed_ms, penalty_points, question_snapshot_json, submitted_value_mm, expected_value_mm, absolute_error_mm, tolerance_mm FROM question_responses ORDER BY submitted_at DESC",
+            &["id", "attemptId", "questionId", "answer", "isCorrect", "submittedAt", "awardedPoints", "maxPoints", "hintsUsed", "elapsedMs", "penaltyPoints", "questionSnapshot", "submittedValueMm", "expectedValueMm", "absoluteErrorMm", "toleranceMm"],
+            &[JsonColumn::Text, JsonColumn::Text, JsonColumn::Text, JsonColumn::Json, JsonColumn::BooleanInteger, JsonColumn::Text, JsonColumn::Real, JsonColumn::Real, JsonColumn::Integer, JsonColumn::Integer, JsonColumn::Real, JsonColumn::NullableJson, JsonColumn::NullableReal, JsonColumn::NullableReal, JsonColumn::NullableReal, JsonColumn::NullableReal],
         )?,
+        },
     })
 }
 
@@ -172,6 +253,7 @@ enum JsonColumn {
     Integer,
     Real,
     NullableReal,
+    NullableInteger,
     BooleanInteger,
     Json,
     NullableJson,
@@ -213,6 +295,10 @@ fn row_value(row: &rusqlite::Row<'_>, index: usize, column: JsonColumn) -> rusql
         JsonColumn::Real => json!(row.get::<_, f64>(index)?),
         JsonColumn::NullableReal => row
             .get::<_, Option<f64>>(index)?
+            .map(|value| json!(value))
+            .unwrap_or(Value::Null),
+        JsonColumn::NullableInteger => row
+            .get::<_, Option<i64>>(index)?
             .map(|value| json!(value))
             .unwrap_or(Value::Null),
         JsonColumn::BooleanInteger => json!(row.get::<_, i64>(index)? != 0),
@@ -319,6 +405,12 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
             updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_case_bookmarks_case ON case_bookmarks(case_id, order_index);
+
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        );
         "#,
     )
     .map_err(|e| format!("Schema init failed: {e}"))?;
@@ -326,6 +418,81 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     ensure_question_response_idempotency_index(conn)?;
     ensure_attempt_profile_column(conn)?;
     ensure_vessel_composition_scope_columns(conn)?;
+    apply_v045_durable_records_migration(conn)?;
+    Ok(())
+}
+
+const V045_MIGRATION_VERSION: i64 = 45;
+const V045_MIGRATION_NAME: &str = "v0.45 durable learner records";
+
+/// Named, transactional, additive migration for v0.45. It deliberately avoids
+/// rebuilding SQLite tables: historical rows are preserved byte-for-byte and
+/// authored-question deletion is implemented as a soft delete.
+fn apply_v045_durable_records_migration(conn: &Connection) -> Result<(), String> {
+    let already_applied: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+            params![V045_MIGRATION_VERSION],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("v0.45 migration ledger check failed: {e}"))?;
+    if already_applied > 0 {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("v0.45 migration begin failed: {e}"))?;
+    for (table, name, definition) in [
+        ("questions", "deleted_at", "TEXT"),
+        ("attempts", "max_score_at_completion", "REAL"),
+        ("attempts", "answered_question_count", "INTEGER"),
+        ("attempts", "total_question_count_at_completion", "INTEGER"),
+        ("question_responses", "question_snapshot_json", "TEXT"),
+        ("question_responses", "submitted_value_mm", "REAL"),
+        ("question_responses", "expected_value_mm", "REAL"),
+        ("question_responses", "absolute_error_mm", "REAL"),
+        ("question_responses", "tolerance_mm", "REAL"),
+    ] {
+        if !table_has_column(&tx, table, name)? {
+            tx.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"),
+                [],
+            )
+            .map_err(|e| format!("v0.45 migration add {table}.{name} failed: {e}"))?;
+        }
+    }
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_questions_active_case ON questions(case_id, deleted_at, order_index)",
+        [],
+    )
+    .map_err(|e| format!("v0.45 active question index failed: {e}"))?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            V045_MIGRATION_VERSION,
+            V045_MIGRATION_NAME,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(|e| format!("v0.45 migration ledger insert failed: {e}"))?;
+
+    let has_fk_violation = {
+        let mut stmt = tx
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(|e| format!("v0.45 foreign_key_check prepare failed: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("v0.45 foreign_key_check failed: {e}"))?;
+        rows.next()
+            .map_err(|e| format!("v0.45 foreign_key_check row failed: {e}"))?
+            .is_some()
+    };
+    if has_fk_violation {
+        return Err("v0.45 migration detected a foreign-key violation; rolled back.".to_string());
+    }
+    tx.commit()
+        .map_err(|e| format!("v0.45 migration commit failed: {e}"))?;
     Ok(())
 }
 
@@ -669,7 +836,7 @@ pub fn get_case_questions(
         .map_err(|e| format!("Lock poisoned: {e}"))?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 AND deleted_at IS NULL ORDER BY order_index",
         )
         .map_err(|e| format!("get_case_questions prepare failed: {e}"))?;
     let rows = stmt
@@ -729,6 +896,9 @@ pub fn create_attempt(
         started_at,
         completed_at: None,
         score: None,
+        max_score_at_completion: None,
+        answered_question_count: None,
+        total_question_count_at_completion: None,
     })
 }
 
@@ -757,6 +927,84 @@ pub fn reassign_attempts_profile(
     Ok(changed as i64)
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileLearnerDataCounts {
+    pub attempts: i64,
+    pub responses: i64,
+    pub learner_plans: i64,
+}
+
+#[tauri::command]
+pub fn delete_profile_learner_data(
+    state: State<DbState>,
+    profile_id: String,
+) -> Result<ProfileLearnerDataCounts, String> {
+    let mut conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    delete_profile_learner_data_record(&mut conn, &profile_id)
+}
+
+fn delete_profile_learner_data_record(
+    conn: &mut Connection,
+    profile_id: &str,
+) -> Result<ProfileLearnerDataCounts, String> {
+    let profile_id = profile_id.trim();
+    if profile_id.is_empty() || profile_id.len() > 200 {
+        return Err("A valid profile id is required for learner-data deletion.".to_string());
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("profile learner-data deletion begin failed: {e}"))?;
+    let responses: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM question_responses WHERE attempt_id IN (SELECT id FROM attempts WHERE profile_id = ?1)",
+            params![profile_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("profile response count failed: {e}"))?;
+    tx.execute(
+        "DELETE FROM question_responses WHERE attempt_id IN (SELECT id FROM attempts WHERE profile_id = ?1)",
+        params![profile_id],
+    )
+    .map_err(|e| format!("profile response deletion failed: {e}"))?;
+    let attempts = tx
+        .execute(
+            "DELETE FROM attempts WHERE profile_id = ?1",
+            params![profile_id],
+        )
+        .map_err(|e| format!("profile attempt deletion failed: {e}"))? as i64;
+    let learner_plans =
+        tx.execute(
+            "DELETE FROM vessel_compositions WHERE scope = 'learner' AND profile_id = ?1",
+            params![profile_id],
+        )
+        .map_err(|e| format!("profile learner-plan deletion failed: {e}"))? as i64;
+    let has_fk_violation = {
+        let mut stmt = tx
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(|e| format!("profile deletion foreign_key_check prepare failed: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("profile deletion foreign_key_check failed: {e}"))?;
+        rows.next()
+            .map_err(|e| format!("profile deletion foreign_key_check row failed: {e}"))?
+            .is_some()
+    };
+    if has_fk_violation {
+        return Err("Profile deletion detected a foreign-key violation; rolled back.".to_string());
+    }
+    tx.commit()
+        .map_err(|e| format!("profile learner-data deletion commit failed: {e}"))?;
+    Ok(ProfileLearnerDataCounts {
+        attempts,
+        responses,
+        learner_plans,
+    })
+}
+
 #[tauri::command]
 pub fn submit_question_response(
     state: State<DbState>,
@@ -776,8 +1024,39 @@ pub fn submit_question_response(
         .conn
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
-    let existing_id = validate_response_target(
+    persist_question_response(
         &conn,
+        attempt_id,
+        question_id,
+        answer_json,
+        is_correct,
+        awarded_points,
+        max_points,
+        hints_used,
+        elapsed_ms,
+        penalty_points,
+        expected_profile_id,
+        expected_case_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_question_response(
+    conn: &Connection,
+    attempt_id: String,
+    question_id: String,
+    answer_json: Value,
+    is_correct: bool,
+    awarded_points: Option<f64>,
+    max_points: Option<f64>,
+    hints_used: Option<i64>,
+    elapsed_ms: Option<i64>,
+    penalty_points: Option<f64>,
+    expected_profile_id: String,
+    expected_case_id: String,
+) -> Result<QuestionResponseRow, String> {
+    let existing_id = validate_response_target(
+        conn,
         &attempt_id,
         &question_id,
         &expected_profile_id,
@@ -786,18 +1065,32 @@ pub fn submit_question_response(
     let submitted_at = now_iso();
     let answer_str = answer_json.to_string();
     let awarded_points = awarded_points.unwrap_or(0.0);
-    let max_points = max_points.unwrap_or(0.0);
+    let supplied_max_points = max_points.unwrap_or(0.0);
     let hints_used = hints_used.unwrap_or(0);
     let elapsed_ms = elapsed_ms.unwrap_or(0);
     let penalty_points = penalty_points.unwrap_or(0.0);
+    let question_snapshot = load_or_create_question_snapshot(
+        conn,
+        existing_id.as_deref(),
+        &question_id,
+        supplied_max_points,
+    )?;
+    let max_points = question_snapshot.points;
+    let (submitted_value_mm, expected_value_mm, absolute_error_mm, tolerance_mm) =
+        normalized_measurement_values(&question_snapshot, &answer_json);
+    let snapshot_json = serde_json::to_string(&question_snapshot)
+        .map_err(|e| format!("question snapshot serialization failed: {e}"))?;
     let is_retry = existing_id.is_some();
     let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     if is_retry {
         conn.execute(
             r#"UPDATE question_responses SET answer_json = ?1, is_correct = ?2,
                submitted_at = ?3, awarded_points = ?4, max_points = ?5,
-               hints_used = ?6, elapsed_ms = ?7, penalty_points = ?8
-               WHERE id = ?9"#,
+               hints_used = ?6, elapsed_ms = ?7, penalty_points = ?8,
+               question_snapshot_json = COALESCE(question_snapshot_json, ?9),
+               submitted_value_mm = ?10, expected_value_mm = ?11,
+               absolute_error_mm = ?12, tolerance_mm = ?13
+               WHERE id = ?14"#,
             params![
                 answer_str,
                 is_correct as i64,
@@ -807,6 +1100,11 @@ pub fn submit_question_response(
                 hints_used,
                 elapsed_ms,
                 penalty_points,
+                snapshot_json,
+                submitted_value_mm,
+                expected_value_mm,
+                absolute_error_mm,
+                tolerance_mm,
                 id
             ],
         )
@@ -815,8 +1113,10 @@ pub fn submit_question_response(
         conn.execute(
             r#"INSERT INTO question_responses (
                 id, attempt_id, question_id, answer_json, is_correct, submitted_at,
-                awarded_points, max_points, hints_used, elapsed_ms, penalty_points
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
+                awarded_points, max_points, hints_used, elapsed_ms, penalty_points,
+                question_snapshot_json, submitted_value_mm, expected_value_mm,
+                absolute_error_mm, tolerance_mm
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"#,
             params![
                 id,
                 attempt_id,
@@ -828,7 +1128,12 @@ pub fn submit_question_response(
                 max_points,
                 hints_used,
                 elapsed_ms,
-                penalty_points
+                penalty_points,
+                snapshot_json,
+                submitted_value_mm,
+                expected_value_mm,
+                absolute_error_mm,
+                tolerance_mm
             ],
         )
         .map_err(|e| format!("submit_question_response insert failed: {e}"))?;
@@ -845,7 +1150,124 @@ pub fn submit_question_response(
         hints_used,
         elapsed_ms,
         penalty_points,
+        question_snapshot,
+        absolute_error_mm,
     })
+}
+
+fn load_or_create_question_snapshot(
+    conn: &Connection,
+    existing_response_id: Option<&str>,
+    question_id: &str,
+    supplied_max_points: f64,
+) -> Result<QuestionSnapshotV1, String> {
+    if let Some(response_id) = existing_response_id {
+        let stored = conn
+            .query_row(
+                "SELECT question_snapshot_json FROM question_responses WHERE id = ?1",
+                params![response_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| format!("question snapshot lookup failed: {e}"))?;
+        if let Some(raw) = stored {
+            if let Ok(snapshot) = serde_json::from_str::<QuestionSnapshotV1>(&raw) {
+                return Ok(snapshot);
+            }
+        }
+    }
+
+    let (order_index, question_type, prompt, data_json): (i64, String, String, String) = conn
+        .query_row(
+            "SELECT order_index, type, prompt, data_json FROM questions WHERE id = ?1 AND deleted_at IS NULL",
+            params![question_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| format!("question snapshot source failed: {e}"))?;
+    let question_data: Value = serde_json::from_str(&data_json)
+        .map_err(|e| format!("question snapshot data is invalid: {e}"))?;
+    let points = question_data
+        .get("points")
+        .and_then(Value::as_f64)
+        .unwrap_or(supplied_max_points);
+    let expected_key = match question_type.as_str() {
+        "multipleChoice" => "correctChoiceId",
+        "multiSelect" => "correctChoiceIds",
+        "trueFalse" => "correct",
+        "numeric" | "measurement" => "correctValue",
+        "shortText" => "requiredKeywords",
+        "deviceSelection" => "correctDeviceId",
+        _ => "expected",
+    };
+    let expected = question_data
+        .get(expected_key)
+        .cloned()
+        .unwrap_or(Value::Null);
+    let hints = question_data
+        .get("hints")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(QuestionSnapshotV1 {
+        version: 1,
+        question_id: question_id.to_string(),
+        question_type,
+        order_index,
+        prompt,
+        points,
+        expected,
+        explanation: question_data
+            .get("explanation")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        hints,
+        unit: question_data
+            .get("unit")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        tolerance: question_data.get("tolerance").and_then(Value::as_f64),
+        measurement_plane: question_data
+            .get("plane")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        correct_device_id: question_data
+            .get("correctDeviceId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        question_data,
+    })
+}
+
+fn measurement_scale_to_mm(unit: Option<&str>) -> f64 {
+    match unit.unwrap_or("mm").trim().to_ascii_lowercase().as_str() {
+        "cm" => 10.0,
+        _ => 1.0,
+    }
+}
+
+fn normalized_measurement_values(
+    snapshot: &QuestionSnapshotV1,
+    answer: &Value,
+) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    if snapshot.question_type != "measurement" {
+        return (None, None, None, None);
+    }
+    let scale = measurement_scale_to_mm(snapshot.unit.as_deref());
+    let submitted = answer.as_f64().map(|value| value * scale);
+    let expected = snapshot
+        .question_data
+        .get("correctValue")
+        .and_then(Value::as_f64)
+        .map(|value| value * scale);
+    let tolerance = snapshot.tolerance.map(|value| value * scale);
+    let error = submitted.zip(expected).map(|(a, b)| (a - b).abs());
+    (submitted, expected, error, tolerance)
 }
 
 fn validate_response_target(
@@ -873,7 +1295,7 @@ fn validate_response_target(
     }
     let question_case_id: String = conn
         .query_row(
-            "SELECT case_id FROM questions WHERE id = ?1",
+            "SELECT case_id FROM questions WHERE id = ?1 AND deleted_at IS NULL",
             params![question_id],
             |row| row.get(0),
         )
@@ -910,6 +1332,22 @@ pub fn complete_attempt(
         .conn
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
+    complete_attempt_record(
+        &conn,
+        attempt_id,
+        score,
+        expected_profile_id,
+        expected_case_id,
+    )
+}
+
+fn complete_attempt_record(
+    conn: &Connection,
+    attempt_id: String,
+    score: f64,
+    expected_profile_id: String,
+    expected_case_id: String,
+) -> Result<AttemptRow, String> {
     if !score.is_finite() {
         return Err("Attempt score must be finite.".to_string());
     }
@@ -928,11 +1366,11 @@ pub fn complete_attempt(
         return Err("The practice attempt does not belong to this session.".to_string());
     }
     if existing_completed.is_some() {
-        return fetch_attempt_row(&conn, &attempt_id);
+        return fetch_attempt_row(conn, &attempt_id);
     }
     let question_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM questions WHERE case_id = ?1",
+            "SELECT COUNT(*) FROM questions WHERE case_id = ?1 AND deleted_at IS NULL",
             params![attempt_case_id],
             |row| row.get(0),
         )
@@ -940,45 +1378,58 @@ pub fn complete_attempt(
     if question_count == 0 {
         return Err("A case with no questions cannot be completed.".to_string());
     }
-    let response_count: i64 = conn
+    let (response_count, durable_score, max_score): (i64, f64, f64) = conn
         .query_row(
-            r#"SELECT COUNT(DISTINCT qr.question_id)
+            r#"SELECT COUNT(*), COALESCE(SUM(qr.awarded_points), 0),
+                      COALESCE(SUM(qr.max_points), 0)
                FROM question_responses qr
-               JOIN questions q ON q.id = qr.question_id
-               WHERE qr.attempt_id = ?1 AND q.case_id = ?2"#,
-            params![attempt_id, attempt_case_id],
-            |row| row.get(0),
+               WHERE qr.attempt_id = ?1
+                 AND qr.rowid = (
+                   SELECT latest.rowid FROM question_responses latest
+                   WHERE latest.attempt_id = qr.attempt_id
+                     AND latest.question_id = qr.question_id
+                   ORDER BY latest.submitted_at DESC, latest.rowid DESC LIMIT 1
+                 )"#,
+            params![attempt_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .map_err(|e| format!("complete_attempt response count failed: {e}"))?;
+        .map_err(|e| format!("complete_attempt durable totals failed: {e}"))?;
     if response_count != question_count {
         return Err(format!("Cannot complete attempt: {response_count} of {question_count} answers are durably saved."));
     }
-    let durable_score = durable_attempt_score(&conn, &attempt_id, &attempt_case_id)?;
     let completed_at = now_iso();
     let updated = conn
         .execute(
-            "UPDATE attempts SET completed_at = ?1, score = ?2 WHERE id = ?3",
-            params![completed_at, durable_score, attempt_id],
+            r#"UPDATE attempts SET completed_at = ?1, score = ?2,
+               max_score_at_completion = ?3, answered_question_count = ?4,
+               total_question_count_at_completion = ?5 WHERE id = ?6"#,
+            params![
+                completed_at,
+                durable_score,
+                max_score,
+                response_count,
+                question_count,
+                attempt_id
+            ],
         )
         .map_err(|e| format!("complete_attempt update failed: {e}"))?;
     if updated == 0 {
         return Err(format!("No attempt found with id {attempt_id}"));
     }
 
-    fetch_attempt_row(&conn, &attempt_id)
+    fetch_attempt_row(conn, &attempt_id)
 }
 
+#[cfg(test)]
 fn durable_attempt_score(
     conn: &Connection,
     attempt_id: &str,
-    case_id: &str,
+    _case_id: &str,
 ) -> Result<f64, String> {
     conn.query_row(
         r#"SELECT COALESCE(SUM(qr.awarded_points), 0)
            FROM question_responses qr
-           JOIN questions q ON q.id = qr.question_id
            WHERE qr.attempt_id = ?1
-             AND q.case_id = ?2
              AND qr.rowid = (
                SELECT latest.rowid
                FROM question_responses latest
@@ -987,7 +1438,7 @@ fn durable_attempt_score(
                ORDER BY latest.submitted_at DESC, latest.rowid DESC
                LIMIT 1
              )"#,
-        params![attempt_id, case_id],
+        params![attempt_id],
         |row| row.get(0),
     )
     .map_err(|e| format!("complete_attempt score failed: {e}"))
@@ -995,7 +1446,7 @@ fn durable_attempt_score(
 
 fn fetch_attempt_row(conn: &Connection, attempt_id: &str) -> Result<AttemptRow, String> {
     conn.query_row(
-        "SELECT id, case_id, started_at, completed_at, score FROM attempts WHERE id = ?1",
+        "SELECT id, case_id, started_at, completed_at, score, max_score_at_completion, answered_question_count, total_question_count_at_completion FROM attempts WHERE id = ?1",
         params![attempt_id],
         |row| {
             Ok(AttemptRow {
@@ -1004,6 +1455,9 @@ fn fetch_attempt_row(conn: &Connection, attempt_id: &str) -> Result<AttemptRow, 
                 started_at: row.get(2)?,
                 completed_at: row.get(3)?,
                 score: row.get(4)?,
+                max_score_at_completion: row.get(5)?,
+                answered_question_count: row.get(6)?,
+                total_question_count_at_completion: row.get(7)?,
             })
         },
     )
@@ -1036,7 +1490,7 @@ pub fn list_attempts(
         format!(" WHERE {}", conditions.join(" AND "))
     };
     let sql = format!(
-        "SELECT id, case_id, started_at, completed_at, score FROM attempts{where_clause} ORDER BY started_at DESC"
+        "SELECT id, case_id, started_at, completed_at, score, max_score_at_completion, answered_question_count, total_question_count_at_completion FROM attempts{where_clause} ORDER BY started_at DESC"
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -1049,6 +1503,9 @@ pub fn list_attempts(
                 started_at: row.get(2)?,
                 completed_at: row.get(3)?,
                 score: row.get(4)?,
+                max_score_at_completion: row.get(5)?,
+                answered_question_count: row.get(6)?,
+                total_question_count_at_completion: row.get(7)?,
             })
         })
         .map_err(|e| format!("list_attempts query failed: {e}"))?;
@@ -1234,7 +1691,7 @@ fn fetch_case_row(conn: &Connection, case_id: &str) -> Result<CaseRow, String> {
 fn fetch_question_row(conn: &Connection, question_id: &str) -> Result<QuestionRow, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE id = ?1",
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE id = ?1 AND deleted_at IS NULL",
         )
         .map_err(|e| format!("fetch_question_row prepare failed: {e}"))?;
     let row = stmt
@@ -1281,7 +1738,7 @@ pub fn admin_get_case_with_questions(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 AND deleted_at IS NULL ORDER BY order_index",
         )
         .map_err(|e| format!("admin_get_case_with_questions prepare failed: {e}"))?;
     let rows = stmt
@@ -1380,11 +1837,19 @@ pub fn admin_delete_case(state: State<DbState>, case_id: String) -> Result<(), S
         .conn
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
-    // Manual cascade so this works even if foreign_keys pragma was missed.
-    conn.execute("DELETE FROM question_responses WHERE attempt_id IN (SELECT id FROM attempts WHERE case_id = ?1)", params![case_id])
-        .map_err(|e| format!("admin_delete_case responses failed: {e}"))?;
-    conn.execute("DELETE FROM attempts WHERE case_id = ?1", params![case_id])
-        .map_err(|e| format!("admin_delete_case attempts failed: {e}"))?;
+    let attempt_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM attempts WHERE case_id = ?1",
+            params![case_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("admin_delete_case history check failed: {e}"))?;
+    if attempt_count > 0 {
+        return Err(
+            "This case has learner attempts and cannot be deleted without erasing history. Keep the case or remove learner data through profile deletion."
+                .to_string(),
+        );
+    }
     conn.execute("DELETE FROM questions WHERE case_id = ?1", params![case_id])
         .map_err(|e| format!("admin_delete_case questions failed: {e}"))?;
     conn.execute(
@@ -1403,7 +1868,7 @@ pub fn admin_delete_case(state: State<DbState>, case_id: String) -> Result<(), S
 
 fn next_question_order_index(conn: &Connection, case_id: &str) -> Result<i64, String> {
     let mut stmt = conn
-        .prepare("SELECT COALESCE(MAX(order_index), -1) + 1 FROM questions WHERE case_id = ?1")
+        .prepare("SELECT COALESCE(MAX(order_index), -1) + 1 FROM questions WHERE case_id = ?1 AND deleted_at IS NULL")
         .map_err(|e| format!("next_question_order_index prepare failed: {e}"))?;
     let next: i64 = stmt
         .query_row(params![case_id], |row| row.get::<_, i64>(0))
@@ -1451,12 +1916,12 @@ pub fn admin_update_question(
 
     let updated = if let Some(order_index) = input.order_index {
         conn.execute(
-            "UPDATE questions SET type = ?1, prompt = ?2, data_json = ?3, order_index = ?4 WHERE id = ?5",
+            "UPDATE questions SET type = ?1, prompt = ?2, data_json = ?3, order_index = ?4 WHERE id = ?5 AND deleted_at IS NULL",
             params![input.r#type, input.prompt, data_json, order_index, question_id],
         )
     } else {
         conn.execute(
-            "UPDATE questions SET type = ?1, prompt = ?2, data_json = ?3 WHERE id = ?4",
+            "UPDATE questions SET type = ?1, prompt = ?2, data_json = ?3 WHERE id = ?4 AND deleted_at IS NULL",
             params![input.r#type, input.prompt, data_json, question_id],
         )
     }
@@ -1473,8 +1938,15 @@ pub fn admin_delete_question(state: State<DbState>, question_id: String) -> Resu
         .conn
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
+    soft_delete_question(&conn, &question_id)
+}
+
+fn soft_delete_question(conn: &Connection, question_id: &str) -> Result<(), String> {
     let removed = conn
-        .execute("DELETE FROM questions WHERE id = ?1", params![question_id])
+        .execute(
+            "UPDATE questions SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            params![now_iso(), question_id],
+        )
         .map_err(|e| format!("admin_delete_question failed: {e}"))?;
     if removed == 0 {
         return Err(format!("No question found with id {question_id}"));
@@ -1502,7 +1974,7 @@ pub fn admin_reorder_questions(
         let bumped = -1 - index as i64;
         let updated = tx
             .execute(
-                "UPDATE questions SET order_index = ?1 WHERE id = ?2 AND case_id = ?3",
+                "UPDATE questions SET order_index = ?1 WHERE id = ?2 AND case_id = ?3 AND deleted_at IS NULL",
                 params![bumped, qid, case_id],
             )
             .map_err(|e| format!("admin_reorder_questions phase1 failed: {e}"))?;
@@ -1514,7 +1986,7 @@ pub fn admin_reorder_questions(
     }
     for (index, qid) in ordered_question_ids.iter().enumerate() {
         tx.execute(
-            "UPDATE questions SET order_index = ?1 WHERE id = ?2 AND case_id = ?3",
+            "UPDATE questions SET order_index = ?1 WHERE id = ?2 AND case_id = ?3 AND deleted_at IS NULL",
             params![index as i64, qid, case_id],
         )
         .map_err(|e| format!("admin_reorder_questions phase2 failed: {e}"))?;
@@ -1611,6 +2083,8 @@ pub struct AttemptQuestionDetail {
     pub elapsed_ms: Option<i64>,
     /// Pre-computed comparison for measurement questions (mirrors the training feedback box).
     pub measurement: Option<MeasurementDetail>,
+    pub snapshot_version: Option<i64>,
+    pub legacy_fallback: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1618,6 +2092,7 @@ pub struct AttemptQuestionDetail {
 pub struct AttemptDetails {
     pub attempt: AttemptSummary,
     pub questions: Vec<AttemptQuestionDetail>,
+    pub uses_legacy_question_fallback: bool,
 }
 
 struct QuestionMeta {
@@ -1637,11 +2112,12 @@ struct ResponseMeta {
     hints_used: i64,
     elapsed_ms: i64,
     penalty_points: f64,
+    snapshot: Option<QuestionSnapshotV1>,
 }
 
 fn load_questions_meta(conn: &Connection) -> Result<HashMap<String, QuestionMeta>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, case_id, type, data_json FROM questions")
+        .prepare("SELECT id, case_id, type, data_json FROM questions WHERE deleted_at IS NULL")
         .map_err(|e| format!("load_questions_meta prepare failed: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -1729,7 +2205,13 @@ pub fn progress_summary(
         .conn
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
+    progress_summary_record(&conn, profile_id)
+}
 
+fn progress_summary_record(
+    conn: &Connection,
+    profile_id: Option<String>,
+) -> Result<ProgressSummary, String> {
     // Profile scoping: attempt rows filter on `profile_id`; response rows filter
     // transitively via their attempt. Empty fragments when no profile is given
     // keep the command backward-compatible.
@@ -1808,7 +2290,7 @@ pub fn progress_summary(
         0.0
     };
 
-    let questions_meta = load_questions_meta(&conn)?;
+    let questions_meta = load_questions_meta(conn)?;
     let max_scores = case_max_scores_from(&questions_meta);
 
     let mut completed_scores: Vec<f64> = Vec::new();
@@ -1816,19 +2298,23 @@ pub fn progress_summary(
     {
         let mut stmt = conn
             .prepare(
-                &format!("SELECT case_id, score FROM attempts WHERE completed_at IS NOT NULL AND score IS NOT NULL{a_and}"),
+                &format!("SELECT case_id, score, max_score_at_completion FROM attempts WHERE completed_at IS NOT NULL AND score IS NOT NULL{a_and}"),
             )
             .map_err(|e| format!("progress_summary scores prepare failed: {e}"))?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(prof_args().iter()), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
             })
             .map_err(|e| format!("progress_summary scores query failed: {e}"))?;
         for r in rows {
-            let (case_id, score) =
+            let (case_id, score, immutable_max) =
                 r.map_err(|e| format!("progress_summary scores row failed: {e}"))?;
             completed_scores.push(score);
-            if let Some(max) = max_scores.get(&case_id).copied() {
+            if let Some(max) = immutable_max.or_else(|| max_scores.get(&case_id).copied()) {
                 if let Some(p) = percent_of(score, max) {
                     completed_percents.push(p);
                 }
@@ -1854,7 +2340,7 @@ pub fn progress_summary(
     {
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT question_id, answer_json FROM question_responses{}",
+                "SELECT question_id, answer_json, question_snapshot_json, absolute_error_mm FROM question_responses{}",
                 if has_p {
                     format!(" WHERE{r_scope}")
                 } else {
@@ -1864,25 +2350,51 @@ pub fn progress_summary(
             .map_err(|e| format!("progress_summary measurement prepare failed: {e}"))?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(prof_args().iter()), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                ))
             })
             .map_err(|e| format!("progress_summary measurement query failed: {e}"))?;
         for r in rows {
-            let (qid, answer_json) =
+            let (qid, answer_json, snapshot_json, stored_error_mm) =
                 r.map_err(|e| format!("progress_summary measurement row failed: {e}"))?;
-            let Some(meta) = questions_meta.get(&qid) else {
-                continue;
-            };
-            if meta.qtype != "measurement" {
+            let snapshot = snapshot_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<QuestionSnapshotV1>(raw).ok());
+            let is_measurement = snapshot
+                .as_ref()
+                .map(|value| value.question_type == "measurement")
+                .or_else(|| {
+                    questions_meta
+                        .get(&qid)
+                        .map(|meta| meta.qtype == "measurement")
+                })
+                .unwrap_or(false);
+            if !is_measurement {
                 continue;
             }
             measurement_questions_answered += 1;
+            if let Some(error_mm) = stored_error_mm {
+                measurement_errors.push(error_mm);
+                continue;
+            }
             let answer: Value = serde_json::from_str(&answer_json).unwrap_or(Value::Null);
-            if let (Some(expected), Some(submitted)) = (
-                meta.data.get("correctValue").and_then(Value::as_f64),
-                answer.as_f64(),
-            ) {
-                measurement_errors.push((submitted - expected).abs());
+            if let Some(snapshot) = snapshot {
+                if let (_, _, Some(error_mm), _) = normalized_measurement_values(&snapshot, &answer)
+                {
+                    measurement_errors.push(error_mm);
+                }
+            } else if let Some(meta) = questions_meta.get(&qid) {
+                let scale = measurement_scale_to_mm(meta.data.get("unit").and_then(Value::as_str));
+                if let (Some(expected), Some(submitted)) = (
+                    meta.data.get("correctValue").and_then(Value::as_f64),
+                    answer.as_f64(),
+                ) {
+                    measurement_errors.push((submitted - expected).abs() * scale);
+                }
             }
         }
     }
@@ -1931,7 +2443,8 @@ pub fn progress_by_case(
     // Pull all attempts (for this profile) joined with case info.
     let sql = format!(
         r#"
-            SELECT a.case_id, c.title, c.category, a.started_at, a.completed_at, a.score
+            SELECT a.case_id, c.title, c.category, a.started_at, a.completed_at, a.score,
+                   a.max_score_at_completion
             FROM attempts a
             INNER JOIN cases c ON c.id = a.case_id
             {where_profile}
@@ -1950,6 +2463,7 @@ pub fn progress_by_case(
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<f64>>(5)?,
+                row.get::<_, Option<f64>>(6)?,
             ))
         })
         .map_err(|e| format!("progress_by_case query failed: {e}"))?;
@@ -1963,25 +2477,30 @@ pub fn progress_by_case(
         completed: i64,
         best_score: Option<f64>,
         latest_score: Option<f64>,
+        latest_percent: Option<f64>,
         scores: Vec<f64>,
+        percents: Vec<f64>,
         last_attempt_at: Option<String>,
     }
     let mut buckets: HashMap<String, Bucket> = HashMap::new();
 
     for r in rows {
-        let (case_id, title, category, started_at, completed_at, score) =
+        let (case_id, title, category, started_at, completed_at, score, immutable_max) =
             r.map_err(|e| format!("progress_by_case row failed: {e}"))?;
-        let max_score = max_scores.get(&case_id).copied().unwrap_or(0.0);
+        let current_max_score = max_scores.get(&case_id).copied().unwrap_or(0.0);
+        let attempt_max_score = immutable_max.unwrap_or(current_max_score);
         let bucket = buckets.entry(case_id.clone()).or_insert_with(|| Bucket {
             case_id: case_id.clone(),
             case_title: title,
             category,
-            max_score,
+            max_score: current_max_score,
             attempts: 0,
             completed: 0,
             best_score: None,
             latest_score: None,
+            latest_percent: None,
             scores: Vec::new(),
+            percents: Vec::new(),
             last_attempt_at: None,
         });
         bucket.attempts += 1;
@@ -1989,12 +2508,16 @@ pub fn progress_by_case(
         if bucket.last_attempt_at.is_none() {
             bucket.last_attempt_at = Some(started_at);
             bucket.latest_score = score;
+            bucket.latest_percent = score.and_then(|value| percent_of(value, attempt_max_score));
         }
         if completed_at.is_some() {
             bucket.completed += 1;
         }
         if let Some(s) = score {
             bucket.scores.push(s);
+            if let Some(percent) = percent_of(s, attempt_max_score) {
+                bucket.percents.push(percent);
+            }
             bucket.best_score = Some(bucket.best_score.map_or(s, |b| b.max(s)));
         }
     }
@@ -2007,9 +2530,13 @@ pub fn progress_by_case(
             } else {
                 None
             };
-            let best_percent = b.best_score.and_then(|s| percent_of(s, b.max_score));
-            let latest_percent = b.latest_score.and_then(|s| percent_of(s, b.max_score));
-            let average_percent = average_score.and_then(|s| percent_of(s, b.max_score));
+            let best_percent = b.percents.iter().copied().reduce(f64::max);
+            let latest_percent = b.latest_percent;
+            let average_percent = if b.percents.is_empty() {
+                None
+            } else {
+                Some(b.percents.iter().sum::<f64>() / b.percents.len() as f64)
+            };
             CaseProgress {
                 case_id: b.case_id,
                 case_title: b.case_title,
@@ -2058,7 +2585,8 @@ pub fn get_recent_activity(
     };
     let sql = format!(
         r#"
-            SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score
+            SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score,
+                   a.max_score_at_completion
             FROM attempts a
             INNER JOIN cases c ON c.id = a.case_id
             {where_profile}
@@ -2078,15 +2606,18 @@ pub fn get_recent_activity(
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<f64>>(5)?,
+                row.get::<_, Option<f64>>(6)?,
             ))
         })
         .map_err(|e| format!("get_recent_activity query failed: {e}"))?;
 
     let mut out = Vec::new();
     for r in rows {
-        let (id, case_id, case_title, started_at, completed_at, score) =
+        let (id, case_id, case_title, started_at, completed_at, score, immutable_max) =
             r.map_err(|e| format!("get_recent_activity row failed: {e}"))?;
-        let max_score = max_scores.get(&case_id).copied().unwrap_or(0.0);
+        let max_score = immutable_max
+            .or_else(|| max_scores.get(&case_id).copied())
+            .unwrap_or(0.0);
         let percent = score.and_then(|s| percent_of(s, max_score));
         out.push(AttemptSummary {
             id,
@@ -2112,7 +2643,14 @@ pub fn get_attempt_details(
         .conn
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
+    get_attempt_details_record(&conn, attempt_id, profile_id)
+}
 
+fn get_attempt_details_record(
+    conn: &Connection,
+    attempt_id: String,
+    profile_id: Option<String>,
+) -> Result<Option<AttemptDetails>, String> {
     // Scope by profile so one profile cannot open another's attempt by id.
     let mut args: Vec<&dyn rusqlite::ToSql> = vec![&attempt_id];
     let profile_clause = if let Some(ref p) = profile_id {
@@ -2123,7 +2661,8 @@ pub fn get_attempt_details(
     };
     let attempt_sql = format!(
         r#"
-            SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score
+            SELECT a.id, a.case_id, c.title, a.started_at, a.completed_at, a.score,
+                   a.max_score_at_completion
             FROM attempts a
             INNER JOIN cases c ON c.id = a.case_id
             WHERE a.id = ?1{profile_clause}
@@ -2142,18 +2681,20 @@ pub fn get_attempt_details(
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<f64>>(5)?,
+                    row.get::<_, Option<f64>>(6)?,
                 ))
             },
         )
         .ok();
-    let Some((id, case_id, case_title, started_at, completed_at, score)) = attempt_row else {
+    let Some((id, case_id, case_title, started_at, completed_at, score, immutable_max)) =
+        attempt_row
+    else {
         return Ok(None);
     };
 
-    let questions_meta = load_questions_meta(&conn)?;
-    let max_score = case_max_scores_from(&questions_meta)
-        .get(&case_id)
-        .copied()
+    let questions_meta = load_questions_meta(conn)?;
+    let max_score = immutable_max
+        .or_else(|| case_max_scores_from(&questions_meta).get(&case_id).copied())
         .unwrap_or(0.0);
     let percent = score.and_then(|s| percent_of(s, max_score));
 
@@ -2175,7 +2716,8 @@ pub fn get_attempt_details(
             .prepare(
                 r#"
                 SELECT id, question_id, answer_json, is_correct, submitted_at,
-                       awarded_points, max_points, hints_used, elapsed_ms, penalty_points
+                       awarded_points, max_points, hints_used, elapsed_ms, penalty_points,
+                       question_snapshot_json
                 FROM question_responses
                 WHERE attempt_id = ?1
                 ORDER BY submitted_at ASC
@@ -2195,6 +2737,7 @@ pub fn get_attempt_details(
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, f64>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             })
             .map_err(|e| format!("get_attempt_details responses query failed: {e}"))?;
@@ -2210,8 +2753,12 @@ pub fn get_attempt_details(
                 hints_used,
                 elapsed_ms,
                 penalty_points,
+                snapshot_json,
             ) = r.map_err(|e| format!("get_attempt_details responses row failed: {e}"))?;
             let answer: Value = serde_json::from_str(&answer_json).unwrap_or(Value::Null);
+            let snapshot = snapshot_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<QuestionSnapshotV1>(raw).ok());
             // Last write wins (rows are ordered ascending by submitted_at).
             response_map.insert(
                 qid,
@@ -2225,40 +2772,70 @@ pub fn get_attempt_details(
                     hints_used,
                     elapsed_ms,
                     penalty_points,
+                    snapshot,
                 },
             );
         }
     }
 
+    let uses_legacy_question_fallback = response_map.values().any(|row| row.snapshot.is_none());
+    let has_snapshotted_response = response_map.values().any(|row| row.snapshot.is_some());
+
     // Fetch the case's questions in order so the review respects authoring order even
     // when the learner skipped some or didn't reach the end.
     let mut stmt = conn
         .prepare(
-            "SELECT id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+            r#"SELECT id, order_index, type, prompt, data_json FROM questions
+               WHERE case_id = ?1
+                 AND (?2 = 0 OR id IN (SELECT question_id FROM question_responses WHERE attempt_id = ?3))
+               ORDER BY order_index"#,
         )
         .map_err(|e| format!("get_attempt_details questions prepare failed: {e}"))?;
     let q_rows = stmt
-        .query_map(params![case_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
+        .query_map(
+            params![case_id, has_snapshotted_response as i64, id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
         .map_err(|e| format!("get_attempt_details questions query failed: {e}"))?;
 
     let mut questions: Vec<AttemptQuestionDetail> = Vec::new();
     for r in q_rows {
-        let (qid, order_index, qtype, prompt, data_json) =
+        let (qid, current_order_index, current_type, current_prompt, data_json) =
             r.map_err(|e| format!("get_attempt_details questions row failed: {e}"))?;
-        let question_data: Value = serde_json::from_str(&data_json).unwrap_or(Value::Null);
-        let points = question_data
-            .get("points")
-            .and_then(Value::as_f64)
-            .unwrap_or(1.0);
+        let current_question_data: Value = serde_json::from_str(&data_json).unwrap_or(Value::Null);
         let response = response_map.remove(&qid);
+        let snapshot = response.as_ref().and_then(|meta| meta.snapshot.as_ref());
+        let order_index = snapshot
+            .map(|value| value.order_index)
+            .unwrap_or(current_order_index);
+        let qtype = snapshot
+            .map(|value| value.question_type.clone())
+            .unwrap_or(current_type);
+        let prompt = snapshot
+            .map(|value| value.prompt.clone())
+            .unwrap_or(current_prompt);
+        let question_data = snapshot
+            .map(|value| value.question_data.clone())
+            .unwrap_or(current_question_data);
+        let points = snapshot.map(|value| value.points).unwrap_or_else(|| {
+            question_data
+                .get("points")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0)
+        });
+        let snapshot_version = snapshot.map(|value| value.version);
+        let legacy_fallback = response
+            .as_ref()
+            .map(|meta| meta.snapshot.is_none())
+            .unwrap_or(!has_snapshotted_response);
         let (
             response_id,
             answer,
@@ -2316,10 +2893,18 @@ pub fn get_attempt_details(
             hints_used,
             elapsed_ms,
             measurement,
+            snapshot_version,
+            legacy_fallback,
         });
     }
 
-    Ok(Some(AttemptDetails { attempt, questions }))
+    questions.sort_by_key(|question| question.order_index);
+
+    Ok(Some(AttemptDetails {
+        attempt,
+        questions,
+        uses_legacy_question_fallback,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2974,7 +3559,7 @@ pub fn admin_validate_case(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 AND deleted_at IS NULL ORDER BY order_index",
         )
         .map_err(|e| format!("admin_validate_case prepare failed: {e}"))?;
     let rows = stmt
@@ -3039,7 +3624,7 @@ pub fn admin_export_case(state: State<DbState>, case_id: String) -> Result<CaseE
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
+            "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 AND deleted_at IS NULL ORDER BY order_index",
         )
         .map_err(|e| format!("admin_export_case prepare failed: {e}"))?;
     let rows = stmt
@@ -4162,6 +4747,40 @@ mod tests {
         conn
     }
 
+    fn persist_response(
+        conn: &Connection,
+        attempt_id: &str,
+        question_id: &str,
+        answer: Value,
+        awarded_points: f64,
+        profile_id: &str,
+        case_id: &str,
+    ) -> QuestionResponseRow {
+        persist_question_response(
+            conn,
+            attempt_id.to_string(),
+            question_id.to_string(),
+            answer,
+            awarded_points > 0.0,
+            Some(awarded_points),
+            None,
+            Some(0),
+            Some(1000),
+            Some(0.0),
+            profile_id.to_string(),
+            case_id.to_string(),
+        )
+        .unwrap()
+    }
+
+    fn add_attempt(conn: &Connection, id: &str, case_id: &str, profile_id: &str) {
+        conn.execute(
+            "INSERT INTO attempts (id, case_id, started_at, completed_at, score, profile_id) VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
+            params![id, case_id, id, profile_id],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn response_target_enforces_attempt_ownership_case_and_open_state() {
         let conn = response_db();
@@ -4226,5 +4845,392 @@ mod tests {
             validate_response_target(&conn, "attempt-a", "q-a", "profile-a", "case-a").unwrap(),
             Some("legacy-response-2".into())
         );
+    }
+
+    #[test]
+    fn historical_review_prefers_snapshot_after_question_edit_and_delete() {
+        let conn = response_db();
+        conn.execute(
+            r#"UPDATE questions SET prompt = 'Original prompt', data_json =
+               '{"points":2,"correct":true,"explanation":"Original explanation"}'
+               WHERE id = 'q-a'"#,
+            [],
+        )
+        .unwrap();
+        let response = persist_response(
+            &conn,
+            "attempt-a",
+            "q-a",
+            Value::Bool(true),
+            2.0,
+            "profile-a",
+            "case-a",
+        );
+        assert_eq!(response.question_snapshot.prompt, "Original prompt");
+        let completed = complete_attempt_record(
+            &conn,
+            "attempt-a".into(),
+            2.0,
+            "profile-a".into(),
+            "case-a".into(),
+        )
+        .unwrap();
+        assert_eq!(completed.max_score_at_completion, Some(2.0));
+
+        conn.execute(
+            r#"UPDATE questions SET prompt = 'Edited prompt', data_json =
+               '{"points":10,"correct":false,"explanation":"Edited explanation"}'
+               WHERE id = 'q-a'"#,
+            [],
+        )
+        .unwrap();
+        soft_delete_question(&conn, "q-a").unwrap();
+
+        let details =
+            get_attempt_details_record(&conn, "attempt-a".into(), Some("profile-a".into()))
+                .unwrap()
+                .unwrap();
+        assert!(!details.uses_legacy_question_fallback);
+        assert_eq!(details.attempt.max_score, 2.0);
+        assert_eq!(details.attempt.percent, Some(100.0));
+        assert_eq!(details.questions.len(), 1);
+        assert_eq!(details.questions[0].prompt, "Original prompt");
+        assert_eq!(details.questions[0].points, 2.0);
+        assert_eq!(details.questions[0].question_data["correct"], true);
+        assert_eq!(
+            details.questions[0].question_data["explanation"],
+            "Original explanation"
+        );
+        let response_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM question_responses WHERE id = ?1",
+                params![response.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(response_count, 1);
+    }
+
+    #[test]
+    fn attempt_denominator_is_immutable_and_new_attempt_uses_new_points() {
+        let conn = response_db();
+        conn.execute(
+            "UPDATE questions SET data_json = '{\"points\":2,\"correct\":true,\"explanation\":\"Q1\"}' WHERE id = 'q-a'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO questions (id, case_id, order_index, type, prompt, data_json) VALUES ('q-a2', 'case-a', 1, 'trueFalse', 'Q2', '{\"points\":3,\"correct\":true,\"explanation\":\"Q2\"}')",
+            [],
+        )
+        .unwrap();
+        persist_response(
+            &conn,
+            "attempt-a",
+            "q-a",
+            json!(true),
+            2.0,
+            "profile-a",
+            "case-a",
+        );
+        persist_response(
+            &conn,
+            "attempt-a",
+            "q-a2",
+            json!(true),
+            2.0,
+            "profile-a",
+            "case-a",
+        );
+        complete_attempt_record(
+            &conn,
+            "attempt-a".into(),
+            4.0,
+            "profile-a".into(),
+            "case-a".into(),
+        )
+        .unwrap();
+
+        conn.execute(
+            "UPDATE questions SET data_json = '{\"points\":10,\"correct\":true,\"explanation\":\"New Q2\"}' WHERE id = 'q-a2'",
+            [],
+        )
+        .unwrap();
+        let summary = progress_summary_record(&conn, Some("profile-a".into())).unwrap();
+        assert_eq!(summary.average_percent, 80.0);
+        let old = get_attempt_details_record(&conn, "attempt-a".into(), Some("profile-a".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.attempt.max_score, 5.0);
+
+        add_attempt(&conn, "attempt-new", "case-a", "profile-a");
+        persist_response(
+            &conn,
+            "attempt-new",
+            "q-a",
+            json!(true),
+            2.0,
+            "profile-a",
+            "case-a",
+        );
+        persist_response(
+            &conn,
+            "attempt-new",
+            "q-a2",
+            json!(true),
+            10.0,
+            "profile-a",
+            "case-a",
+        );
+        let new_attempt = complete_attempt_record(
+            &conn,
+            "attempt-new".into(),
+            12.0,
+            "profile-a".into(),
+            "case-a".into(),
+        )
+        .unwrap();
+        assert_eq!(new_attempt.max_score_at_completion, Some(12.0));
+        assert_eq!(new_attempt.total_question_count_at_completion, Some(2));
+    }
+
+    #[test]
+    fn measurement_statistics_normalize_mm_and_cm() {
+        let conn = response_db();
+        conn.execute(
+            "UPDATE questions SET type = 'measurement', data_json = '{\"points\":1,\"correctValue\":60,\"tolerance\":5,\"unit\":\"mm\",\"plane\":\"axial\"}' WHERE id = 'q-a'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO questions (id, case_id, order_index, type, prompt, data_json) VALUES ('q-cm', 'case-a', 1, 'measurement', 'CM', '{\"points\":1,\"correctValue\":6,\"tolerance\":0.5,\"unit\":\"cm\",\"plane\":\"axial\"}')",
+            [],
+        )
+        .unwrap();
+        let mm = persist_response(
+            &conn,
+            "attempt-a",
+            "q-a",
+            json!(65.0),
+            1.0,
+            "profile-a",
+            "case-a",
+        );
+        let cm = persist_response(
+            &conn,
+            "attempt-a",
+            "q-cm",
+            json!(6.5),
+            1.0,
+            "profile-a",
+            "case-a",
+        );
+        assert_eq!(mm.absolute_error_mm, Some(5.0));
+        assert_eq!(cm.absolute_error_mm, Some(5.0));
+        let summary = progress_summary_record(&conn, Some("profile-a".into())).unwrap();
+        assert_eq!(summary.measurement_questions_answered, 2);
+        assert_eq!(summary.average_measurement_error, Some(5.0));
+    }
+
+    #[test]
+    fn profile_deletion_is_transactional_and_isolated() {
+        let mut conn = response_db();
+        persist_response(
+            &conn,
+            "attempt-a",
+            "q-a",
+            json!(true),
+            1.0,
+            "profile-a",
+            "case-a",
+        );
+        add_attempt(&conn, "attempt-b", "case-b", "profile-b");
+        persist_response(
+            &conn,
+            "attempt-b",
+            "q-b",
+            json!(true),
+            1.0,
+            "profile-b",
+            "case-b",
+        );
+        for (id, scope, profile) in [
+            ("plan-a", "learner", Some("profile-a")),
+            ("plan-b", "learner", Some("profile-b")),
+            ("reference", "reference", None),
+        ] {
+            conn.execute(
+                "INSERT INTO vessel_compositions (id, case_id, profile_id, scope, name, data_json, updated_at) VALUES (?1, NULL, ?2, ?3, ?1, '{}', 'now')",
+                params![id, profile, scope],
+            )
+            .unwrap();
+        }
+
+        let counts = delete_profile_learner_data_record(&mut conn, "profile-a").unwrap();
+        assert_eq!(
+            counts,
+            ProfileLearnerDataCounts {
+                attempts: 1,
+                responses: 1,
+                learner_plans: 1
+            }
+        );
+        let a_attempts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE profile_id = 'profile-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let b_attempts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE profile_id = 'profile-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let b_plans: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vessel_compositions WHERE id = 'plan-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let references: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vessel_compositions WHERE id = 'reference'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cases: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cases", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            (a_attempts, b_attempts, b_plans, references, cases),
+            (0, 1, 1, 1, 2)
+        );
+        let fk_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(fk_rows, 0);
+    }
+
+    #[test]
+    fn backup_v2_preserves_ownership_and_lists_external_volumes() {
+        let conn = response_db();
+        let existing = std::env::current_exe().unwrap();
+        let missing = existing.with_extension("definitely-missing-volume");
+        conn.execute(
+            "UPDATE cases SET volume_path = ?1 WHERE id = 'case-a'",
+            params![existing.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cases SET volume_path = ?1 WHERE id = 'case-b'",
+            params![missing.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        add_attempt(&conn, "attempt-b", "case-b", "profile-b");
+        conn.execute("INSERT INTO vessel_compositions (id, case_id, profile_id, scope, name, data_json, updated_at) VALUES ('plan-a', 'case-a', 'profile-a', 'learner', 'A', '{}', 'now')", []).unwrap();
+        let backup = build_app_backup(
+            &conn,
+            vec![json!({"id":"profile-a"}), json!({"id":"profile-b"})],
+            json!({"themeMode":"dark"}),
+        )
+        .unwrap();
+        assert_eq!(backup.format, "vascedu-backup");
+        assert_eq!(backup.version, 2);
+        assert_eq!(backup.profiles.len(), 2);
+        assert!(backup
+            .database
+            .attempts
+            .iter()
+            .any(|row| row["profileId"] == "profile-a"));
+        assert!(backup
+            .database
+            .attempts
+            .iter()
+            .any(|row| row["profileId"] == "profile-b"));
+        assert_eq!(
+            backup.database.vessel_compositions[0]["profileId"],
+            "profile-a"
+        );
+        assert_eq!(backup.external_files.len(), 2);
+        assert!(backup
+            .external_files
+            .iter()
+            .any(|entry| entry.exists_at_export));
+        assert!(backup
+            .external_files
+            .iter()
+            .any(|entry| !entry.exists_at_export));
+        assert!(backup.external_files.iter().all(|entry| !entry.embedded));
+    }
+
+    #[test]
+    fn v044_upgrade_is_idempotent_preserves_rows_and_records_ledger() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE cases (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, summary TEXT NOT NULL, category TEXT NOT NULL, volume_path TEXT, data_json TEXT NOT NULL);
+            CREATE TABLE questions (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE, order_index INTEGER NOT NULL, type TEXT NOT NULL, prompt TEXT NOT NULL, data_json TEXT NOT NULL);
+            CREATE TABLE attempts (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE, started_at TEXT NOT NULL, completed_at TEXT, score REAL, profile_id TEXT);
+            CREATE TABLE question_responses (id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE, question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE, answer_json TEXT NOT NULL, is_correct INTEGER NOT NULL, submitted_at TEXT NOT NULL, awarded_points REAL NOT NULL DEFAULT 0, max_points REAL NOT NULL DEFAULT 0, hints_used INTEGER NOT NULL DEFAULT 0, elapsed_ms INTEGER NOT NULL DEFAULT 0, penalty_points REAL NOT NULL DEFAULT 0);
+            CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, manufacturer TEXT NOT NULL, category TEXT NOT NULL, subtype TEXT, description TEXT NOT NULL, sizes_json TEXT NOT NULL DEFAULT '[]', properties_json TEXT NOT NULL DEFAULT '{}', tags_json TEXT NOT NULL DEFAULT '[]');
+            CREATE TABLE vessel_compositions (id TEXT PRIMARY KEY, case_id TEXT REFERENCES cases(id) ON DELETE SET NULL, profile_id TEXT, scope TEXT NOT NULL DEFAULT 'reference', name TEXT NOT NULL, data_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE case_bookmarks (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE, order_index INTEGER NOT NULL, title TEXT NOT NULL, note TEXT NOT NULL, plane TEXT NOT NULL, slice_index INTEGER NOT NULL, window_width REAL NOT NULL, window_level REAL NOT NULL, zoom REAL, crosshair_json TEXT, tags_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL);
+            INSERT INTO cases VALUES ('case-a','case-a','A','S','C',NULL,'{}');
+            INSERT INTO questions VALUES ('q-a','case-a',0,'trueFalse','Q','{"points":1,"correct":true}');
+            INSERT INTO attempts VALUES ('attempt-a','case-a','now','done',1,'profile-a');
+            INSERT INTO question_responses VALUES ('response-a','attempt-a','q-a','true',1,'now',1,1,0,1,0);
+            INSERT INTO vessel_compositions VALUES ('plan-a','case-a','profile-a','learner','A','{}','now');
+            "#,
+        ).unwrap();
+
+        initialize_schema(&conn).unwrap();
+        initialize_schema(&conn).unwrap();
+        for table in ["attempts", "question_responses", "vessel_compositions"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+        assert!(table_has_column(&conn, "question_responses", "question_snapshot_json").unwrap());
+        assert!(table_has_column(&conn, "attempts", "max_score_at_completion").unwrap());
+        let ledger: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 45",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fk_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!((ledger, fk_rows), (1, 0));
+    }
+
+    #[test]
+    fn failed_v045_migration_rolls_back_all_columns_and_ledger() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL); CREATE TABLE questions (id TEXT PRIMARY KEY); CREATE TABLE attempts (id TEXT PRIMARY KEY); CREATE TABLE question_responses (id TEXT PRIMARY KEY);",
+        ).unwrap();
+        assert!(apply_v045_durable_records_migration(&conn).is_err());
+        assert!(!table_has_column(&conn, "questions", "deleted_at").unwrap());
+        let ledger: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(ledger, 0);
     }
 }

@@ -137,7 +137,7 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
             <MiniStat label="Questions" value={summary?.totalQuestionsAnswered ?? 0} />
             <MiniStat label="Accuracy" value={summary ? `${Math.round(summary.accuracyPercent)}%` : '-'} />
             <MiniStat
-              label="Avg error"
+              label="Average measurement error"
               value={
                 summary?.averageMeasurementError !== null && summary?.averageMeasurementError !== undefined
                   ? `${summary.averageMeasurementError.toFixed(1)} mm`

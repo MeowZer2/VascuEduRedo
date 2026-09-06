@@ -29,7 +29,7 @@ interface ProfileContextValue {
     id: string,
     patch: Partial<Pick<Profile, 'displayName' | 'role' | 'initials' | 'avatarColor' | 'preferences'>>,
   ) => void;
-  removeProfile: (id: string) => boolean;
+  removeProfile: (id: string) => Promise<boolean>;
 }
 
 const ProfileContext = createContext<ProfileContextValue | null>(null);
@@ -96,9 +96,9 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   );
 
   const removeProfile = useCallback(
-    (id: string) => {
-      const ok = deleteProfileCore(id);
-      refresh();
+    async (id: string) => {
+      const ok = await deleteProfileCore(id);
+      if (ok) refresh();
       return ok;
     },
     [refresh],
