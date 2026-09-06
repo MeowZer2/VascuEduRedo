@@ -76,11 +76,11 @@ export function DeviceImportDialog({ existingDevices, onClose, onImported }: Dev
         <header className="modal-header">
           <div>
             <p className="eyebrow">Import devices</p>
-            <h2>Verified device catalog import</h2>
+            <h2>Device catalog import</h2>
             <p className="muted">
               Paste or load a <code>vascedu/devices@1</code> JSON payload. Data is validated before
               anything is written. Specifications should come from manufacturer / IFU sources —
-              VascEdu is an educational reference, not a source of clinical truth.
+              VascEdu records source metadata but does not infer clinical verification from it.
             </p>
           </div>
           <button type="button" className="secondary-button" onClick={requestClose} disabled={busy}>

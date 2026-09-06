@@ -66,44 +66,34 @@ function rowToQuestion(row: QuestionRow): Question {
 }
 
 /**
- * Load all cases. In desktop mode, reads from SQLite via Tauri. In browser mode (or if the
- * backend call fails), falls back to the bundled sample data so the app still renders.
+ * Load all cases. Bundled samples are browser-preview content only; a native
+ * storage failure must remain distinct from a legitimate empty library.
  */
 export async function loadCases(): Promise<VascCase[]> {
   if (!isTauriDesktop()) {
     return sampleCases;
   }
-  try {
-    const rows = await safeInvoke<CaseRow[]>('list_cases');
-    // safeInvoke returns null when not in Tauri / command unavailable — only then
-    // do we fall back to bundled samples. An empty array from SQLite is a real
-    // "all cases were deleted" state and should be respected.
-    if (!rows) return sampleCases;
-    const result: VascCase[] = [];
-    for (const row of rows) {
-      const questionRows = (await safeInvoke<QuestionRow[]>('get_case_questions', { caseId: row.id })) ?? [];
-      const bookmarks = await listCaseBookmarks(row.id);
-      result.push(rowToVascCase(row, questionRows.map(rowToQuestion), bookmarks));
-    }
-    return result;
-  } catch (error) {
-    console.error('loadCases failed, falling back to sample data:', error);
-    return sampleCases;
+  const rows = await safeInvoke<CaseRow[]>('list_cases');
+  if (!rows) throw new Error('The desktop case repository did not return a result.');
+  const result: VascCase[] = [];
+  for (const row of rows) {
+    const questionRows = await safeInvoke<QuestionRow[]>('get_case_questions', { caseId: row.id });
+    if (!questionRows) throw new Error(`Questions for "${row.title}" could not be loaded.`);
+    const bookmarks = await listCaseBookmarks(row.id);
+    result.push(rowToVascCase(row, questionRows.map(rowToQuestion), bookmarks));
   }
+  return result;
 }
 
 export async function loadCaseById(caseId: string): Promise<VascCase | undefined> {
   if (!isTauriDesktop()) {
     return sampleCases.find((c) => c.id === caseId);
   }
-  try {
-    const row = await safeInvoke<CaseRow | null>('get_case', { identifier: caseId });
-    if (!row) return sampleCases.find((c) => c.id === caseId);
-    const questionRows = (await safeInvoke<QuestionRow[]>('get_case_questions', { caseId: row.id })) ?? [];
-    const bookmarks = await listCaseBookmarks(row.id);
-    return rowToVascCase(row, questionRows.map(rowToQuestion), bookmarks);
-  } catch (error) {
-    console.error('loadCaseById failed, falling back to sample data:', error);
-    return sampleCases.find((c) => c.id === caseId);
-  }
+  const row = await safeInvoke<CaseRow | null>('get_case', { identifier: caseId });
+  if (row === null) return undefined;
+  if (!row) throw new Error('The desktop case repository did not return a result.');
+  const questionRows = await safeInvoke<QuestionRow[]>('get_case_questions', { caseId: row.id });
+  if (!questionRows) throw new Error(`Questions for "${row.title}" could not be loaded.`);
+  const bookmarks = await listCaseBookmarks(row.id);
+  return rowToVascCase(row, questionRows.map(rowToQuestion), bookmarks);
 }

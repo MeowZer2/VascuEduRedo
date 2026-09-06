@@ -41,7 +41,9 @@ function saveFallback(rows: CaseBookmark[]) {
 
 export async function listCaseBookmarks(caseId: string): Promise<CaseBookmark[]> {
   if (isTauriDesktop()) {
-    return (await safeInvoke<CaseBookmark[]>('list_case_bookmarks', { caseId })) ?? [];
+    const rows = await safeInvoke<CaseBookmark[]>('list_case_bookmarks', { caseId });
+    if (!rows) throw new Error('Case findings could not be loaded from desktop storage.');
+    return rows;
   }
   return fallbackAll()
     .filter((bookmark) => bookmark.caseId === caseId)

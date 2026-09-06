@@ -164,7 +164,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
           </div>
           <div className="brand-text">
             <strong>VascEdu</strong>
-            <small>v0.29 · LOCAL</small>
+            <small>v0.44 · INTERNAL LOCAL</small>
           </div>
           <button
             className="sidebar-collapse"
@@ -195,7 +195,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
             <span className="status-dot" />
             <span>{runtimeLabel}</span>
           </div>
-          <ProfileMenu collapsed={collapsed} />
+          <ProfileMenu collapsed={collapsed} profileSwitchBlocked={activeScreen === 'training-session'} />
         </div>
       </aside>
 
@@ -354,7 +354,13 @@ function ProfileAvatar({ profile, size = 32 }: { profile: Profile; size?: number
   );
 }
 
-function ProfileMenu({ collapsed }: { collapsed: boolean }) {
+function ProfileMenu({
+  collapsed,
+  profileSwitchBlocked,
+}: {
+  collapsed: boolean;
+  profileSwitchBlocked: boolean;
+}) {
   const { profiles, activeProfile, switchProfile, addProfile, editProfile, removeProfile } =
     useProfiles();
   const [open, setOpen] = useState(false);
@@ -387,6 +393,11 @@ function ProfileMenu({ collapsed }: { collapsed: boolean }) {
   }, [open]);
 
   function startAdd() {
+    if (profileSwitchBlocked) {
+      window.alert('Finish or leave the current practice session before switching profiles.');
+      close();
+      return;
+    }
     setName('');
     setRole('PGY-1');
     setConfirmDelete(false);
@@ -417,6 +428,11 @@ function ProfileMenu({ collapsed }: { collapsed: boolean }) {
   }
 
   function doDelete() {
+    if (profileSwitchBlocked) {
+      window.alert('Finish or leave the current practice session before switching profiles.');
+      close();
+      return;
+    }
     if (removeProfile(activeProfile.id)) close();
   }
 
@@ -465,6 +481,11 @@ function ProfileMenu({ collapsed }: { collapsed: boolean }) {
                       className="profile-row"
                       role="menuitem"
                       onClick={() => {
+                        if (profileSwitchBlocked) {
+                          window.alert('Finish or leave the current practice session before switching profiles.');
+                          close();
+                          return;
+                        }
                         switchProfile(p.id);
                         close();
                       }}

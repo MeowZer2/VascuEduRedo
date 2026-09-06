@@ -78,9 +78,15 @@ interface NrrdViewerProps {
   requestedTool?: ViewerToolMode;
   /** Called whenever the most recently completed measurement changes or is cleared. */
   onLatestMeasurementChange?: (measurement: ViewerMeasurement | null) => void;
+  onVolumeContextChange?: (context: ViewerVolumeContext | null) => void;
   onViewerStateChange?: (state: ViewerBookmarkState | null) => void;
   jumpToBookmark?: CaseBookmark | null;
   activeBookmark?: CaseBookmark | null;
+}
+
+export interface ViewerVolumeContext {
+  sourceKey: string;
+  volumeHandleId: string;
 }
 
 interface SyncFlags {
@@ -173,7 +179,22 @@ function describeDicomSeries(series: DicomSeriesInfo): string {
   );
 }
 
-function findLatestDistance(panes: PaneSnapshot[]): ViewerMeasurement | null {
+function sourceKey(source: VolumeSource): string {
+  return source.kind === 'dicom'
+    ? `dicom:${source.folderPath}:${source.seriesInstanceUid}`
+    : `nrrd:${source.path.trim() || 'sample'}`;
+}
+
+export function caseVolumeSourceKey(path: string): string {
+  return `nrrd:${path.trim() || 'sample'}`;
+}
+
+function findLatestDistance(
+  panes: PaneSnapshot[],
+  volume: VolumeInfo | null,
+  source: VolumeSource,
+): ViewerMeasurement | null {
+  if (!volume) return null;
   let best: { m: Measurement; createdAt: number } | null = null;
   for (const pane of panes) {
     for (const m of pane.measurements) {
@@ -185,9 +206,12 @@ function findLatestDistance(panes: PaneSnapshot[]): ViewerMeasurement | null {
   const m = best.m as Measurement & { type: 'distance' };
   return {
     id: m.id,
+    sourceKey: sourceKey(source),
+    volumeHandleId: volume.handleId,
     plane: m.plane,
     sliceIndex: m.sliceIndex,
     distanceMm: m.distanceMm,
+    unit: 'mm',
   };
 }
 
@@ -196,6 +220,7 @@ export function NrrdViewer({
   description,
   requestedTool,
   onLatestMeasurementChange,
+  onVolumeContextChange,
   onViewerStateChange,
   jumpToBookmark,
   activeBookmark,
@@ -243,6 +268,8 @@ export function NrrdViewer({
 
   const onLatestMeasurementChangeRef = useRef(onLatestMeasurementChange);
   onLatestMeasurementChangeRef.current = onLatestMeasurementChange;
+  const onVolumeContextChangeRef = useRef(onVolumeContextChange);
+  onVolumeContextChangeRef.current = onVolumeContextChange;
   const onViewerStateChangeRef = useRef(onViewerStateChange);
   onViewerStateChangeRef.current = onViewerStateChange;
 
@@ -257,6 +284,7 @@ export function NrrdViewer({
     setPanes([]);
     setCrosshair(null);
     setLatestMeasurement(null);
+    onVolumeContextChangeRef.current?.(null);
     setActivePane(0);
     setManualFlips(NO_MANUAL_FLIPS);
     setFocusedPaneIndex(null);
@@ -284,6 +312,7 @@ export function NrrdViewer({
           );
         }
         loadedHandle = info.handleId;
+        onVolumeContextChangeRef.current?.({ sourceKey: sourceKey(currentSource), volumeHandleId: info.handleId });
         setVolume(info);
         setPanes(
           buildPanesForLayout(info, layoutRef.current, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_LEVEL),
@@ -303,6 +332,7 @@ export function NrrdViewer({
 
     return () => {
       cancelled = true;
+      onVolumeContextChangeRef.current?.(null);
       if (loadedHandle) void releaseVolume(loadedHandle);
     };
   }, [currentSource]);
@@ -318,6 +348,8 @@ export function NrrdViewer({
   useEffect(() => {
     onLatestMeasurementChangeRef.current?.(latestMeasurement);
   }, [latestMeasurement]);
+
+  useEffect(() => () => onLatestMeasurementChangeRef.current?.(null), []);
 
   useEffect(() => {
     const pane = panes[activePane];
@@ -482,8 +514,8 @@ export function NrrdViewer({
 
   // Whenever the panes' measurements change, recompute the latest distance for quiz.
   useEffect(() => {
-    setLatestMeasurement(findLatestDistance(panes));
-  }, [panes]);
+    setLatestMeasurement(findLatestDistance(panes, volume, currentSource));
+  }, [panes, volume, currentSource]);
 
   // Helper: transform a single pane in the panes array.
   const updatePaneAt = useCallback(
@@ -688,11 +720,11 @@ export function NrrdViewer({
     });
   }
 
-  function handleClearMeasurements(paneIndex: number) {
+  function handleClearMeasurements(paneIndex: number, displayedSlice: number) {
     updatePaneAt(paneIndex, (p) => ({
       ...p,
       measurements: p.measurements.filter(
-        (m) => m.plane !== p.plane || m.sliceIndex !== p.slice,
+        (m) => m.plane !== p.plane || m.sliceIndex !== displayedSlice,
       ),
       pendingPoints: [],
       selectedMeasurementId: null,
@@ -741,10 +773,12 @@ export function NrrdViewer({
     !volume
       ? null
       : manualOverrideActive
-        ? { label: 'Manual override', tone: 'manual' }
+        ? { label: 'Manual display fallback', tone: 'manual' }
         : orientationStatus === 'trusted'
           ? { label: 'Trusted metadata', tone: 'trusted' }
-          : { label: 'Orientation uncertain', tone: 'uncertain' };
+          : orientationStatus === 'unsupported'
+            ? { label: 'Oblique MPR unsupported', tone: 'uncertain' }
+            : { label: 'Orientation uncertain', tone: 'uncertain' };
   const isShowingCaseVolume = currentSource.kind === 'nrrd' && currentSource.path === volumePath;
   const currentVolumeName = useMemo(
     () => sourceDisplayName(currentSource),
@@ -908,7 +942,7 @@ export function NrrdViewer({
               className={`orientation-badge orientation-badge-${orientationBadge.tone}`}
               title={
                 orientationBadge.tone === 'manual'
-                  ? 'Manual fallback flips are active. Use Reset orientation to revert to the metadata-derived view.'
+                  ? 'Display-only flips are active. They do not reconstruct missing anatomy or resample oblique geometry.'
                   : orientationBadge.tone === 'uncertain'
                     ? 'Orientation metadata was missing or could not be canonicalized — labels are best-effort.'
                     : 'Display orientation is ready.'
@@ -1509,7 +1543,7 @@ export function NrrdViewer({
                 onCrosshairFromPane={(point) => handleCrosshairFromPane(idx, point)}
                 onPendingPointsChange={(points) => handlePendingPointsChange(idx, points)}
                 onAddMeasurement={(m) => handleAddMeasurement(idx, m)}
-                onClearMeasurements={() => handleClearMeasurements(idx)}
+                onClearMeasurements={(displayedSlice) => handleClearMeasurements(idx, displayedSlice)}
                 onSelectMeasurement={(id) => handleSelectMeasurement(idx, id)}
               />
             );

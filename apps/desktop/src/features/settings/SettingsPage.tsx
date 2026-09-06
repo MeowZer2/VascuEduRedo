@@ -268,7 +268,7 @@ export function SettingsPage() {
               <dt>App</dt>
               <dd>{appInfo?.name ?? 'VascEdu'}</dd>
               <dt>Version</dt>
-              <dd className="mono">{appInfo?.version ?? '0.29.0'}</dd>
+              <dd className="mono">{appInfo?.version ?? '0.44.0-internal'}</dd>
               <dt>Build</dt>
               <dd className="mono">{appInfo?.build ?? 'Browser preview'}</dd>
               <dt>Backend</dt>

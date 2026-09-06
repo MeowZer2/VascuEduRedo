@@ -13,6 +13,8 @@ import { TrainingStartPage, type TrainingFilters } from './features/training/Tra
 import { TrainingWorkspace } from './features/training/TrainingWorkspace';
 import { applyThemeMode, getStoredThemeMode } from './lib/appearance';
 import { loadCases } from './lib/content';
+import { friendlyError } from './lib/productionState';
+import { isTauriDesktop } from './lib/tauri';
 import { ProfileProvider, useProfiles } from './lib/profileContext';
 import { UnsavedChangesProvider } from './lib/productionState';
 import type { VesselPlanScope } from './lib/vesselComposer';
@@ -42,9 +44,10 @@ function AppInner() {
   const { activeProfileId } = useProfiles();
   const [screen, setScreen] = useState<Screen>('home');
   const [confirmNavigation, setConfirmNavigation] = useState<() => boolean>(() => () => true);
-  // Start with sample data so the first paint isn't blank, then swap to SQLite-backed cases
-  // once the backend responds. Browser mode keeps the sample data.
-  const [cases, setCases] = useState<VascCase[]>(sampleCases);
+  // Browser preview uses bundled samples. Native mode starts empty so a storage
+  // failure can never be mistaken for real course content.
+  const [cases, setCases] = useState<VascCase[]>(() => isTauriDesktop() ? [] : sampleCases);
+  const [contentError, setContentError] = useState<string | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string>(sampleCases[0]?.id ?? '');
   const [composerCaseId, setComposerCaseId] = useState<string | null>(null);
   const [composerScope, setComposerScope] = useState<VesselPlanScope>('learner');
@@ -66,13 +69,19 @@ function AppInner() {
   }, []);
 
   const refreshCases = useCallback(async () => {
-    const loaded = await loadCases();
-    setCases(loaded);
-    setSelectedCaseId((current) => {
-      if (current && loaded.find((c) => c.id === current)) return current;
-      return loaded[0]?.id ?? '';
-    });
-    return loaded;
+    try {
+      const loaded = await loadCases();
+      setCases(loaded);
+      setContentError(null);
+      setSelectedCaseId((current) => {
+        if (current && loaded.find((c) => c.id === current)) return current;
+        return loaded[0]?.id ?? '';
+      });
+      return loaded;
+    } catch (caught) {
+      setContentError(friendlyError(caught, 'The case library could not be loaded from desktop storage.'));
+      throw caught;
+    }
   }, []);
 
   useEffect(() => {
@@ -91,6 +100,11 @@ function AppInner() {
 
   function startCase(caseId: string) {
     if (!confirmNavigation()) return;
+    const target = cases.find((item) => item.id === caseId);
+    if (!target || target.questions.length === 0) {
+      window.alert('This case has no usable questions and cannot start practice.');
+      return;
+    }
     setSelectedCaseId(caseId);
     setScreen('training-session');
   }
@@ -99,7 +113,7 @@ function AppInner() {
     const matching = cases.find((item) => {
       const difficultyOk = filters.difficulty === 'any' || item.difficulty === filters.difficulty;
       const topicOk = filters.topic === 'any' || item.categoryId === filters.topic;
-      return difficultyOk && topicOk;
+      return difficultyOk && topicOk && item.questions.length > 0;
     });
     if (!matching) return;
     setSelectedCaseId(matching.id);
@@ -137,6 +151,12 @@ function AppInner() {
   return (
     <UnsavedChangesProvider onReady={(nextConfirmNavigation) => setConfirmNavigation(() => nextConfirmNavigation)}>
       <AppShell activeScreen={screen} onNavigate={handleNavigate}>
+        {contentError ? (
+          <div className="admin-banner error" role="alert">
+            Case library unavailable: {contentError}
+            <button type="button" className="secondary-button small" onClick={() => void refreshCases().catch(() => undefined)}>Retry</button>
+          </div>
+        ) : null}
         {screen === 'home' && (
           <HomePage
             key={`home-${activeProfileId}`}
@@ -145,8 +165,7 @@ function AppInner() {
             onStart={() => {
               const target = selectedCase ?? cases[0];
               if (target) {
-                setSelectedCaseId(target.id);
-                setScreen('training-session');
+                startCase(target.id);
               } else {
                 setScreen('cases');
               }

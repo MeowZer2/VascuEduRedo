@@ -19,17 +19,11 @@ export interface AttemptRow {
  * Create a new attempt row for the given case. Returns null in browser mode (the caller
  * should treat that as "no persistent attempt id" and continue with in-memory scoring).
  */
-export async function createAttempt(caseId: string): Promise<AttemptRow | null> {
+export async function createAttempt(caseId: string, profileId = getActiveProfileId()): Promise<AttemptRow | null> {
   if (!isTauriDesktop()) return null;
-  try {
-    return await safeInvoke<AttemptRow>('create_attempt', {
-      caseId,
-      profileId: getActiveProfileId(),
-    });
-  } catch (error) {
-    console.error('createAttempt failed:', error);
-    return null;
-  }
+  const row = await safeInvoke<AttemptRow>('create_attempt', { caseId, profileId });
+  if (!row) throw new Error('The practice attempt could not be initialized.');
+  return row;
 }
 
 export async function submitQuestionResponse(
@@ -37,48 +31,51 @@ export async function submitQuestionResponse(
   questionId: string,
   answer: UserAnswer,
   result: QuestionResult,
+  expectedProfileId: string,
+  expectedCaseId: string,
 ): Promise<void> {
   if (!isTauriDesktop()) return;
-  try {
-    await safeInvoke('submit_question_response', {
-      attemptId,
-      questionId,
-      answerJson: answer,
-      isCorrect: result.correct,
-      awardedPoints: result.awardedPoints,
-      maxPoints: result.maxPoints,
-      hintsUsed: result.hintsUsed,
-      elapsedMs: result.elapsedMs,
-      penaltyPoints: result.penaltyPoints,
-    });
-  } catch (error) {
-    console.error('submitQuestionResponse failed:', error);
-  }
+  const row = await safeInvoke('submit_question_response', {
+    attemptId,
+    questionId,
+    answerJson: answer,
+    isCorrect: result.correct,
+    awardedPoints: result.awardedPoints,
+    maxPoints: result.maxPoints,
+    hintsUsed: result.hintsUsed,
+    elapsedMs: result.elapsedMs,
+    penaltyPoints: result.penaltyPoints,
+    expectedProfileId,
+    expectedCaseId,
+  });
+  if (!row) throw new Error('The answer was not durably saved.');
 }
 
-export async function completeAttempt(attemptId: string, score: number): Promise<AttemptRow | null> {
+export async function completeAttempt(
+  attemptId: string,
+  score: number,
+  expectedProfileId: string,
+  expectedCaseId: string,
+): Promise<AttemptRow | null> {
   if (!isTauriDesktop()) return null;
-  try {
-    return await safeInvoke<AttemptRow>('complete_attempt', { attemptId, score });
-  } catch (error) {
-    console.error('completeAttempt failed:', error);
-    return null;
-  }
+  const row = await safeInvoke<AttemptRow>('complete_attempt', {
+    attemptId,
+    score,
+    expectedProfileId,
+    expectedCaseId,
+  });
+  if (!row) throw new Error('The completed attempt was not durably saved.');
+  return row;
 }
 
 export async function listAttempts(caseId?: string): Promise<AttemptRow[]> {
   if (!isTauriDesktop()) return [];
-  try {
-    return (
-      (await safeInvoke<AttemptRow[]>('list_attempts', {
-        caseId: caseId ?? null,
-        profileId: getActiveProfileId(),
-      })) ?? []
-    );
-  } catch (error) {
-    console.error('listAttempts failed:', error);
-    return [];
-  }
+  const rows = await safeInvoke<AttemptRow[]>('list_attempts', {
+    caseId: caseId ?? null,
+    profileId: getActiveProfileId(),
+  });
+  if (!rows) throw new Error('Practice attempts could not be loaded from desktop storage.');
+  return rows;
 }
 
 /**

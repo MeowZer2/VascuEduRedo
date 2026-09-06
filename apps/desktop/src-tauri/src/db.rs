@@ -99,7 +99,8 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn open_and_initialize(app: &AppHandle) -> Result<Connection, String> {
     let path = database_path(app)?;
-    let conn = Connection::open(&path).map_err(|e| format!("Cannot open SQLite at {path:?}: {e}"))?;
+    let conn =
+        Connection::open(&path).map_err(|e| format!("Cannot open SQLite at {path:?}: {e}"))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|e| format!("Cannot enable foreign keys: {e}"))?;
     initialize_schema(&conn)?;
@@ -322,8 +323,22 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("Schema init failed: {e}"))?;
     ensure_question_response_columns(conn)?;
+    ensure_question_response_idempotency_index(conn)?;
     ensure_attempt_profile_column(conn)?;
     ensure_vessel_composition_scope_columns(conn)?;
+    Ok(())
+}
+
+/// Existing databases may contain historical duplicates, so adding a UNIQUE
+/// index could make startup fail. New writes are serialized through DbState and
+/// upserted by (attempt_id, question_id); this additive index keeps that lookup
+/// efficient without deleting or rewriting historical rows.
+fn ensure_question_response_idempotency_index(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_responses_attempt_question ON question_responses(attempt_id, question_id)",
+        [],
+    )
+    .map_err(|e| format!("question response idempotency index failed: {e}"))?;
     Ok(())
 }
 
@@ -374,8 +389,11 @@ fn ensure_question_response_columns(conn: &Connection) -> Result<(), String> {
 
 fn ensure_vessel_composition_scope_columns(conn: &Connection) -> Result<(), String> {
     if !table_has_column(conn, "vessel_compositions", "profile_id")? {
-        conn.execute("ALTER TABLE vessel_compositions ADD COLUMN profile_id TEXT", [])
-            .map_err(|e| format!("vessel_compositions add column profile_id failed: {e}"))?;
+        conn.execute(
+            "ALTER TABLE vessel_compositions ADD COLUMN profile_id TEXT",
+            [],
+        )
+        .map_err(|e| format!("vessel_compositions add column profile_id failed: {e}"))?;
     }
     if !table_has_column(conn, "vessel_compositions", "scope")? {
         conn.execute(
@@ -430,8 +448,8 @@ fn seed_if_empty(conn: &Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    let seed: Value = serde_json::from_str(SEED_JSON)
-        .map_err(|e| format!("Seed JSON is malformed: {e}"))?;
+    let seed: Value =
+        serde_json::from_str(SEED_JSON).map_err(|e| format!("Seed JSON is malformed: {e}"))?;
     let cases = seed
         .get("cases")
         .and_then(Value::as_array)
@@ -563,7 +581,10 @@ fn parse_question_row(
 
 #[tauri::command]
 pub fn list_cases(state: State<DbState>) -> Result<Vec<CaseRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let mut stmt = conn
         .prepare("SELECT id, slug, title, summary, category, volume_path, data_json FROM cases ORDER BY title")
         .map_err(|e| format!("list_cases prepare failed: {e}"))?;
@@ -585,14 +606,25 @@ pub fn list_cases(state: State<DbState>) -> Result<Vec<CaseRow>, String> {
     for row in rows {
         let (id, slug, title, summary, category, volume_path, data_json) =
             row.map_err(|e| format!("list_cases row failed: {e}"))?;
-        out.push(parse_case_row(id, slug, title, summary, category, volume_path, data_json)?);
+        out.push(parse_case_row(
+            id,
+            slug,
+            title,
+            summary,
+            category,
+            volume_path,
+            data_json,
+        )?);
     }
     Ok(out)
 }
 
 #[tauri::command]
 pub fn get_case(state: State<DbState>, identifier: String) -> Result<Option<CaseRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let mut stmt = conn
         .prepare(
             "SELECT id, slug, title, summary, category, volume_path, data_json FROM cases WHERE id = ?1 OR slug = ?1 LIMIT 1",
@@ -601,7 +633,10 @@ pub fn get_case(state: State<DbState>, identifier: String) -> Result<Option<Case
     let mut rows = stmt
         .query(params![identifier])
         .map_err(|e| format!("get_case query failed: {e}"))?;
-    if let Some(row) = rows.next().map_err(|e| format!("get_case next failed: {e}"))? {
+    if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("get_case next failed: {e}"))?
+    {
         let id: String = row.get(0).map_err(|e| e.to_string())?;
         let slug: String = row.get(1).map_err(|e| e.to_string())?;
         let title: String = row.get(2).map_err(|e| e.to_string())?;
@@ -628,7 +663,10 @@ pub fn get_case_questions(
     state: State<DbState>,
     case_id: String,
 ) -> Result<Vec<QuestionRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let mut stmt = conn
         .prepare(
             "SELECT id, case_id, order_index, type, prompt, data_json FROM questions WHERE case_id = ?1 ORDER BY order_index",
@@ -651,7 +689,14 @@ pub fn get_case_questions(
     for row in rows {
         let (id, case_id, order_index, qtype, prompt, data_json) =
             row.map_err(|e| format!("get_case_questions row failed: {e}"))?;
-        out.push(parse_question_row(id, case_id, order_index, qtype, prompt, data_json)?);
+        out.push(parse_question_row(
+            id,
+            case_id,
+            order_index,
+            qtype,
+            prompt,
+            data_json,
+        )?);
     }
     Ok(out)
 }
@@ -666,7 +711,10 @@ pub fn create_attempt(
     case_id: String,
     profile_id: Option<String>,
 ) -> Result<AttemptRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let id = Uuid::new_v4().to_string();
     let started_at = now_iso();
     let profile_id = profile_id.unwrap_or_else(|| LEGACY_PROFILE_ID.to_string());
@@ -696,7 +744,10 @@ pub fn reassign_attempts_profile(
     if from_profile_id == to_profile_id {
         return Ok(0);
     }
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let changed = conn
         .execute(
             "UPDATE attempts SET profile_id = ?2 WHERE profile_id = ?1",
@@ -718,9 +769,20 @@ pub fn submit_question_response(
     hints_used: Option<i64>,
     elapsed_ms: Option<i64>,
     penalty_points: Option<f64>,
+    expected_profile_id: String,
+    expected_case_id: String,
 ) -> Result<QuestionResponseRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let id = Uuid::new_v4().to_string();
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let existing_id = validate_response_target(
+        &conn,
+        &attempt_id,
+        &question_id,
+        &expected_profile_id,
+        &expected_case_id,
+    )?;
     let submitted_at = now_iso();
     let answer_str = answer_json.to_string();
     let awarded_points = awarded_points.unwrap_or(0.0);
@@ -728,29 +790,49 @@ pub fn submit_question_response(
     let hints_used = hints_used.unwrap_or(0);
     let elapsed_ms = elapsed_ms.unwrap_or(0);
     let penalty_points = penalty_points.unwrap_or(0.0);
-    conn.execute(
-        r#"
-        INSERT INTO question_responses (
-            id, attempt_id, question_id, answer_json, is_correct, submitted_at,
-            awarded_points, max_points, hints_used, elapsed_ms, penalty_points
+    let is_retry = existing_id.is_some();
+    let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    if is_retry {
+        conn.execute(
+            r#"UPDATE question_responses SET answer_json = ?1, is_correct = ?2,
+               submitted_at = ?3, awarded_points = ?4, max_points = ?5,
+               hints_used = ?6, elapsed_ms = ?7, penalty_points = ?8
+               WHERE id = ?9"#,
+            params![
+                answer_str,
+                is_correct as i64,
+                submitted_at,
+                awarded_points,
+                max_points,
+                hints_used,
+                elapsed_ms,
+                penalty_points,
+                id
+            ],
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-        "#,
-        params![
-            id,
-            attempt_id,
-            question_id,
-            answer_str,
-            is_correct as i64,
-            submitted_at,
-            awarded_points,
-            max_points,
-            hints_used,
-            elapsed_ms,
-            penalty_points
-        ],
-    )
-    .map_err(|e| format!("submit_question_response insert failed: {e}"))?;
+        .map_err(|e| format!("submit_question_response retry update failed: {e}"))?;
+    } else {
+        conn.execute(
+            r#"INSERT INTO question_responses (
+                id, attempt_id, question_id, answer_json, is_correct, submitted_at,
+                awarded_points, max_points, hints_used, elapsed_ms, penalty_points
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
+            params![
+                id,
+                attempt_id,
+                question_id,
+                answer_str,
+                is_correct as i64,
+                submitted_at,
+                awarded_points,
+                max_points,
+                hints_used,
+                elapsed_ms,
+                penalty_points
+            ],
+        )
+        .map_err(|e| format!("submit_question_response insert failed: {e}"))?;
+    }
     Ok(QuestionResponseRow {
         id,
         attempt_id,
@@ -766,29 +848,156 @@ pub fn submit_question_response(
     })
 }
 
+fn validate_response_target(
+    conn: &Connection,
+    attempt_id: &str,
+    question_id: &str,
+    expected_profile_id: &str,
+    expected_case_id: &str,
+) -> Result<Option<String>, String> {
+    let (attempt_case_id, attempt_profile_id, completed_at): (String, String, Option<String>) =
+        conn.query_row(
+            "SELECT case_id, profile_id, completed_at FROM attempts WHERE id = ?1",
+            params![attempt_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| "The practice attempt no longer exists.".to_string())?;
+    if attempt_profile_id != expected_profile_id {
+        return Err("The practice attempt belongs to a different profile.".to_string());
+    }
+    if attempt_case_id != expected_case_id {
+        return Err("The practice attempt belongs to a different case.".to_string());
+    }
+    if completed_at.is_some() {
+        return Err("This practice attempt is already complete.".to_string());
+    }
+    let question_case_id: String = conn
+        .query_row(
+            "SELECT case_id FROM questions WHERE id = ?1",
+            params![question_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "The question no longer exists.".to_string())?;
+    if question_case_id != attempt_case_id {
+        return Err("The question does not belong to this attempt's case.".to_string());
+    }
+
+    let existing_id = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM question_responses WHERE attempt_id = ?1 AND question_id = ?2 ORDER BY submitted_at DESC, rowid DESC LIMIT 1")
+            .map_err(|e| format!("submit_question_response lookup prepare failed: {e}"))?;
+        let mut rows = stmt
+            .query(params![attempt_id, question_id])
+            .map_err(|e| format!("submit_question_response lookup failed: {e}"))?;
+        rows.next()
+            .map_err(|e| format!("submit_question_response lookup row failed: {e}"))?
+            .map(|row| row.get::<_, String>(0))
+            .transpose()
+            .map_err(|e| format!("submit_question_response existing id failed: {e}"))?
+    };
+    Ok(existing_id)
+}
+
 #[tauri::command]
 pub fn complete_attempt(
     state: State<DbState>,
     attempt_id: String,
     score: f64,
+    expected_profile_id: String,
+    expected_case_id: String,
 ) -> Result<AttemptRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    if !score.is_finite() {
+        return Err("Attempt score must be finite.".to_string());
+    }
+    let (attempt_case_id, attempt_profile_id, existing_completed): (
+        String,
+        String,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT case_id, profile_id, completed_at FROM attempts WHERE id = ?1",
+            params![attempt_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| "The practice attempt no longer exists.".to_string())?;
+    if attempt_profile_id != expected_profile_id || attempt_case_id != expected_case_id {
+        return Err("The practice attempt does not belong to this session.".to_string());
+    }
+    if existing_completed.is_some() {
+        return fetch_attempt_row(&conn, &attempt_id);
+    }
+    let question_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM questions WHERE case_id = ?1",
+            params![attempt_case_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("complete_attempt question count failed: {e}"))?;
+    if question_count == 0 {
+        return Err("A case with no questions cannot be completed.".to_string());
+    }
+    let response_count: i64 = conn
+        .query_row(
+            r#"SELECT COUNT(DISTINCT qr.question_id)
+               FROM question_responses qr
+               JOIN questions q ON q.id = qr.question_id
+               WHERE qr.attempt_id = ?1 AND q.case_id = ?2"#,
+            params![attempt_id, attempt_case_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("complete_attempt response count failed: {e}"))?;
+    if response_count != question_count {
+        return Err(format!("Cannot complete attempt: {response_count} of {question_count} answers are durably saved."));
+    }
+    let durable_score = durable_attempt_score(&conn, &attempt_id, &attempt_case_id)?;
     let completed_at = now_iso();
     let updated = conn
         .execute(
             "UPDATE attempts SET completed_at = ?1, score = ?2 WHERE id = ?3",
-            params![completed_at, score, attempt_id],
+            params![completed_at, durable_score, attempt_id],
         )
         .map_err(|e| format!("complete_attempt update failed: {e}"))?;
     if updated == 0 {
         return Err(format!("No attempt found with id {attempt_id}"));
     }
 
-    let mut stmt = conn
-        .prepare("SELECT id, case_id, started_at, completed_at, score FROM attempts WHERE id = ?1")
-        .map_err(|e| format!("complete_attempt select prepare failed: {e}"))?;
-    let row = stmt
-        .query_row(params![attempt_id], |row| {
+    fetch_attempt_row(&conn, &attempt_id)
+}
+
+fn durable_attempt_score(
+    conn: &Connection,
+    attempt_id: &str,
+    case_id: &str,
+) -> Result<f64, String> {
+    conn.query_row(
+        r#"SELECT COALESCE(SUM(qr.awarded_points), 0)
+           FROM question_responses qr
+           JOIN questions q ON q.id = qr.question_id
+           WHERE qr.attempt_id = ?1
+             AND q.case_id = ?2
+             AND qr.rowid = (
+               SELECT latest.rowid
+               FROM question_responses latest
+               WHERE latest.attempt_id = qr.attempt_id
+                 AND latest.question_id = qr.question_id
+               ORDER BY latest.submitted_at DESC, latest.rowid DESC
+               LIMIT 1
+             )"#,
+        params![attempt_id, case_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("complete_attempt score failed: {e}"))
+}
+
+fn fetch_attempt_row(conn: &Connection, attempt_id: &str) -> Result<AttemptRow, String> {
+    conn.query_row(
+        "SELECT id, case_id, started_at, completed_at, score FROM attempts WHERE id = ?1",
+        params![attempt_id],
+        |row| {
             Ok(AttemptRow {
                 id: row.get(0)?,
                 case_id: row.get(1)?,
@@ -796,9 +1005,9 @@ pub fn complete_attempt(
                 completed_at: row.get(3)?,
                 score: row.get(4)?,
             })
-        })
-        .map_err(|e| format!("complete_attempt select failed: {e}"))?;
-    Ok(row)
+        },
+    )
+    .map_err(|e| format!("attempt select failed: {e}"))
 }
 
 #[tauri::command]
@@ -807,7 +1016,10 @@ pub fn list_attempts(
     case_id: Option<String>,
     profile_id: Option<String>,
 ) -> Result<Vec<AttemptRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let mut conditions: Vec<&str> = Vec::new();
     let mut args: Vec<&dyn rusqlite::ToSql> = Vec::new();
     if let Some(ref c) = case_id {
@@ -870,7 +1082,11 @@ fn seed_devices_if_empty(conn: &Connection) -> Result<(), String> {
             .and_then(Value::as_str)
             .ok_or_else(|| "Seed device missing id".to_string())?
             .to_string();
-        let name = device.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let name = device
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let manufacturer = device
             .get("manufacturer")
             .and_then(Value::as_str)
@@ -965,18 +1181,19 @@ fn merge_case_data(mut data: Value, volume_path: &Option<String>, category: &str
     }
     if let Some(obj) = data.as_object_mut() {
         // categoryId mirrors the top-level category column.
-        obj.insert("categoryId".to_string(), Value::String(category.to_string()));
+        obj.insert(
+            "categoryId".to_string(),
+            Value::String(category.to_string()),
+        );
 
         // Ensure a volume object exists; sync its path with volume_path.
-        let volume_entry = obj
-            .entry("volume".to_string())
-            .or_insert_with(|| {
-                serde_json::json!({
-                    "type": "nrrd",
-                    "path": Value::Null,
-                    "description": ""
-                })
-            });
+        let volume_entry = obj.entry("volume".to_string()).or_insert_with(|| {
+            serde_json::json!({
+                "type": "nrrd",
+                "path": Value::Null,
+                "description": ""
+            })
+        });
         if let Some(vobj) = volume_entry.as_object_mut() {
             let path_val = match volume_path {
                 Some(p) if !p.is_empty() => Value::String(p.clone()),
@@ -1045,7 +1262,10 @@ pub fn admin_get_case_with_questions(
     state: State<DbState>,
     case_id: String,
 ) -> Result<Option<CaseWithQuestions>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
 
     let exists: i64 = conn
         .query_row(
@@ -1081,14 +1301,24 @@ pub fn admin_get_case_with_questions(
     for row in rows {
         let (id, case_id, order_index, qtype, prompt, data_json) =
             row.map_err(|e| format!("admin_get_case_with_questions row failed: {e}"))?;
-        questions.push(parse_question_row(id, case_id, order_index, qtype, prompt, data_json)?);
+        questions.push(parse_question_row(
+            id,
+            case_id,
+            order_index,
+            qtype,
+            prompt,
+            data_json,
+        )?);
     }
     Ok(Some(CaseWithQuestions { case, questions }))
 }
 
 #[tauri::command]
 pub fn admin_create_case(state: State<DbState>, input: AdminCaseInput) -> Result<CaseRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let id = Uuid::new_v4().to_string();
     let data = merge_case_data(
         input.data.unwrap_or_else(|| serde_json::json!({})),
@@ -1110,7 +1340,10 @@ pub fn admin_update_case(
     case_id: String,
     input: AdminCaseInput,
 ) -> Result<CaseRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
 
     // If caller didn't supply data, preserve the existing blob and only patch the
     // mirrored volume.path / categoryId fields.
@@ -1143,7 +1376,10 @@ pub fn admin_update_case(
 
 #[tauri::command]
 pub fn admin_delete_case(state: State<DbState>, case_id: String) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     // Manual cascade so this works even if foreign_keys pragma was missed.
     conn.execute("DELETE FROM question_responses WHERE attempt_id IN (SELECT id FROM attempts WHERE case_id = ?1)", params![case_id])
         .map_err(|e| format!("admin_delete_case responses failed: {e}"))?;
@@ -1181,7 +1417,11 @@ pub fn admin_create_question(
     case_id: String,
     input: AdminQuestionInput,
 ) -> Result<QuestionRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    validate_question_for_save(&conn, &input)?;
     let id = Uuid::new_v4().to_string();
     let order_index = match input.order_index {
         Some(i) => i,
@@ -1202,7 +1442,11 @@ pub fn admin_update_question(
     question_id: String,
     input: AdminQuestionInput,
 ) -> Result<QuestionRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    validate_question_for_save(&conn, &input)?;
     let data_json = input.data.to_string();
 
     let updated = if let Some(order_index) = input.order_index {
@@ -1225,7 +1469,10 @@ pub fn admin_update_question(
 
 #[tauri::command]
 pub fn admin_delete_question(state: State<DbState>, question_id: String) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let removed = conn
         .execute("DELETE FROM questions WHERE id = ?1", params![question_id])
         .map_err(|e| format!("admin_delete_question failed: {e}"))?;
@@ -1241,7 +1488,10 @@ pub fn admin_reorder_questions(
     case_id: String,
     ordered_question_ids: Vec<String>,
 ) -> Result<(), String> {
-    let mut conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let mut conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("admin_reorder_questions begin failed: {e}"))?;
@@ -1475,7 +1725,10 @@ pub fn progress_summary(
     state: State<DbState>,
     profile_id: Option<String>,
 ) -> Result<ProgressSummary, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
 
     // Profile scoping: attempt rows filter on `profile_id`; response rows filter
     // transitively via their attempt. Empty fragments when no profile is given
@@ -1524,7 +1777,11 @@ pub fn progress_summary(
         .query_row(
             &format!(
                 "SELECT COUNT(*) FROM question_responses{}",
-                if has_p { format!(" WHERE{r_scope}") } else { String::new() }
+                if has_p {
+                    format!(" WHERE{r_scope}")
+                } else {
+                    String::new()
+                }
             ),
             rusqlite::params_from_iter(prof_args().iter()),
             |r| r.get(0),
@@ -1534,7 +1791,11 @@ pub fn progress_summary(
         .query_row(
             &format!(
                 "SELECT COUNT(*) FROM question_responses WHERE is_correct = 1{}",
-                if has_p { format!(" AND{r_scope}") } else { String::new() }
+                if has_p {
+                    format!(" AND{r_scope}")
+                } else {
+                    String::new()
+                }
             ),
             rusqlite::params_from_iter(prof_args().iter()),
             |r| r.get(0),
@@ -1564,7 +1825,8 @@ pub fn progress_summary(
             })
             .map_err(|e| format!("progress_summary scores query failed: {e}"))?;
         for r in rows {
-            let (case_id, score) = r.map_err(|e| format!("progress_summary scores row failed: {e}"))?;
+            let (case_id, score) =
+                r.map_err(|e| format!("progress_summary scores row failed: {e}"))?;
             completed_scores.push(score);
             if let Some(max) = max_scores.get(&case_id).copied() {
                 if let Some(p) = percent_of(score, max) {
@@ -1591,12 +1853,14 @@ pub fn progress_summary(
     let mut measurement_errors: Vec<f64> = Vec::new();
     {
         let mut stmt = conn
-            .prepare(
-                &format!(
-                    "SELECT question_id, answer_json FROM question_responses{}",
-                    if has_p { format!(" WHERE{r_scope}") } else { String::new() }
-                ),
-            )
+            .prepare(&format!(
+                "SELECT question_id, answer_json FROM question_responses{}",
+                if has_p {
+                    format!(" WHERE{r_scope}")
+                } else {
+                    String::new()
+                }
+            ))
             .map_err(|e| format!("progress_summary measurement prepare failed: {e}"))?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(prof_args().iter()), |row| {
@@ -1606,7 +1870,9 @@ pub fn progress_summary(
         for r in rows {
             let (qid, answer_json) =
                 r.map_err(|e| format!("progress_summary measurement row failed: {e}"))?;
-            let Some(meta) = questions_meta.get(&qid) else { continue };
+            let Some(meta) = questions_meta.get(&qid) else {
+                continue;
+            };
             if meta.qtype != "measurement" {
                 continue;
             }
@@ -1647,7 +1913,10 @@ pub fn progress_by_case(
     state: State<DbState>,
     profile_id: Option<String>,
 ) -> Result<Vec<CaseProgress>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let questions_meta = load_questions_meta(&conn)?;
     let max_scores = case_max_scores_from(&questions_meta);
 
@@ -1769,7 +2038,10 @@ pub fn get_recent_activity(
     limit: Option<i64>,
     profile_id: Option<String>,
 ) -> Result<Vec<AttemptSummary>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let limit = limit.unwrap_or(10).clamp(1, 200);
     let questions_meta = load_questions_meta(&conn)?;
     let max_scores = case_max_scores_from(&questions_meta);
@@ -1836,7 +2108,10 @@ pub fn get_attempt_details(
     attempt_id: String,
     profile_id: Option<String>,
 ) -> Result<Option<AttemptDetails>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
 
     // Scope by profile so one profile cannot open another's attempt by id.
     let mut args: Vec<&dyn rusqlite::ToSql> = vec![&attempt_id];
@@ -1935,8 +2210,7 @@ pub fn get_attempt_details(
                 hints_used,
                 elapsed_ms,
                 penalty_points,
-            ) =
-                r.map_err(|e| format!("get_attempt_details responses row failed: {e}"))?;
+            ) = r.map_err(|e| format!("get_attempt_details responses row failed: {e}"))?;
             let answer: Value = serde_json::from_str(&answer_json).unwrap_or(Value::Null);
             // Last write wins (rows are ordered ascending by submitted_at).
             response_map.insert(
@@ -2008,7 +2282,11 @@ pub fn get_attempt_details(
                     Some(meta.is_correct),
                     Some(meta.submitted_at),
                     Some(awarded),
-                    if meta.max_points > 0.0 { meta.max_points } else { points },
+                    if meta.max_points > 0.0 {
+                        meta.max_points
+                    } else {
+                        points
+                    },
                     meta.hints_used,
                     Some(meta.elapsed_ms),
                     Some(meta.penalty_points),
@@ -2150,12 +2428,42 @@ fn slug_is_valid(slug: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
 }
 
+fn validate_choice_ids(choices: &[Value], question_label: &str, errors: &mut Vec<ValidationIssue>) {
+    let mut seen = std::collections::HashSet::new();
+    for (index, choice) in choices.iter().enumerate() {
+        let id = choice
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let label = choice
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if id.is_empty() {
+            errors.push(ValidationIssue::err(
+                format!("{question_label}.choices[{index}].id"),
+                "Choice id must be a non-empty string.",
+            ));
+        } else if !seen.insert(id.to_string()) {
+            errors.push(ValidationIssue::err(
+                format!("{question_label}.choices[{index}].id"),
+                format!("Choice id '{id}' is duplicated."),
+            ));
+        }
+        if label.is_empty() {
+            errors.push(ValidationIssue::err(
+                format!("{question_label}.choices[{index}].label"),
+                "Choice label must be a non-empty string.",
+            ));
+        }
+    }
+}
+
 /// Validate a case + questions package. Returns errors (block save/import) and warnings
 /// (content-health hints — don't block, but worth flagging).
-fn validate_case(
-    case: &ImportCaseInput,
-    questions: &[ImportQuestionInput],
-) -> ValidationReport {
+fn validate_case(case: &ImportCaseInput, questions: &[ImportQuestionInput]) -> ValidationReport {
     let mut errors: Vec<ValidationIssue> = Vec::new();
     let mut warnings: Vec<ValidationIssue> = Vec::new();
 
@@ -2268,9 +2576,9 @@ fn validate_case(
     }
 
     if questions.is_empty() {
-        warnings.push(ValidationIssue::warn(
+        errors.push(ValidationIssue::err(
             "questions",
-            "Case has no questions yet.",
+            "Case has no usable questions and cannot be training-ready.",
         ));
     }
 
@@ -2281,6 +2589,18 @@ fn validate_case(
             errors.push(ValidationIssue::err(
                 format!("{qid_label}.prompt"),
                 "Question prompt is required.",
+            ));
+        }
+        let points_ok = q
+            .data
+            .get("points")
+            .and_then(Value::as_f64)
+            .map(|value| value.is_finite() && value > 0.0)
+            .unwrap_or(false);
+        if !points_ok {
+            errors.push(ValidationIssue::err(
+                format!("{qid_label}.points"),
+                "Question points must be a finite number greater than zero.",
             ));
         }
         match q.r#type.as_str() {
@@ -2297,6 +2617,7 @@ fn validate_case(
                         "multipleChoice needs at least 2 choices.",
                     ));
                 }
+                validate_choice_ids(&choices, &qid_label, &mut errors);
                 let correct = q
                     .data
                     .get("correctChoiceId")
@@ -2330,6 +2651,7 @@ fn validate_case(
                         "multiSelect needs at least 2 choices.",
                     ));
                 }
+                validate_choice_ids(&choices, &qid_label, &mut errors);
                 let correct = q
                     .data
                     .get("correctChoiceIds")
@@ -2358,7 +2680,12 @@ fn validate_case(
                 }
             }
             "trueFalse" => {
-                if !q.data.get("correct").map(Value::is_boolean).unwrap_or(false) {
+                if !q
+                    .data
+                    .get("correct")
+                    .map(Value::is_boolean)
+                    .unwrap_or(false)
+                {
                     errors.push(ValidationIssue::err(
                         format!("{qid_label}.correct"),
                         "trueFalse needs a boolean `correct`.",
@@ -2366,19 +2693,27 @@ fn validate_case(
                 }
             }
             "numeric" => {
-                if q.data.get("correctValue").and_then(Value::as_f64).is_none() {
+                if !q
+                    .data
+                    .get("correctValue")
+                    .and_then(Value::as_f64)
+                    .is_some_and(f64::is_finite)
+                {
                     errors.push(ValidationIssue::err(
                         format!("{qid_label}.correctValue"),
                         "numeric needs a correctValue.",
                     ));
                 }
-                if let Some(t) = q.data.get("tolerance").and_then(Value::as_f64) {
-                    if t < 0.0 {
-                        errors.push(ValidationIssue::err(
-                            format!("{qid_label}.tolerance"),
-                            "tolerance must be ≥ 0.",
-                        ));
-                    }
+                let tolerance_ok = q
+                    .data
+                    .get("tolerance")
+                    .and_then(Value::as_f64)
+                    .is_some_and(|t| t.is_finite() && t >= 0.0);
+                if !tolerance_ok {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.tolerance"),
+                        "tolerance must be a finite number ≥ 0.",
+                    ));
                 }
             }
             "shortText" => {
@@ -2411,24 +2746,42 @@ fn validate_case(
                     .data
                     .get("correctValue")
                     .and_then(Value::as_f64)
-                    .map(|v| v > 0.0)
+                    .map(f64::is_finite)
                     .unwrap_or(false);
                 if !value_ok {
                     errors.push(ValidationIssue::err(
                         format!("{qid_label}.correctValue"),
-                        "measurement requires correctValue > 0.",
+                        "measurement requires a finite correctValue.",
                     ));
                 }
                 let tol_ok = q
                     .data
                     .get("tolerance")
                     .and_then(Value::as_f64)
-                    .map(|v| v >= 0.0)
+                    .map(|v| v.is_finite() && v >= 0.0)
                     .unwrap_or(false);
                 if !tol_ok {
                     errors.push(ValidationIssue::err(
                         format!("{qid_label}.tolerance"),
                         "measurement requires tolerance ≥ 0.",
+                    ));
+                }
+                let target_ok = q
+                    .data
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
+                if !target_ok {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.target"),
+                        "measurement requires a non-empty target.",
+                    ));
+                }
+                let unit = q.data.get("unit").and_then(Value::as_str).unwrap_or("");
+                if !["mm", "cm"].contains(&unit) {
+                    errors.push(ValidationIssue::err(
+                        format!("{qid_label}.unit"),
+                        "measurement unit must be mm or cm.",
                     ));
                 }
             }
@@ -2509,6 +2862,91 @@ fn case_row_to_import_input(row: &CaseRow) -> ImportCaseInput {
     }
 }
 
+fn validate_question_for_save(conn: &Connection, input: &AdminQuestionInput) -> Result<(), String> {
+    let placeholder_case = ImportCaseInput {
+        slug: "validation-case".to_string(),
+        title: "Validation case".to_string(),
+        summary: "Validation".to_string(),
+        category: "validation".to_string(),
+        volume_path: Some("sample".to_string()),
+        data: Some(json!({
+            "estimatedMinutes": 1,
+            "difficulty": "beginner",
+            "learningObjectives": ["Validate question"]
+        })),
+    };
+    let question = ImportQuestionInput {
+        r#type: input.r#type.clone(),
+        prompt: input.prompt.clone(),
+        order_index: input.order_index,
+        data: input.data.clone(),
+    };
+    let mut report = validate_case(&placeholder_case, &[question]);
+    if input.r#type == "deviceSelection" {
+        if let Some(device_id) = input.data.get("correctDeviceId").and_then(Value::as_str) {
+            if !device_id.trim().is_empty() {
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM devices WHERE id = ?1",
+                        params![device_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| format!("device reference validation failed: {e}"))?;
+                if count == 0 {
+                    report.errors.push(ValidationIssue::err(
+                        "questions[0].correctDeviceId",
+                        "correctDeviceId does not reference an existing catalog device.",
+                    ));
+                }
+            }
+        }
+    }
+    if report.errors.is_empty() {
+        return Ok(());
+    }
+    let summary = report
+        .errors
+        .iter()
+        .take(5)
+        .map(|issue| format!("{}: {}", issue.field, issue.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!("Question save rejected: {summary}"))
+}
+
+fn append_device_reference_issues(
+    conn: &Connection,
+    questions: &[ImportQuestionInput],
+    report: &mut ValidationReport,
+) -> Result<(), String> {
+    for (index, question) in questions.iter().enumerate() {
+        if question.r#type != "deviceSelection" {
+            continue;
+        }
+        let Some(device_id) = question.data.get("correctDeviceId").and_then(Value::as_str) else {
+            continue;
+        };
+        if device_id.trim().is_empty() {
+            continue;
+        }
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM devices WHERE id = ?1",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("device reference validation failed: {e}"))?;
+        if count == 0 {
+            report.errors.push(ValidationIssue::err(
+                format!("questions[{index}].correctDeviceId"),
+                format!("Device reference '{device_id}' is unresolved in the current catalog."),
+            ));
+        }
+    }
+    report.ok = report.errors.is_empty();
+    Ok(())
+}
+
 fn question_row_to_import_input(row: &QuestionRow) -> ImportQuestionInput {
     ImportQuestionInput {
         r#type: row.r#type.clone(),
@@ -2528,7 +2966,10 @@ pub fn admin_validate_case(
     state: State<DbState>,
     case_id: String,
 ) -> Result<ValidationReport, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let case = fetch_case_row(&conn, &case_id)?;
 
     let mut stmt = conn
@@ -2568,6 +3009,7 @@ pub fn admin_validate_case(
         .map(question_row_to_import_input)
         .collect();
     let mut report = validate_case(&case_input, &question_inputs);
+    append_device_reference_issues(&conn, &question_inputs, &mut report)?;
 
     // Tag question-level issues with the actual question ids so the frontend can highlight rows.
     for issue in report.errors.iter_mut().chain(report.warnings.iter_mut()) {
@@ -2589,7 +3031,10 @@ fn parse_question_index(field: &str) -> Option<usize> {
 
 #[tauri::command]
 pub fn admin_export_case(state: State<DbState>, case_id: String) -> Result<CaseExport, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let case = fetch_case_row(&conn, &case_id)?;
 
     let mut stmt = conn
@@ -2645,9 +3090,13 @@ pub fn admin_import_case(
     payload: CaseImportPayload,
     options: Option<ImportOptions>,
 ) -> Result<CaseRow, String> {
-    let mut conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let mut conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
 
-    let report = validate_case(&payload.case, &payload.questions);
+    let mut report = validate_case(&payload.case, &payload.questions);
+    append_device_reference_issues(&conn, &payload.questions, &mut report)?;
     if !report.ok {
         let summary: Vec<String> = report
             .errors
@@ -2880,11 +3329,11 @@ pub fn list_vessel_compositions(
     profile_id: Option<String>,
     scope: Option<String>,
 ) -> Result<Vec<VesselCompositionRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let case_filter = case_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let case_filter = case_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let profile_filter = profile_id
         .as_deref()
         .map(str::trim)
@@ -2955,7 +3404,10 @@ pub fn get_vessel_composition(
     state: State<DbState>,
     composition_id: String,
 ) -> Result<Option<VesselCompositionRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     fetch_vessel_composition_row(&conn, &composition_id)
 }
 
@@ -2964,7 +3416,10 @@ pub fn save_vessel_composition(
     state: State<DbState>,
     input: VesselCompositionInput,
 ) -> Result<VesselCompositionRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let name = input.name.trim();
     if name.is_empty() {
         return Err("Composition name is required.".into());
@@ -2981,9 +3436,11 @@ pub fn save_vessel_composition(
         .map(str::to_string);
     if let Some(cid) = &case_id {
         let exists: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cases WHERE id = ?1", params![cid], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM cases WHERE id = ?1",
+                params![cid],
+                |r| r.get(0),
+            )
             .map_err(|e| format!("save_vessel_composition case check failed: {e}"))?;
         if exists == 0 {
             return Err(format!("No case found with id {cid}"));
@@ -3078,7 +3535,10 @@ fn parse_case_bookmark_row(
     })
 }
 
-fn fetch_case_bookmark_row(conn: &Connection, bookmark_id: &str) -> Result<Option<CaseBookmarkRow>, String> {
+fn fetch_case_bookmark_row(
+    conn: &Connection,
+    bookmark_id: &str,
+) -> Result<Option<CaseBookmarkRow>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json FROM case_bookmarks WHERE id = ?1 LIMIT 1",
@@ -3110,8 +3570,14 @@ fn fetch_case_bookmark_row(conn: &Connection, bookmark_id: &str) -> Result<Optio
 }
 
 #[tauri::command]
-pub fn list_case_bookmarks(state: State<DbState>, case_id: String) -> Result<Vec<CaseBookmarkRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+pub fn list_case_bookmarks(
+    state: State<DbState>,
+    case_id: String,
+) -> Result<Vec<CaseBookmarkRow>, String> {
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let mut stmt = conn
         .prepare(
             "SELECT id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json FROM case_bookmarks WHERE case_id = ?1 ORDER BY order_index, updated_at",
@@ -3137,8 +3603,20 @@ pub fn list_case_bookmarks(state: State<DbState>, case_id: String) -> Result<Vec
         .map_err(|e| format!("list_case_bookmarks query failed: {e}"))?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, case_id, order_index, title, note, plane, slice_index, window_width, window_level, zoom, crosshair_json, tags_json) =
-            row.map_err(|e| format!("list_case_bookmarks row failed: {e}"))?;
+        let (
+            id,
+            case_id,
+            order_index,
+            title,
+            note,
+            plane,
+            slice_index,
+            window_width,
+            window_level,
+            zoom,
+            crosshair_json,
+            tags_json,
+        ) = row.map_err(|e| format!("list_case_bookmarks row failed: {e}"))?;
         out.push(parse_case_bookmark_row(
             id,
             case_id,
@@ -3158,8 +3636,14 @@ pub fn list_case_bookmarks(state: State<DbState>, case_id: String) -> Result<Vec
 }
 
 #[tauri::command]
-pub fn save_case_bookmark(state: State<DbState>, input: CaseBookmarkInput) -> Result<CaseBookmarkRow, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+pub fn save_case_bookmark(
+    state: State<DbState>,
+    input: CaseBookmarkInput,
+) -> Result<CaseBookmarkRow, String> {
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let title = input.title.trim();
     if title.is_empty() {
         return Err("Bookmark title is required.".into());
@@ -3168,7 +3652,11 @@ pub fn save_case_bookmark(state: State<DbState>, input: CaseBookmarkInput) -> Re
         return Err("Bookmark plane must be axial, coronal, or sagittal.".into());
     }
     let exists_case: i64 = conn
-        .query_row("SELECT COUNT(*) FROM cases WHERE id = ?1", params![input.case_id], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM cases WHERE id = ?1",
+            params![input.case_id],
+            |r| r.get(0),
+        )
         .map_err(|e| format!("save_case_bookmark case check failed: {e}"))?;
     if exists_case == 0 {
         return Err(format!("No case found with id {}", input.case_id));
@@ -3243,9 +3731,15 @@ pub fn save_case_bookmark(state: State<DbState>, input: CaseBookmarkInput) -> Re
 
 #[tauri::command]
 pub fn delete_case_bookmark(state: State<DbState>, bookmark_id: String) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    conn.execute("DELETE FROM case_bookmarks WHERE id = ?1", params![bookmark_id])
-        .map_err(|e| format!("delete_case_bookmark failed: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    conn.execute(
+        "DELETE FROM case_bookmarks WHERE id = ?1",
+        params![bookmark_id],
+    )
+    .map_err(|e| format!("delete_case_bookmark failed: {e}"))?;
     Ok(())
 }
 
@@ -3255,7 +3749,10 @@ pub fn reorder_case_bookmarks(
     case_id: String,
     ordered_bookmark_ids: Vec<String>,
 ) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     for (index, id) in ordered_bookmark_ids.iter().enumerate() {
         conn.execute(
             "UPDATE case_bookmarks SET order_index = ?1, updated_at = ?2 WHERE id = ?3 AND case_id = ?4",
@@ -3352,7 +3849,10 @@ pub fn list_devices(
     state: State<DbState>,
     filter: Option<DeviceFilter>,
 ) -> Result<Vec<DeviceRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let filter = filter.unwrap_or_default();
 
     let mut sql = String::from(
@@ -3363,7 +3863,11 @@ pub fn list_devices(
         sql.push_str(" AND category = ?");
         params_vec.push(cat.to_string());
     }
-    if let Some(man) = filter.manufacturer.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(man) = filter
+        .manufacturer
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         sql.push_str(" AND manufacturer = ?");
         params_vec.push(man.to_string());
     }
@@ -3404,8 +3908,17 @@ pub fn list_devices(
 
     let mut out = Vec::new();
     for r in rows {
-        let (id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json) =
-            r.map_err(|e| format!("list_devices row failed: {e}"))?;
+        let (
+            id,
+            name,
+            manufacturer,
+            category,
+            subtype,
+            description,
+            sizes_json,
+            properties_json,
+            tags_json,
+        ) = r.map_err(|e| format!("list_devices row failed: {e}"))?;
         out.push(parse_device_row(
             id,
             name,
@@ -3451,13 +3964,19 @@ fn fetch_device_row(conn: &Connection, device_id: &str) -> Result<Option<DeviceR
 
 #[tauri::command]
 pub fn get_device(state: State<DbState>, device_id: String) -> Result<Option<DeviceRow>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     fetch_device_row(&conn, &device_id)
 }
 
 #[tauri::command]
 pub fn list_device_categories(state: State<DbState>) -> Result<Vec<String>, String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let mut stmt = conn
         .prepare("SELECT DISTINCT category FROM devices ORDER BY category ASC")
         .map_err(|e| format!("list_device_categories prepare failed: {e}"))?;
@@ -3497,12 +4016,12 @@ fn validate_device_input(input: &DeviceInput) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn admin_create_device(
-    state: State<DbState>,
-    input: DeviceInput,
-) -> Result<DeviceRow, String> {
+pub fn admin_create_device(state: State<DbState>, input: DeviceInput) -> Result<DeviceRow, String> {
     validate_device_input(&input)?;
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let id = format!("dev-{}", Uuid::new_v4());
     conn.execute(
         "INSERT INTO devices (id, name, manufacturer, category, subtype, description, sizes_json, properties_json, tags_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -3530,7 +4049,10 @@ pub fn admin_update_device(
     input: DeviceInput,
 ) -> Result<DeviceRow, String> {
     validate_device_input(&input)?;
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let updated = conn
         .execute(
             "UPDATE devices SET name = ?1, manufacturer = ?2, category = ?3, subtype = ?4, description = ?5, sizes_json = ?6, properties_json = ?7, tags_json = ?8 WHERE id = ?9",
@@ -3556,7 +4078,10 @@ pub fn admin_update_device(
 
 #[tauri::command]
 pub fn admin_delete_device(state: State<DbState>, device_id: String) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let conn = state
+        .conn
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
     let removed = conn
         .execute("DELETE FROM devices WHERE id = ?1", params![device_id])
         .map_err(|e| format!("admin_delete_device failed: {e}"))?;
@@ -3564,4 +4089,142 @@ pub fn admin_delete_device(state: State<DbState>, device_id: String) -> Result<(
         return Err(format!("No device found with id {device_id}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validation_case() -> ImportCaseInput {
+        ImportCaseInput {
+            slug: "case-a".into(),
+            title: "Case A".into(),
+            summary: "Summary".into(),
+            category: "vascular".into(),
+            volume_path: Some("sample".into()),
+            data: Some(
+                json!({"estimatedMinutes": 5, "difficulty": "beginner", "learningObjectives": ["Objective"]}),
+            ),
+        }
+    }
+
+    #[test]
+    fn zero_questions_and_invalid_numeric_questions_block_readiness() {
+        let empty = validate_case(&validation_case(), &[]);
+        assert!(!empty.ok);
+        assert!(empty.errors.iter().any(|issue| issue.field == "questions"));
+
+        let invalid = ImportQuestionInput {
+            r#type: "numeric".into(),
+            prompt: "Number?".into(),
+            order_index: Some(0),
+            data: json!({"points": 0, "correctValue": "NaN"}),
+        };
+        let report = validate_case(&validation_case(), &[invalid]);
+        assert!(!report.ok);
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.field.ends_with(".points")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.field.ends_with(".correctValue")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.field.ends_with(".tolerance")));
+    }
+
+    fn response_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO cases (id, slug, title, summary, category, volume_path, data_json) VALUES ('case-a', 'case-a', 'A', 'S', 'C', NULL, '{}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cases (id, slug, title, summary, category, volume_path, data_json) VALUES ('case-b', 'case-b', 'B', 'S', 'C', NULL, '{}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO questions (id, case_id, order_index, type, prompt, data_json) VALUES ('q-a', 'case-a', 0, 'trueFalse', 'Q', '{\"points\":1,\"correct\":true}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO questions (id, case_id, order_index, type, prompt, data_json) VALUES ('q-b', 'case-b', 0, 'trueFalse', 'Q', '{\"points\":1,\"correct\":true}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO attempts (id, case_id, started_at, completed_at, score, profile_id) VALUES ('attempt-a', 'case-a', 'now', NULL, NULL, 'profile-a')",
+            [],
+        ).unwrap();
+        conn
+    }
+
+    #[test]
+    fn response_target_enforces_attempt_ownership_case_and_open_state() {
+        let conn = response_db();
+        assert!(
+            validate_response_target(&conn, "attempt-a", "q-a", "profile-b", "case-a")
+                .unwrap_err()
+                .contains("different profile")
+        );
+        assert!(
+            validate_response_target(&conn, "attempt-a", "q-b", "profile-a", "case-a")
+                .unwrap_err()
+                .contains("does not belong")
+        );
+        conn.execute(
+            "UPDATE attempts SET completed_at = 'done' WHERE id = 'attempt-a'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            validate_response_target(&conn, "attempt-a", "q-a", "profile-a", "case-a")
+                .unwrap_err()
+                .contains("already complete")
+        );
+    }
+
+    #[test]
+    fn response_retry_reuses_the_existing_attempt_question_row() {
+        let conn = response_db();
+        assert_eq!(
+            validate_response_target(&conn, "attempt-a", "q-a", "profile-a", "case-a").unwrap(),
+            None
+        );
+        conn.execute(
+            "INSERT INTO question_responses (id, attempt_id, question_id, answer_json, is_correct, submitted_at) VALUES ('response-a', 'attempt-a', 'q-a', 'true', 1, 'now')",
+            [],
+        ).unwrap();
+        assert_eq!(
+            validate_response_target(&conn, "attempt-a", "q-a", "profile-a", "case-a").unwrap(),
+            Some("response-a".into())
+        );
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM question_responses WHERE attempt_id = 'attempt-a' AND question_id = 'q-a'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn additive_idempotency_index_preserves_historical_duplicates() {
+        let conn = response_db();
+        for (id, points) in [("legacy-response-1", 1.0), ("legacy-response-2", 2.0)] {
+            conn.execute(
+                "INSERT INTO question_responses (id, attempt_id, question_id, answer_json, is_correct, submitted_at, awarded_points) VALUES (?1, 'attempt-a', 'q-a', 'true', 1, ?1, ?2)",
+                params![id, points],
+            ).unwrap();
+        }
+        initialize_schema(&conn).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM question_responses WHERE attempt_id = 'attempt-a' AND question_id = 'q-a'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            durable_attempt_score(&conn, "attempt-a", "case-a").unwrap(),
+            2.0
+        );
+        assert_eq!(
+            validate_response_target(&conn, "attempt-a", "q-a", "profile-a", "case-a").unwrap(),
+            Some("legacy-response-2".into())
+        );
+    }
 }

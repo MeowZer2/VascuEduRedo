@@ -19,13 +19,21 @@ export function AttemptReview({ attemptId, onClose }: AttemptReviewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
 
   // Pre-fetch devices once so deviceSelection rows can render names cheaply.
   useEffect(() => {
     let cancelled = false;
-    void listDevices().then((rows) => {
-      if (!cancelled) setDevices(rows);
-    });
+    void listDevices()
+      .then((rows) => {
+        if (!cancelled) setDevices(rows);
+      })
+      .catch((caught) => {
+        if (cancelled) return;
+        setDeviceError(
+          caught instanceof Error ? caught.message : 'The device catalog could not be loaded.',
+        );
+      });
     return () => {
       cancelled = true;
     };
@@ -92,6 +100,11 @@ export function AttemptReview({ attemptId, onClose }: AttemptReviewProps) {
 
         {loading && <p className="muted">Loading attempt…</p>}
         {error && <p className="admin-banner error">{error}</p>}
+        {deviceError && (
+          <p className="admin-banner error" role="alert">
+            Device names are unavailable: {deviceError}
+          </p>
+        )}
 
         {details && (
           <>

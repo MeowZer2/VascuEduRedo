@@ -88,6 +88,7 @@ export function HomePage({
 
   return (
     <div className="page">
+      {dashboard.error ? <div className="admin-banner error" role="alert">{dashboard.error}</div> : null}
       {/* Hero — featured continue card */}
       <section className="hero frame-corners">
         <span className="corner tl" />

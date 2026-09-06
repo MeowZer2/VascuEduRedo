@@ -6,12 +6,12 @@ use db::{
     admin_delete_device, admin_delete_question, admin_export_case, admin_get_case_with_questions,
     admin_import_case, admin_list_cases, admin_reorder_questions, admin_update_case,
     admin_update_device, admin_update_question, admin_validate_case, admin_validate_case_payload,
-    complete_attempt, create_attempt, delete_case_bookmark, get_attempt_details, get_case,
-    export_app_backup, get_case_questions, get_device, get_recent_activity, get_vessel_composition,
+    complete_attempt, create_attempt, delete_case_bookmark, export_app_backup, get_attempt_details,
+    get_case, get_case_questions, get_device, get_recent_activity, get_vessel_composition,
     list_attempts, list_case_bookmarks, list_cases, list_device_categories, list_devices,
     list_vessel_compositions, open_and_initialize, progress_by_case, progress_summary,
-    reassign_attempts_profile, reorder_case_bookmarks,
-    save_case_bookmark, save_vessel_composition, submit_question_response, DbState,
+    reassign_attempts_profile, reorder_case_bookmarks, save_case_bookmark, save_vessel_composition,
+    submit_question_response, DbState,
 };
 use serde::Serialize;
 use tauri::Manager;

@@ -37,6 +37,7 @@ import {
   snapToGrid,
   treatmentMarkerLabel,
   validateVesselCompositionData,
+  vesselPlanDocumentKey,
   type AnatomyTemplate,
   type BifurcationNode,
   type ComposerPoint,
@@ -1749,9 +1750,19 @@ export function VesselComposerPage({
 
           <PlanSummaryPanel
             compositionName={compositionName}
-            onNameChange={setCompositionName}
+            onNameChange={(value) => {
+              if (vesselPlanDocumentKey(compositionName, caseId, planScope) !== vesselPlanDocumentKey(value, caseId, planScope)) {
+                setIsDirty(true);
+              }
+              setCompositionName(value);
+            }}
             caseId={caseId}
-            onCaseChange={setCaseId}
+            onCaseChange={(value) => {
+              if (vesselPlanDocumentKey(compositionName, caseId, planScope) !== vesselPlanDocumentKey(compositionName, value, planScope)) {
+                setIsDirty(true);
+              }
+              setCaseId(value);
+            }}
             readOnly={!canModifyPlan}
             cases={cases}
             linkedCaseTitle={selectedCase?.title ?? null}

@@ -1,8 +1,10 @@
 import { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { NrrdViewer, type ViewerMeasurement } from '../../components/NrrdViewer';
+import { NrrdViewer, caseVolumeSourceKey, type ViewerMeasurement, type ViewerVolumeContext } from '../../components/NrrdViewer';
 import { ProceduralPlanViewer } from '../../components/ProceduralPlanViewer';
 import { createAttempt } from '../../lib/attempts';
 import { saveAttempt } from '../../lib/progress';
+import { friendlyError } from '../../lib/productionState';
+import { useProfiles } from '../../lib/profileContext';
 import { listVesselCompositions, type VesselCompositionRow } from '../../lib/vesselComposer';
 import type { AttemptResult, CaseBookmark, MeasurementQuestion, VascCase } from '../../types';
 import { QuestionPanel, formatDuration } from './QuestionPanel';
@@ -57,13 +59,18 @@ function saveWorkspacePrefs(prefs: WorkspacePrefs) {
 }
 
 export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: TrainingWorkspaceProps) {
+  const { activeProfileId } = useProfiles();
+  const [sessionProfileId] = useState(activeProfileId);
   const [workspacePrefs, setWorkspacePrefs] = useState<WorkspacePrefs>(() => loadWorkspacePrefs());
   const [latestMeasurement, setLatestMeasurement] = useState<ViewerMeasurement | null>(null);
+  const [viewerVolumeContext, setViewerVolumeContext] = useState<ViewerVolumeContext | null>(null);
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const [workspaceView, setWorkspaceView] = useState<'imaging' | 'procedure'>('imaging');
   const [proceduralPlan, setProceduralPlan] = useState<VesselCompositionRow | null>(null);
   const [activeProceduralStepId, setActiveProceduralStepId] = useState<string>('');
   const [attemptId, setAttemptId] = useState<string | null>(null);
+  const [attemptState, setAttemptState] = useState<'initializing' | 'ready' | 'error'>('initializing');
+  const [attemptError, setAttemptError] = useState<string | null>(null);
   const [completedAttempt, setCompletedAttempt] = useState<AttemptResult | null>(null);
   const [activeBookmark, setActiveBookmark] = useState<CaseBookmark | null>(null);
   const [jumpBookmark, setJumpBookmark] = useState<CaseBookmark | null>(null);
@@ -72,14 +79,28 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
   // null and we just track the attempt locally without persistent ids.
   useEffect(() => {
     let cancelled = false;
-    createAttempt(vascCase.id).then((attempt) => {
-      if (cancelled) return;
-      setAttemptId(attempt?.id ?? null);
-    });
+    if (vascCase.questions.length === 0) {
+      setAttemptState('error');
+      setAttemptError('This case has no usable questions. Choose another case or ask an author to correct it.');
+      return () => { cancelled = true; };
+    }
+    setAttemptState('initializing');
+    setAttemptError(null);
+    createAttempt(vascCase.id, sessionProfileId)
+      .then((attempt) => {
+        if (cancelled) return;
+        setAttemptId(attempt?.id ?? null);
+        setAttemptState('ready');
+      })
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        setAttemptState('error');
+        setAttemptError(friendlyError(caught, 'Practice could not initialize durable storage.'));
+      });
     return () => {
       cancelled = true;
     };
-  }, [vascCase.id]);
+  }, [sessionProfileId, vascCase.id, vascCase.questions.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -129,7 +150,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
   }, [activeQuestion?.id, activeQuestion?.proceduralStepId, proceduralPlan, proceduralSteps]);
 
   function handleComplete(attempt: AttemptResult) {
-    saveAttempt(attempt);
+    saveAttempt(attempt, sessionProfileId);
     setCompletedAttempt(attempt);
   }
 
@@ -255,6 +276,7 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             description={vascCase.volume.description}
             requestedTool={requestedTool}
             onLatestMeasurementChange={setLatestMeasurement}
+            onVolumeContextChange={setViewerVolumeContext}
             jumpToBookmark={jumpBookmark}
             activeBookmark={activeBookmark}
           />
@@ -343,22 +365,43 @@ export function TrainingWorkspace({ vascCase, onFinish, onChooseCase }: Training
             ) : null}
           </section>
         ) : null}
-        {!asideCollapsed && completedAttempt ? (
-          <CaseCompletionSummary attempt={completedAttempt} onFinish={onFinish} />
-        ) : !asideCollapsed ? (
-          <QuestionPanel
-            vascCase={vascCase}
-            attemptId={attemptId}
-            latestMeasurement={latestMeasurement}
-            onComplete={handleComplete}
-            onQuestionChange={setActiveQuestionIndex}
-            bookmarks={vascCase.bookmarks ?? []}
-            onJumpToBookmark={jumpToBookmark}
-            proceduralPlan={proceduralPlan}
-            activeProceduralStepId={activeProceduralStep?.id}
-            onJumpToProceduralStep={jumpToProceduralStep}
-          />
-        ) : null}
+        {completedAttempt ? (
+          <div hidden={asideCollapsed}>
+            <CaseCompletionSummary attempt={completedAttempt} onFinish={onFinish} />
+          </div>
+        ) : (
+          <div hidden={asideCollapsed}>
+            {attemptState === 'initializing' ? (
+              <section className="question-card" aria-live="polite">
+                <h3>Initializing practice session…</h3>
+                <p className="muted">Answers will unlock when durable session storage is ready.</p>
+              </section>
+            ) : null}
+            {attemptState === 'error' ? (
+              <section className="question-card">
+                <h3>Practice session unavailable</h3>
+                <div className="admin-banner error">{attemptError}</div>
+              </section>
+            ) : null}
+            {attemptState === 'ready' ? (
+              <QuestionPanel
+                vascCase={vascCase}
+                attemptId={attemptId}
+                sessionProfileId={sessionProfileId}
+                expectedMeasurementSourceKey={caseVolumeSourceKey(vascCase.volume.path ?? 'sample')}
+                expectedMeasurementVolumeHandleId={viewerVolumeContext?.volumeHandleId ?? null}
+                latestMeasurement={latestMeasurement}
+                onComplete={handleComplete}
+                onQuestionChange={setActiveQuestionIndex}
+                bookmarks={vascCase.bookmarks ?? []}
+                onJumpToBookmark={jumpToBookmark}
+                proceduralPlan={proceduralPlan}
+                activeProceduralStepId={activeProceduralStep?.id}
+                onJumpToProceduralStep={jumpToProceduralStep}
+              />
+            ) : null}
+          </div>
+        )}
       </aside>
     </div>
   );

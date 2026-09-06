@@ -232,6 +232,10 @@ export interface VesselCompositionRow {
 
 export type VesselPlanScope = 'reference' | 'learner';
 
+export function vesselPlanDocumentKey(name: string, caseId: string | null, scope: VesselPlanScope): string {
+  return JSON.stringify([name, caseId ?? '', scope]);
+}
+
 export interface VesselCompositionInput {
   id?: string | null;
   caseId?: string | null;
@@ -583,7 +587,7 @@ export async function getVesselComposition(compositionId: string): Promise<Vesse
     });
     if (row) return fromWire(row);
   }
-  return readLocalRows().find((row) => row.id === compositionId) ?? null;
+  return readAllLocalRows().find((row) => row.id === compositionId) ?? null;
 }
 
 export async function saveVesselComposition(
@@ -603,7 +607,10 @@ export async function saveVesselComposition(
   }
 
   const now = new Date().toISOString();
-  const rows = readLocalRows();
+  // Saving must operate on the complete collection. readLocalRows() defaults
+  // to reference scope for listing, which would otherwise erase learner rows
+  // outside the current profile/case when the filtered result is written back.
+  const rows = readAllLocalRows();
   const id = input.id || makeLocalId();
   const next: VesselCompositionRow = {
     id,
@@ -1016,12 +1023,8 @@ function fromWire(row: VesselCompositionWire): VesselCompositionRow {
 }
 
 function readLocalRows(options: VesselCompositionListOptions = {}): VesselCompositionRow[] {
-  const rows = readJson<VesselCompositionWire[]>(LOCAL_KEY, []);
+  const normalized = readAllLocalRows();
   const scope = options.scope ?? 'reference';
-  const normalized = rows
-    .filter((row) => row && typeof row.id === 'string')
-    .map(fromWire)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return normalized.filter((row) => {
     if (options.caseId !== undefined && options.caseId !== null && options.caseId !== '' && row.caseId !== options.caseId) {
       return false;
@@ -1030,6 +1033,14 @@ function readLocalRows(options: VesselCompositionListOptions = {}): VesselCompos
     if (scope === 'learner' && options.profileId && row.profileId !== options.profileId) return false;
     return true;
   });
+}
+
+function readAllLocalRows(): VesselCompositionRow[] {
+  const rows = readJson<VesselCompositionWire[]>(LOCAL_KEY, []);
+  return rows
+    .filter((row) => row && typeof row.id === 'string')
+    .map(fromWire)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 function normalizeCompositionListOptions(

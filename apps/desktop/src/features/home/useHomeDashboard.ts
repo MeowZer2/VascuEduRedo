@@ -41,6 +41,7 @@ export interface HomeDashboardCategory {
 
 export interface HomeDashboardState {
   loading: boolean;
+  error: string | null;
   source: HomeDashboardSource;
   fallbackReason: 'review-unavailable' | 'sqlite-summary-unavailable' | null;
   summary: {
@@ -78,20 +79,23 @@ export function useHomeDashboard({
 
     async function loadDashboard() {
       if (isReviewAvailable()) {
-        setDashboard(emptyDashboard('sqlite', true));
-        const [summary, byCase, recent] = await Promise.all([
-          fetchProgressSummary(),
-          fetchProgressByCase(),
-          fetchRecentActivity(RECENT_ACTIVITY_LIMIT),
-        ]);
-        if (cancelled) return;
-
-        if (summary) {
-          setDashboard(buildSqliteDashboard(summary, byCase, recent, caseIndex));
-          return;
+        setDashboard((current) => ({ ...current, source: 'sqlite', loading: true, error: null }));
+        try {
+          const [summary, byCase, recent] = await Promise.all([
+            fetchProgressSummary(),
+            fetchProgressByCase(),
+            fetchRecentActivity(RECENT_ACTIVITY_LIMIT),
+          ]);
+          if (cancelled) return;
+          if (summary) setDashboard(buildSqliteDashboard(summary, byCase, recent, caseIndex));
+        } catch {
+          if (cancelled) return;
+          setDashboard((current) => ({
+            ...current,
+            loading: false,
+            error: 'Profile progress could not be loaded from desktop storage. Try again from Progress.',
+          }));
         }
-
-        setDashboard(buildFallbackDashboard(getFallbackProgressSummary(), 'sqlite-summary-unavailable'));
         return;
       }
 
@@ -110,6 +114,7 @@ export function useHomeDashboard({
 function emptyDashboard(source: HomeDashboardSource, loading: boolean): HomeDashboardState {
   return {
     loading,
+    error: null,
     source,
     fallbackReason: null,
     summary: {
@@ -142,6 +147,7 @@ function buildSqliteDashboard(
 
   return {
     loading: false,
+    error: null,
     source: 'sqlite',
     fallbackReason: null,
     summary: {
@@ -167,6 +173,7 @@ function buildFallbackDashboard(
   const recentAttempts = progress.attempts.map(fromFallbackAttempt).sort(sortRecentFirst);
   return {
     loading: false,
+    error: null,
     source: 'localStorage',
     fallbackReason,
     summary: {

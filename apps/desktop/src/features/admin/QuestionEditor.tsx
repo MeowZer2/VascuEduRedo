@@ -785,10 +785,12 @@ function DeviceSelectionFieldset({
   const [categories, setCategories] = useState<string[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setCatalogError(null);
     Promise.all([
       listDevices(allowedCategory ? { category: allowedCategory } : undefined),
       listDeviceCategories(),
@@ -797,6 +799,12 @@ function DeviceSelectionFieldset({
         if (cancelled) return;
         setDevices(devs);
         setCategories(cats);
+      })
+      .catch((caught) => {
+        if (cancelled) return;
+        setCatalogError(
+          caught instanceof Error ? caught.message : 'The device catalog could not be loaded.',
+        );
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -834,7 +842,9 @@ function DeviceSelectionFieldset({
             value={correctDeviceId}
             onChange={(e) => onCorrectDeviceIdChange(e.target.value)}
           >
-            <option value="">{loading ? 'Loading devices…' : 'Pick a device'}</option>
+            <option value="">
+              {loading ? 'Loading devices…' : catalogError ? 'Device catalog unavailable' : 'Pick a device'}
+            </option>
             {devices.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.name} — {d.manufacturer}
@@ -843,6 +853,11 @@ function DeviceSelectionFieldset({
           </select>
         </label>
       </div>
+      {catalogError ? (
+        <p className="admin-banner error" role="alert">
+          Device catalog unavailable: {catalogError}
+        </p>
+      ) : null}
       {!loading && correctDeviceId && !correctExists ? (
         <p className="admin-banner error">
           The chosen device id is not in the current catalog
@@ -850,7 +865,7 @@ function DeviceSelectionFieldset({
           different device, or recreate the missing device.
         </p>
       ) : null}
-      {!loading && devices.length === 0 ? (
+      {!loading && !catalogError && devices.length === 0 ? (
         <p className="muted small">
           No devices match the selected category. Add devices in the Devices admin tab first.
         </p>

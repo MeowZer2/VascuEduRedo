@@ -29,20 +29,27 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
   const [byCase, setByCase] = useState<CaseProgress[]>([]);
   const [recent, setRecent] = useState<AttemptSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [reviewingAttemptId, setReviewingAttemptId] = useState<string | null>(null);
   const [tab, setTab] = useState<'overview' | 'cases' | 'topics'>('overview');
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const [s, c, r] = await Promise.all([
-      fetchProgressSummary(),
-      fetchProgressByCase(),
-      fetchRecentActivity(15),
-    ]);
-    setSummary(s);
-    setByCase(c);
-    setRecent(r);
-    setLoading(false);
+    setErrorMsg(null);
+    try {
+      const [s, c, r] = await Promise.all([
+        fetchProgressSummary(),
+        fetchProgressByCase(),
+        fetchRecentActivity(15),
+      ]);
+      setSummary(s);
+      setByCase(c);
+      setRecent(r);
+    } catch {
+      setErrorMsg('Progress could not be loaded from desktop storage. Previously loaded progress is still shown.');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -97,6 +104,7 @@ function SqliteBackedProgress({ refreshKey }: { refreshKey: number }) {
           </button>
         </div>
       </header>
+      {errorMsg ? <div className="admin-banner error" role="alert">{errorMsg}</div> : null}
 
       <section className="grid grid-4">
         <MetricTile label="Attempts" value={summary?.totalAttempts ?? 0} sub={`${summary?.completedAttempts ?? 0} completed`} />

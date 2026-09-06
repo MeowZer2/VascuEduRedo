@@ -23,12 +23,13 @@ export interface PlaneOrientationLabelSet {
   sagittal: PlaneOrientationLabels;
 }
 
-export type VolumeOrientationStatus = 'trusted' | 'uncertain';
+export type VolumeOrientationStatus = 'trusted' | 'uncertain' | 'unsupported';
 
 export interface VolumeOrientationInfo {
   /**
    * `trusted` means the file's metadata produced a clean RAS canonicalisation;
-   * `uncertain` means we fell back to raw IJK (warnings explain why).
+   * `uncertain` means anatomical coordinates cannot be justified; `unsupported`
+   * means known geometry (currently oblique) exceeds the viewer's correction model.
    */
   status: VolumeOrientationStatus;
   canonical: 'RAS';

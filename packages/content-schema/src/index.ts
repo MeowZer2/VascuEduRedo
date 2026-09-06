@@ -21,21 +21,23 @@ const questionBaseSchema = z.object({
   id: z.string().min(1),
   prompt: z.string().min(1),
   explanation: z.string().min(1),
-  points: z.number().positive(),
+  points: z.number().finite().positive(),
   hints: z.array(z.string()).optional(),
   learningObjectiveId: z.string().optional(),
 });
 
-export const questionSchema = z.discriminatedUnion('type', [
+const choiceSchema = z.object({ id: z.string().trim().min(1), label: z.string().trim().min(1) });
+
+const questionSchemaBase = z.discriminatedUnion('type', [
   questionBaseSchema.extend({
     type: z.literal('multipleChoice'),
-    choices: z.array(z.object({ id: z.string(), label: z.string() })).min(2),
-    correctChoiceId: z.string(),
+    choices: z.array(choiceSchema).min(2),
+    correctChoiceId: z.string().trim().min(1),
   }),
   questionBaseSchema.extend({
     type: z.literal('multiSelect'),
-    choices: z.array(z.object({ id: z.string(), label: z.string() })).min(2),
-    correctChoiceIds: z.array(z.string()).min(1),
+    choices: z.array(choiceSchema).min(2),
+    correctChoiceIds: z.array(z.string().trim().min(1)).min(1),
   }),
   questionBaseSchema.extend({
     type: z.literal('trueFalse'),
@@ -43,22 +45,54 @@ export const questionSchema = z.discriminatedUnion('type', [
   }),
   questionBaseSchema.extend({
     type: z.literal('numeric'),
-    correctValue: z.number(),
-    tolerance: z.number().nonnegative(),
+    correctValue: z.number().finite(),
+    tolerance: z.number().finite().nonnegative(),
     unit: z.string().optional(),
   }),
   questionBaseSchema.extend({
     type: z.literal('shortText'),
-    requiredKeywords: z.array(z.string()).min(1),
+    requiredKeywords: z.array(z.string().trim().min(1)).min(1),
   }),
   questionBaseSchema.extend({
     type: z.literal('measurement'),
     target: z.string().min(1),
-    correctValue: z.number(),
-    tolerance: z.number().nonnegative(),
-    unit: z.string().min(1),
+    plane: z.enum(['axial', 'coronal', 'sagittal']),
+    correctValue: z.number().finite(),
+    tolerance: z.number().finite().nonnegative(),
+    unit: z.enum(['mm', 'cm']),
+  }),
+  questionBaseSchema.extend({
+    type: z.literal('deviceSelection'),
+    correctDeviceId: z.string().trim().min(1),
+    allowedCategory: z.string().optional(),
+    allowedDeviceIds: z.array(z.string().trim().min(1)).optional(),
   }),
 ]);
+
+export const questionSchema = questionSchemaBase.superRefine((question, context) => {
+  if (question.type === 'multipleChoice') {
+    validateChoiceReferences(question.choices, [question.correctChoiceId], context);
+  } else if (question.type === 'multiSelect') {
+    validateChoiceReferences(question.choices, question.correctChoiceIds, context);
+  }
+});
+
+function validateChoiceReferences(
+  choices: Array<{ id: string }>,
+  correctIds: string[],
+  context: z.RefinementCtx,
+) {
+  const ids = choices.map((choice) => choice.id);
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['choices'], message: 'Choice ids must be unique.' });
+  }
+  const available = new Set(ids);
+  for (const correctId of correctIds) {
+    if (!available.has(correctId)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['correctChoiceId'], message: `Correct choice '${correctId}' does not exist.` });
+    }
+  }
+}
 
 export const caseSchema = z.object({
   id: z.string().min(1),

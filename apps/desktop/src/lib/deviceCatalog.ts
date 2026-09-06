@@ -71,7 +71,7 @@ export interface DeviceCatalogImport {
   version: string;
   sourceName?: string;
   sourceDate?: string;
-  devices: DeviceImportInput[];
+  devices: unknown[];
 }
 
 export interface CatalogIssue {
@@ -125,13 +125,19 @@ export function parseCatalogText(text: string): ParseResult {
   if (!Array.isArray(obj.devices)) {
     return { kind: 'invalid', message: 'Missing "devices" array.' };
   }
+  if (obj.sourceName !== undefined && typeof obj.sourceName !== 'string') {
+    return { kind: 'invalid', message: 'sourceName must be a string when present.' };
+  }
+  if (obj.sourceDate !== undefined && typeof obj.sourceDate !== 'string') {
+    return { kind: 'invalid', message: 'sourceDate must be a string when present.' };
+  }
   return {
     kind: 'parsed',
     payload: {
       version: typeof obj.version === 'string' ? obj.version : '',
       sourceName: typeof obj.sourceName === 'string' ? obj.sourceName : undefined,
       sourceDate: typeof obj.sourceDate === 'string' ? obj.sourceDate : undefined,
-      devices: obj.devices as DeviceImportInput[],
+      devices: obj.devices,
     },
   };
 }
@@ -148,8 +154,26 @@ function isValidNumberArray(value: unknown): { ok: boolean; reason?: string } {
   return { ok: true };
 }
 
-function looksLikeUrl(value: string): boolean {
-  return /^https?:\/\/\S+$/i.test(value.trim());
+export function isValidHttpUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const parsed = new URL(value.trim());
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function isValidDateString(value: unknown): value is string {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  const trimmed = value.trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (dateOnly) {
+    const [, year, month, day] = dateOnly;
+    const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+    return date.toISOString().slice(0, 10) === trimmed;
+  }
+  return Number.isFinite(Date.parse(trimmed));
 }
 
 function dupKey(d: { manufacturer: string; name: string; deviceFamily?: string }): string {
@@ -184,7 +208,24 @@ export function validateCatalog(
   let toUpdate = 0;
   let toSkip = 0;
 
-  payload.devices.forEach((dev, index) => {
+  if (payload.sourceName !== undefined && typeof payload.sourceName !== 'string') {
+    errors.push({ level: 'error', field: 'sourceName', message: 'sourceName must be a string when present.' });
+  }
+  if (payload.sourceDate !== undefined && !isValidDateString(payload.sourceDate)) {
+    errors.push({ level: 'error', field: 'sourceDate', message: 'sourceDate must be a valid date when present.' });
+  }
+
+  payload.devices.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push({
+        level: 'error',
+        deviceIndex: index,
+        deviceName: `device #${index + 1}`,
+        message: `Device ${index + 1} must be an object.`,
+      });
+      return;
+    }
+    const dev = entry as Record<string, unknown>;
     const name = typeof dev.name === 'string' ? dev.name.trim() : '';
     const manufacturer = typeof dev.manufacturer === 'string' ? dev.manufacturer.trim() : '';
     const category = typeof dev.category === 'string' ? dev.category.trim() : '';
@@ -198,6 +239,22 @@ export function validateCatalog(
       errors.push({ level: 'error', ...ref, field: 'category', message: 'category is required.' });
     }
 
+    for (const field of ['subtype', 'description', 'deviceFamily', 'vascularTerritory', 'indicationsSummary', 'deliverySystem', 'mriCompatibility', 'radiopaqueMarkers', 'sourceReference', 'sourceUrl', 'lastVerifiedAt', 'notes'] as const) {
+      const value = dev[field];
+      if (value !== undefined && value !== null && typeof value !== 'string') {
+        errors.push({ level: 'error', ...ref, field, message: `${field} must be a string when present.` });
+      }
+    }
+    for (const field of ['sizes', 'tags'] as const) {
+      const value = dev[field];
+      if (value !== undefined && (!Array.isArray(value) || value.some((item) => typeof item !== 'string'))) {
+        errors.push({ level: 'error', ...ref, field, message: `${field} must be an array of strings when present.` });
+      }
+    }
+    if (dev.properties !== undefined && (!dev.properties || typeof dev.properties !== 'object' || Array.isArray(dev.properties))) {
+      errors.push({ level: 'error', ...ref, field: 'properties', message: 'properties must be an object when present.' });
+    }
+
     for (const field of NUMERIC_SPEC_FIELDS) {
       const check = isValidNumberArray((dev as unknown as Record<string, unknown>)[field]);
       if (!check.ok) {
@@ -205,13 +262,15 @@ export function validateCatalog(
       }
     }
 
-    if (dev.sourceUrl && !looksLikeUrl(dev.sourceUrl)) {
-      warnings.push({ level: 'warning', ...ref, field: 'sourceUrl', message: 'sourceUrl does not look like a valid http(s) URL.' });
+    if (dev.sourceUrl !== undefined && !isValidHttpUrl(dev.sourceUrl)) {
+      errors.push({ level: 'error', ...ref, field: 'sourceUrl', message: 'sourceUrl must be a valid http(s) URL.' });
     }
     if (!dev.sourceReference && !dev.sourceUrl) {
       warnings.push({ level: 'warning', ...ref, message: 'No sourceReference/sourceUrl — device will be marked unverified.' });
     }
-    if (!dev.lastVerifiedAt) {
+    if (dev.lastVerifiedAt !== undefined && !isValidDateString(dev.lastVerifiedAt)) {
+      errors.push({ level: 'error', ...ref, field: 'lastVerifiedAt', message: 'lastVerifiedAt must be a valid date.' });
+    } else if (!dev.lastVerifiedAt) {
       warnings.push({ level: 'warning', ...ref, message: 'No lastVerifiedAt — device will be marked unverified.' });
     }
     const hasSizing =
@@ -223,13 +282,13 @@ export function validateCatalog(
     if (!hasSizing) {
       warnings.push({ level: 'warning', ...ref, message: 'No sizing data (sizes or numeric spec) — flagged as incomplete.' });
     }
-    if (!dev.description || !dev.description.trim()) {
+    if (typeof dev.description !== 'string' || !dev.description.trim()) {
       warnings.push({ level: 'warning', ...ref, message: 'No description — a neutral label will be generated from name/manufacturer/category.' });
     }
 
     if (!name || !manufacturer || !category) return;
 
-    const key = dupKey({ manufacturer, name, deviceFamily: dev.deviceFamily });
+    const key = dupKey({ manufacturer, name, deviceFamily: typeof dev.deviceFamily === 'string' ? dev.deviceFamily : undefined });
     if (seenInFile.has(key)) {
       duplicatesInFile += 1;
       warnings.push({ level: 'warning', ...ref, message: 'Duplicate of an earlier device in this file (same manufacturer + name + family).' });
@@ -314,7 +373,13 @@ export async function runCatalogImport(
 
   const summary: ImportSummary = { created: 0, updated: 0, skipped: 0, failed: 0, failures: [] };
 
-  for (const dev of payload.devices) {
+  for (const entry of payload.devices) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      summary.failed += 1;
+      summary.failures.push('Skipped malformed device entry.');
+      continue;
+    }
+    const dev = entry as DeviceImportInput;
     const name = typeof dev.name === 'string' ? dev.name.trim() : '';
     const manufacturer = typeof dev.manufacturer === 'string' ? dev.manufacturer.trim() : '';
     const category = typeof dev.category === 'string' ? dev.category.trim() : '';

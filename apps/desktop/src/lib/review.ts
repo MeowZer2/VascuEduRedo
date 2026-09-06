@@ -99,60 +99,31 @@ export function isReviewAvailable(): boolean {
 
 export async function fetchProgressSummary(): Promise<ProgressSummary | null> {
   if (!isTauriDesktop()) return null;
-  try {
-    return (
-      (await safeInvoke<ProgressSummary>('progress_summary', {
-        profileId: getActiveProfileId(),
-      })) ?? null
-    );
-  } catch (error) {
-    console.error('progress_summary failed:', error);
-    return null;
-  }
+  const result = await safeInvoke<ProgressSummary>('progress_summary', { profileId: getActiveProfileId() });
+  if (!result) throw new Error('Progress summary could not be loaded from desktop storage.');
+  return result;
 }
 
 export async function fetchProgressByCase(): Promise<CaseProgress[]> {
   if (!isTauriDesktop()) return [];
-  try {
-    return (
-      (await safeInvoke<CaseProgress[]>('progress_by_case', {
-        profileId: getActiveProfileId(),
-      })) ?? []
-    );
-  } catch (error) {
-    console.error('progress_by_case failed:', error);
-    return [];
-  }
+  const result = await safeInvoke<CaseProgress[]>('progress_by_case', { profileId: getActiveProfileId() });
+  if (!result) throw new Error('Case progress could not be loaded from desktop storage.');
+  return result;
 }
 
 export async function fetchRecentActivity(limit = 10): Promise<AttemptSummary[]> {
   if (!isTauriDesktop()) return [];
-  try {
-    return (
-      (await safeInvoke<AttemptSummary[]>('get_recent_activity', {
-        limit,
-        profileId: getActiveProfileId(),
-      })) ?? []
-    );
-  } catch (error) {
-    console.error('get_recent_activity failed:', error);
-    return [];
-  }
+  const result = await safeInvoke<AttemptSummary[]>('get_recent_activity', { limit, profileId: getActiveProfileId() });
+  if (!result) throw new Error('Recent activity could not be loaded from desktop storage.');
+  return result;
 }
 
 export async function fetchAttemptDetails(attemptId: string): Promise<AttemptDetails | null> {
   if (!isTauriDesktop()) return null;
-  try {
-    return (
-      (await safeInvoke<AttemptDetails | null>('get_attempt_details', {
-        attemptId,
-        profileId: getActiveProfileId(),
-      })) ?? null
-    );
-  } catch (error) {
-    console.error('get_attempt_details failed:', error);
-    return null;
-  }
+  return (await safeInvoke<AttemptDetails | null>('get_attempt_details', {
+    attemptId,
+    profileId: getActiveProfileId(),
+  })) ?? null;
 }
 
 export function formatDuration(ms: number | null | undefined): string {

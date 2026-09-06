@@ -327,7 +327,7 @@ export function AdminDevicesTab() {
                 className="secondary-button small"
                 onClick={() => setShowImport(true)}
                 disabled={busy}
-                title="Import a verified device catalog (JSON)"
+                title="Import a device catalog with source metadata (JSON)"
               >
                 Import…
               </button>

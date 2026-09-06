@@ -7,6 +7,7 @@ import {
   type VolumePlane,
 } from '../lib/volume';
 import { friendlyError } from '../lib/productionState';
+import { interactionSlice, MAX_SLICE_LOAD_ATTEMPTS, sliceRetryDecision } from '../lib/sliceRequestPolicy';
 import {
   PLANE_OPTIONS,
   MAX_WINDOW_LEVEL,
@@ -109,6 +110,9 @@ interface SliceSchedulerState {
   lastRequestedKey: string | null;
   lastRequestedSlice: number | null;
   sequence: number;
+  failedKey: string | null;
+  failureCount: number;
+  retryTimer: number | null;
 }
 
 export interface PaneSnapshot {
@@ -154,7 +158,7 @@ export interface ViewportPaneProps {
   onCrosshairFromPane: (imagePoint: ImagePoint) => void;
   onPendingPointsChange: (points: ImagePoint[]) => void;
   onAddMeasurement: (measurement: Measurement) => void;
-  onClearMeasurements: () => void;
+  onClearMeasurements: (sliceIndex: number) => void;
   onSelectMeasurement: (id: string | null) => void;
 }
 
@@ -249,6 +253,7 @@ export function ViewportPane({
   const [huReadout, setHuReadout] = useState<HuReadout | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [slicePending, setSlicePending] = useState(false);
+  const [displayedSlice, setDisplayedSlice] = useState<number | null>(null);
   const sliceCacheRef = useRef(new Map<string, SlicePixels>());
   const mountedRef = useRef(false);
   const schedulerRef = useRef<SliceSchedulerState>({
@@ -259,6 +264,9 @@ export function ViewportPane({
     lastRequestedKey: null,
     lastRequestedSlice: null,
     sequence: 0,
+    failedKey: null,
+    failureCount: 0,
+    retryTimer: null,
   });
   const loadedContextRef = useRef<string | null>(null);
   const scrollDragDesiredSliceRef = useRef<number | null>(null);
@@ -301,6 +309,10 @@ export function ViewportPane({
         window.cancelAnimationFrame(scrollDragRafRef.current);
         scrollDragRafRef.current = null;
       }
+      if (schedulerRef.current.retryTimer !== null) {
+        window.clearTimeout(schedulerRef.current.retryTimer);
+        schedulerRef.current.retryTimer = null;
+      }
     };
   }, []);
 
@@ -328,7 +340,11 @@ export function ViewportPane({
     setHuReadout(null);
     setPanDrag(null);
     setPacsDrag(null);
-  }, [pane.plane, sliceIndex]);
+  }, [pane.plane, displayedSlice]);
+
+  useEffect(() => {
+    onPendingPointsChange([]);
+  }, [displayedSlice, pane.plane]);
 
   // Slice scheduler. `pane.slice` is the desired target; request/displayed
   // state is owned here so rapid browsing cannot flood the backend with stale
@@ -339,6 +355,9 @@ export function ViewportPane({
     loadedContextRef.current = target.contextKey;
     schedulerRef.current.displayedKey = target.key;
     schedulerRef.current.displayedSlice = target.sliceIndex;
+    schedulerRef.current.failedKey = null;
+    schedulerRef.current.failureCount = 0;
+    setDisplayedSlice(target.sliceIndex);
     logSliceScheduler(pane.id, 'slice committed', {
       displayedSlice: target.sliceIndex,
       desiredToCommitMs: performance.now() - target.desiredAtMs,
@@ -411,6 +430,7 @@ export function ViewportPane({
           latest?.key === request.key ||
           (schedulerRef.current.displayedKey === null && latest?.contextKey === request.contextKey);
         if (canCommit) {
+          setError(null);
           commitSlice(request, pixels);
         } else {
           logSliceScheduler(pane.id, 'request skipped', {
@@ -434,7 +454,12 @@ export function ViewportPane({
         if (!mountedRef.current) return;
         const latest = schedulerRef.current.desired;
         if (latest?.key === request.key) {
-          setError(friendlyError(caught, 'This slice could not be displayed. Try another slice or reload the study.'));
+          const scheduler = schedulerRef.current;
+          scheduler.failedKey = request.key;
+          scheduler.failureCount += 1;
+          if (scheduler.failureCount >= MAX_SLICE_LOAD_ATTEMPTS) {
+            setError(friendlyError(caught, `This slice failed after ${MAX_SLICE_LOAD_ATTEMPTS} attempts. Try again or choose another slice.`));
+          }
         }
       })
       .finally(() => {
@@ -442,9 +467,20 @@ export function ViewportPane({
         schedulerRef.current.requestInFlight = false;
         const latest = schedulerRef.current.desired;
         const hasOutstanding = Boolean(latest && schedulerRef.current.displayedKey !== latest.key);
-        setSlicePending(hasOutstanding);
-        if (hasOutstanding) {
-          window.setTimeout(pumpSliceScheduler, 0);
+        const terminalFailure = Boolean(
+          latest &&
+          schedulerRef.current.failedKey === latest.key &&
+          sliceRetryDecision(schedulerRef.current.failureCount).terminal
+        );
+        setSlicePending(hasOutstanding && !terminalFailure);
+        if (hasOutstanding && !terminalFailure) {
+          const delay = schedulerRef.current.failedKey === latest?.key
+            ? sliceRetryDecision(schedulerRef.current.failureCount).delayMs ?? 0
+            : 0;
+          schedulerRef.current.retryTimer = window.setTimeout(() => {
+            schedulerRef.current.retryTimer = null;
+            pumpSliceScheduler();
+          }, delay);
         }
       });
   }
@@ -463,6 +499,14 @@ export function ViewportPane({
     };
 
     const scheduler = schedulerRef.current;
+    if (scheduler.failedKey !== target.key) {
+      scheduler.failedKey = null;
+      scheduler.failureCount = 0;
+      if (scheduler.retryTimer !== null) {
+        window.clearTimeout(scheduler.retryTimer);
+        scheduler.retryTimer = null;
+      }
+    }
     scheduler.desired = target;
     logSliceScheduler(pane.id, 'request scheduled', {
       desiredSlice: target.sliceIndex,
@@ -475,6 +519,7 @@ export function ViewportPane({
       setImageSize(null);
       scheduler.displayedKey = null;
       scheduler.displayedSlice = null;
+      setDisplayedSlice(null);
     }
 
     setError(null);
@@ -551,7 +596,8 @@ export function ViewportPane({
     const sampleX = Math.floor(clamp(hoverPoint.x, 0, imageSize.width - 1));
     const sampleY = Math.floor(clamp(hoverPoint.y, 0, imageSize.height - 1));
     const timer = window.setTimeout(() => {
-      sampleVolume(volume.handleId, pane.plane, sliceIndex, sampleX, sampleY)
+      if (displayedSlice === null) return;
+      sampleVolume(volume.handleId, pane.plane, displayedSlice, sampleX, sampleY)
         .then((sample) => {
           if (!cancelled) setHuReadout({ x: sample.x, y: sample.y, intensity: sample.intensity });
         })
@@ -563,14 +609,14 @@ export function ViewportPane({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [hoverPoint, imageSize, volume.handleId, pane.plane, sliceIndex]);
+  }, [hoverPoint, imageSize, volume.handleId, pane.plane, displayedSlice]);
 
   const visibleMeasurements = useMemo(
     () =>
       pane.measurements.filter(
-        (m) => m.plane === pane.plane && m.sliceIndex === sliceIndex,
+        (m) => m.plane === pane.plane && m.sliceIndex === displayedSlice,
       ),
-    [pane.measurements, pane.plane, sliceIndex],
+    [pane.measurements, pane.plane, displayedSlice],
   );
 
   // Crosshair overlay: project the current voxel into this pane's plane.
@@ -587,7 +633,7 @@ export function ViewportPane({
     );
     return {
       display,
-      onSlice: Math.round(projection.slice) === sliceIndex,
+      onSlice: displayedSlice !== null && Math.round(projection.slice) === displayedSlice,
     };
   }, [
     showCrosshair,
@@ -595,7 +641,7 @@ export function ViewportPane({
     imageSize,
     fitRect,
     pane.plane,
-    sliceIndex,
+    displayedSlice,
     volume.dims,
     conventionContext,
   ]);
@@ -708,6 +754,8 @@ export function ViewportPane({
       return;
     }
     if (event.button !== 0) return;
+    const committedSlice = interactionSlice(displayedSlice);
+    if (committedSlice === null) return;
     const point = imagePointFromPointer(event);
     if (!point) return;
 
@@ -723,7 +771,7 @@ export function ViewportPane({
         type: 'distance',
         id: newMeasurementId('d'),
         plane: pane.plane,
-        sliceIndex,
+        sliceIndex: committedSlice,
         start,
         end: point,
         distanceMm: distanceMm(start, point, spacing),
@@ -746,7 +794,7 @@ export function ViewportPane({
         type: 'angle',
         id: newMeasurementId('a'),
         plane: pane.plane,
-        sliceIndex,
+        sliceIndex: committedSlice,
         a,
         vertex,
         c: point,
@@ -907,7 +955,16 @@ export function ViewportPane({
     return () => el.removeEventListener('wheel', listener);
   }, []);
 
-  const sliceLabel = `${sliceIndex + 1} / ${totalSlices}`;
+  const sliceLabel = displayedSlice === null ? `Loading / ${totalSlices}` : `${displayedSlice + 1} / ${totalSlices}`;
+
+  function retryFailedSlice() {
+    const scheduler = schedulerRef.current;
+    scheduler.failedKey = null;
+    scheduler.failureCount = 0;
+    setError(null);
+    setSlicePending(true);
+    pumpSliceScheduler();
+  }
   const imageSizeLabel = imageSize ? `${imageSize.width} x ${imageSize.height}` : '-';
 
   function handleSelectMeasurement(event: PointerEvent, id: string) {
@@ -957,6 +1014,7 @@ export function ViewportPane({
           <div className="viewer-state viewer-state-error">
             <strong>Slice error</strong>
             <span>{error}</span>
+            <button type="button" className="secondary-button small" onClick={retryFailedSlice}>Retry slice</button>
           </div>
         ) : null}
         <canvas
@@ -1069,7 +1127,7 @@ export function ViewportPane({
         <div
           className="orientation-overlay"
           aria-hidden="true"
-          data-uncertain={volume.orientation?.status === 'uncertain' ? 'true' : undefined}
+          data-uncertain={volume.orientation?.status !== 'trusted' ? 'true' : undefined}
         >
           <span className="orientation-label orientation-top">{orientationLabels.top}</span>
           <span className="orientation-label orientation-bottom">{orientationLabels.bottom}</span>
@@ -1090,7 +1148,7 @@ export function ViewportPane({
         <button
           type="button"
           className="secondary-button small"
-          onClick={onClearMeasurements}
+          onClick={() => displayedSlice !== null && onClearMeasurements(displayedSlice)}
           disabled={visibleMeasurements.length === 0}
         >
           Clear measurements

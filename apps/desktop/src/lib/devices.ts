@@ -158,8 +158,11 @@ export function isSizingIncomplete(device: Device): boolean {
 }
 
 export function isVerified(device: Device): boolean {
-  const s = device.spec;
-  return !!(s && (s.sourceReference || s.sourceUrl) && s.lastVerifiedAt);
+  // Source metadata and a date do not prove that a human performed a clinical
+  // review. The current schema has no explicit review assertion, so v0.44 must
+  // not manufacture a "Verified" state from metadata presence.
+  void device;
+  return false;
 }
 
 function fromWire(row: DeviceWire): Device {
@@ -184,34 +187,22 @@ export function isDeviceCatalogAvailable(): boolean {
 
 export async function listDevices(filter?: DeviceFilter): Promise<Device[]> {
   if (!isTauriDesktop()) return [];
-  try {
-    const rows = await safeInvoke<DeviceWire[]>('list_devices', { filter: filter ?? null });
-    return (rows ?? []).map(fromWire);
-  } catch (error) {
-    console.error('list_devices failed:', error);
-    return [];
-  }
+  const rows = await safeInvoke<DeviceWire[]>('list_devices', { filter: filter ?? null });
+  if (!rows) throw new Error('The desktop device repository did not return a result.');
+  return rows.map(fromWire);
 }
 
 export async function getDevice(deviceId: string): Promise<Device | null> {
   if (!isTauriDesktop()) return null;
-  try {
-    const row = await safeInvoke<DeviceWire | null>('get_device', { deviceId });
-    return row ? fromWire(row) : null;
-  } catch (error) {
-    console.error('get_device failed:', error);
-    return null;
-  }
+  const row = await safeInvoke<DeviceWire | null>('get_device', { deviceId });
+  return row ? fromWire(row) : null;
 }
 
 export async function listDeviceCategories(): Promise<string[]> {
   if (!isTauriDesktop()) return [];
-  try {
-    return (await safeInvoke<string[]>('list_device_categories')) ?? [];
-  } catch (error) {
-    console.error('list_device_categories failed:', error);
-    return [];
-  }
+  const rows = await safeInvoke<string[]>('list_device_categories');
+  if (!rows) throw new Error('The desktop device category repository did not return a result.');
+  return rows;
 }
 
 export async function adminCreateDevice(input: DeviceInput): Promise<Device> {

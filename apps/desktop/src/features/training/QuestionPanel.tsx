@@ -19,6 +19,10 @@ interface QuestionPanelProps {
   vascCase: VascCase;
   /** SQLite attempt id created by `TrainingWorkspace`, or null in browser mode. */
   attemptId: string | null;
+  /** Immutable owner captured when this session was initialized. */
+  sessionProfileId: string;
+  expectedMeasurementSourceKey: string;
+  expectedMeasurementVolumeHandleId: string | null;
   latestMeasurement: ViewerMeasurement | null;
   onComplete: (attempt: AttemptResult) => void;
   onQuestionChange: (index: number) => void;
@@ -37,9 +41,43 @@ function defaultAnswer(question: Question): UserAnswer {
   return '';
 }
 
-export function QuestionPanel({
+export function QuestionPanel(props: QuestionPanelProps) {
+  if (props.vascCase.questions.length === 0) {
+    return (
+      <section className="question-card">
+        <h3>No usable questions</h3>
+        <p className="muted">This case cannot start practice until an author adds a valid question.</p>
+      </section>
+    );
+  }
+  return <QuestionPanelSession {...props} />;
+}
+
+export function measurementMatchesQuestionContext(
+  measurement: ViewerMeasurement | null,
+  question: MeasurementQuestion,
+  expectedSourceKey: string,
+  expectedVolumeHandleId: string | null,
+): measurement is ViewerMeasurement {
+  return Boolean(
+    measurement &&
+    measurement.unit === 'mm' &&
+    measurement.sourceKey === expectedSourceKey &&
+    expectedVolumeHandleId !== null &&
+    measurement.volumeHandleId === expectedVolumeHandleId &&
+    measurement.plane === question.plane &&
+    Number.isInteger(measurement.sliceIndex) &&
+    Number.isFinite(measurement.distanceMm) &&
+    measurement.distanceMm >= 0,
+  );
+}
+
+function QuestionPanelSession({
   vascCase,
   attemptId,
+  sessionProfileId,
+  expectedMeasurementSourceKey,
+  expectedMeasurementVolumeHandleId,
   latestMeasurement,
   onComplete,
   onQuestionChange,
@@ -55,6 +93,8 @@ export function QuestionPanel({
   const [results, setResults] = useState<QuestionResult[]>([]);
   const [submittedResult, setSubmittedResult] = useState<QuestionResult | null>(null);
   const [advancing, setAdvancing] = useState(false);
+  const [persisting, setPersisting] = useState(false);
+  const [persistenceError, setPersistenceError] = useState<string | null>(null);
   const [questionStartedAt, setQuestionStartedAt] = useState(() => Date.now());
 
   const question = vascCase.questions[index];
@@ -87,13 +127,16 @@ export function QuestionPanel({
     question.type === 'deviceSelection' ? (question as DeviceSelectionQuestion) : null;
   const [deviceOptions, setDeviceOptions] = useState<Device[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
+  const [deviceLoadError, setDeviceLoadError] = useState<string | null>(null);
   useEffect(() => {
     if (!deviceQuestion) {
       setDeviceOptions([]);
+      setDeviceLoadError(null);
       return;
     }
     let cancelled = false;
     setDevicesLoading(true);
+    setDeviceLoadError(null);
     listDevices(
       deviceQuestion.allowedCategory ? { category: deviceQuestion.allowedCategory } : undefined,
     )
@@ -107,6 +150,14 @@ export function QuestionPanel({
           setDeviceOptions(devs);
         }
       })
+      .catch((caught) => {
+        if (cancelled) return;
+        setDeviceLoadError(
+          caught instanceof Error
+            ? `Device catalog unavailable: ${caught.message}`
+            : 'Device catalog unavailable. Retry this case when storage is available.',
+        );
+      })
       .finally(() => {
         if (!cancelled) setDevicesLoading(false);
       });
@@ -117,7 +168,15 @@ export function QuestionPanel({
 
   // For measurement questions, determine if the latest viewer measurement is on the right plane.
   const measurementQuestion = question.type === 'measurement' ? (question as MeasurementQuestion) : null;
-  const measurementOnCorrectPlane = measurementQuestion && latestMeasurement?.plane === measurementQuestion.plane;
+  const measurementOnCorrectPlane = Boolean(
+    measurementQuestion &&
+    measurementMatchesQuestionContext(
+      latestMeasurement,
+      measurementQuestion,
+      expectedMeasurementSourceKey,
+      expectedMeasurementVolumeHandleId,
+    ),
+  );
   // Convert mm to the question's unit (currently only mm and cm are expected).
   function convertToUnit(mm: number, unit: string): number {
     if (unit === 'cm') return mm / 10;
@@ -133,14 +192,35 @@ export function QuestionPanel({
     setHintsUsed((current) => ({ ...current, [question.id]: shownHints + 1 }));
   }
 
-  function submit() {
+  async function submit() {
+    if (persisting) return;
     const effectiveAnswer = measurementQuestion ? selectedMeasurementValue : answer;
     const elapsedMs = Math.max(0, Date.now() - questionStartedAt);
     const result = evaluateAnswer(question, effectiveAnswer, shownHints, elapsedMs);
-    setSubmittedResult(result);
-    // Persist the response in SQLite (no-op in browser mode).
-    if (attemptId) {
-      void submitQuestionResponse(attemptId, question.id, effectiveAnswer, result);
+    setPersisting(true);
+    setPersistenceError(null);
+    try {
+      if (attemptId) {
+        await submitQuestionResponse(
+          attemptId,
+          question.id,
+          effectiveAnswer,
+          result,
+          sessionProfileId,
+          vascCase.id,
+        );
+      }
+      // Feedback represents a durable answer in native mode. Browser mode has
+      // no response row and commits to its in-memory session here.
+      setSubmittedResult(result);
+    } catch (caught) {
+      setPersistenceError(
+        caught instanceof Error
+          ? `Your answer is still here, but it was not saved: ${caught.message}`
+          : 'Your answer is still here, but it was not saved. Retry when storage is available.',
+      );
+    } finally {
+      setPersisting(false);
     }
   }
 
@@ -150,9 +230,6 @@ export function QuestionPanel({
 
     try {
       const updatedResults = [...results, submittedResult];
-      setResults(updatedResults);
-      setSubmittedResult(null);
-
       if (isLast) {
         const score = updatedResults.reduce((sum, item) => sum + item.awardedPoints, 0);
         const totalHintsUsed = updatedResults.reduce((sum, item) => sum + item.hintsUsed, 0);
@@ -173,18 +250,27 @@ export function QuestionPanel({
         // Mark the SQLite attempt complete with the final score (no-op in browser mode).
         // Await before navigating so the Progress page's first refetch sees the completed row.
         if (attemptId) {
-          await completeAttempt(attemptId, attempt.score);
+          await completeAttempt(attemptId, attempt.score, sessionProfileId, vascCase.id);
         }
         onComplete(attempt);
         return;
       }
 
+      setResults(updatedResults);
+      setSubmittedResult(null);
+      setPersistenceError(null);
       const nextIndex = index + 1;
       const nextQuestion = vascCase.questions[nextIndex];
       setIndex(nextIndex);
       setAnswer(defaultAnswer(nextQuestion));
       setQuestionStartedAt(Date.now());
       onQuestionChange(nextIndex);
+    } catch (caught) {
+      setPersistenceError(
+        caught instanceof Error
+          ? `Completion was not saved: ${caught.message}`
+          : 'Completion was not saved. Retry when storage is available.',
+      );
     } finally {
       setAdvancing(false);
     }
@@ -267,7 +353,8 @@ export function QuestionPanel({
       case 'measurement': {
         const mq = question as MeasurementQuestion;
         const planeName = mq.plane.charAt(0).toUpperCase() + mq.plane.slice(1);
-        const wrongPlane = latestMeasurement && latestMeasurement.plane !== mq.plane;
+        const wrongSource = latestMeasurement && latestMeasurement.sourceKey !== expectedMeasurementSourceKey;
+        const wrongPlane = latestMeasurement && !wrongSource && latestMeasurement.plane !== mq.plane;
         return (
           <div className="measurement-answer-panel">
             <div className="measurement-instructions">
@@ -284,6 +371,11 @@ export function QuestionPanel({
                 Current measurement is on the{' '}
                 <strong>{latestMeasurement.plane.charAt(0).toUpperCase() + latestMeasurement.plane.slice(1)}</strong> plane.
                 Switch to <strong>{planeName}</strong> and draw a new measurement.
+              </div>
+            ) : null}
+            {wrongSource ? (
+              <div className="measurement-plane-warning">
+                That measurement belongs to another study. Draw a new measurement on this case's viewer.
               </div>
             ) : null}
             <div className={`measurement-readout ${selectedMeasurementValue !== null ? 'has-value' : 'no-value'}`}>
@@ -319,6 +411,9 @@ export function QuestionPanel({
       case 'deviceSelection': {
         if (devicesLoading) {
           return <p className="muted">Loading device catalog…</p>;
+        }
+        if (deviceLoadError) {
+          return <p className="admin-banner error" role="alert">{deviceLoadError}</p>;
         }
         if (deviceOptions.length === 0) {
           return (
@@ -364,7 +459,7 @@ export function QuestionPanel({
   }
 
   function canSubmit(): boolean {
-    if (submittedResult) return false;
+    if (submittedResult || persisting) return false;
     if (measurementQuestion) return selectedMeasurementValue !== null;
     if (answer === null) return false;
     if (Array.isArray(answer) && answer.length === 0) return false;
@@ -457,8 +552,8 @@ export function QuestionPanel({
 
       <div className="question-actions">
         {!submittedResult ? (
-          <button className="primary-button" onClick={submit} disabled={!canSubmit()}>
-            Submit answer
+          <button className="primary-button" onClick={() => void submit()} disabled={!canSubmit()}>
+            {persisting ? 'Saving answer…' : persistenceError ? 'Retry save' : 'Submit answer'}
           </button>
         ) : (
           <button className="primary-button" onClick={() => void next()} disabled={advancing}>
@@ -466,6 +561,7 @@ export function QuestionPanel({
           </button>
         )}
       </div>
+      {persistenceError ? <div className="admin-banner error" role="alert">{persistenceError}</div> : null}
     </section>
   );
 }

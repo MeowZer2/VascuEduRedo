@@ -20,7 +20,7 @@ const SPEC_FIELD_LABELS: Record<string, string> = {
   radiopaqueMarkers: 'Radiopaque markers',
   sourceReference: 'Source reference',
   sourceUrl: 'Source URL',
-  lastVerifiedAt: 'Last verified',
+  lastVerifiedAt: 'Source review date',
   notes: 'Notes',
   availableDiametersMm: 'Diameters (mm)',
   availableLengthsMm: 'Lengths (mm)',
@@ -58,8 +58,6 @@ export function DevicesCatalogPage() {
       .catch((e) => {
         if (cancelled) return;
         setErrorMsg(`Device catalog could not be loaded. ${friendlyError(e, 'Please try again from the desktop app.')}`);
-        setDevices([]);
-        setCategories([]);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -213,8 +211,8 @@ export function DevicesCatalogPage() {
                         verified
                       </span>
                     ) : (
-                      <span className="pill pill-mono" title="No source reference / verification date">
-                        unverified
+                      <span className="pill pill-mono" title="Source metadata is not an explicit verification assertion">
+                        verification incomplete
                       </span>
                     )}
                     {isSizingIncomplete(device) && (
@@ -353,8 +351,10 @@ export function DeviceDetail({ device }: { device: Device }) {
             <div className="page-eyebrow">Verification</div>
             <p className="muted">
               {isVerified(device)
-                ? `Source/verification recorded${device.spec?.lastVerifiedAt ? ` (last verified ${device.spec.lastVerifiedAt})` : ''}.`
-                : 'No source reference or verification date — treat specifications as unconfirmed.'}
+                ? 'Explicit review verification recorded.'
+                : device.spec?.sourceReference || device.spec?.sourceUrl
+                  ? `Source recorded${device.spec.lastVerifiedAt ? ` (review date ${device.spec.lastVerifiedAt})` : ''}; verification remains incomplete.`
+                  : 'No source metadata recorded; treat specifications as unconfirmed.'}
             </p>
             <p className="muted">
               Always confirm device IFU before clinical use. This catalog is an educational

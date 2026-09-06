@@ -838,10 +838,12 @@ fn evict_prepared_volumes(inner: &mut VolumeCacheInner) {
         let Some(candidate) = inner.lru.pop_front() else {
             break;
         };
-        let is_active = inner
-            .handles
-            .values()
-            .any(|volume| inner.prepared.get(&candidate).is_some_and(|cached| Arc::ptr_eq(cached, volume)));
+        let is_active = inner.handles.values().any(|volume| {
+            inner
+                .prepared
+                .get(&candidate)
+                .is_some_and(|cached| Arc::ptr_eq(cached, volume))
+        });
         if is_active {
             inner.lru.push_back(candidate);
             if inner.lru.len() <= inner.prepared.len() {
@@ -908,7 +910,10 @@ fn resolve_nrrd_source(path: &str) -> Result<NrrdVolumeSource, String> {
     ))
 }
 
-fn resolve_dicom_source(folder_path: &str, series_instance_uid: &str) -> Result<DicomVolumeSource, String> {
+fn resolve_dicom_source(
+    folder_path: &str,
+    series_instance_uid: &str,
+) -> Result<DicomVolumeSource, String> {
     let folder = resolve_existing_folder(folder_path)?;
     let cache_key = dicom_folder_cache_key(&folder, series_instance_uid)?;
     Ok(DicomVolumeSource { folder, cache_key })
@@ -940,7 +945,9 @@ fn dicom_folder_cache_key(folder: &Path, series_instance_uid: &str) -> Result<St
             latest_modified = latest_modified.max(metadata_modified_millis(&metadata));
         }
     }
-    let canonical = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    let canonical = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf());
     Ok(format!(
         "dicom:{}:{}:{}:{}:{}",
         canonical.display(),
@@ -1131,9 +1138,15 @@ fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, Stri
                 warnings: Vec::new(),
             });
 
-        merge_optional_string(&mut entry.series_description, dicom_string_opt(&object, "SeriesDescription"));
+        merge_optional_string(
+            &mut entry.series_description,
+            dicom_string_opt(&object, "SeriesDescription"),
+        );
         merge_optional_string(&mut entry.modality, dicom_string_opt(&object, "Modality"));
-        merge_optional_string(&mut entry.study_description, dicom_string_opt(&object, "StudyDescription"));
+        merge_optional_string(
+            &mut entry.study_description,
+            dicom_string_opt(&object, "StudyDescription"),
+        );
         entry.files.push(path);
     }
 
@@ -1144,8 +1157,13 @@ fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, Stri
             let modality = acc.modality.clone();
             let unsupported_reason = match modality.as_deref() {
                 Some("CT") => None,
-                Some(other) => Some(format!("Only CT series are supported in this import pass; modality is {other}.")),
-                None => Some("Only CT series are supported, and this series has no Modality tag.".to_string()),
+                Some(other) => Some(format!(
+                    "Only CT series are supported in this import pass; modality is {other}."
+                )),
+                None => Some(
+                    "Only CT series are supported, and this series has no Modality tag."
+                        .to_string(),
+                ),
             };
             DicomSeriesInfo {
                 series_instance_uid: acc.series_instance_uid,
@@ -1184,7 +1202,10 @@ fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, Stri
     })
 }
 
-fn build_dicom_volume_from_folder(folder: PathBuf, series_instance_uid: &str) -> Result<Volume, String> {
+fn build_dicom_volume_from_folder(
+    folder: PathBuf,
+    series_instance_uid: &str,
+) -> Result<Volume, String> {
     let mut slices = Vec::new();
     let mut skipped_same_folder_dicom = 0usize;
     let mut series_description = None;
@@ -1202,19 +1223,28 @@ fn build_dicom_volume_from_folder(folder: PathBuf, series_instance_uid: &str) ->
             continue;
         }
 
-        let modality = dicom_string_opt(&object, "Modality")
-            .ok_or_else(|| format!("{} is missing Modality; CT import cannot continue.", display_name(&path)))?;
+        let modality = dicom_string_opt(&object, "Modality").ok_or_else(|| {
+            format!(
+                "{} is missing Modality; CT import cannot continue.",
+                display_name(&path)
+            )
+        })?;
         if modality != "CT" {
             return Err(format!(
                 "Unsupported DICOM modality '{modality}'. v0.18 imports CT series only."
             ));
         }
-        merge_optional_string(&mut series_description, dicom_string_opt(&object, "SeriesDescription"));
+        merge_optional_string(
+            &mut series_description,
+            dicom_string_opt(&object, "SeriesDescription"),
+        );
         slices.push(parse_dicom_slice(&object, path)?);
     }
 
     if slices.is_empty() {
-        return Err("No DICOM slices from the selected series were found in that folder.".to_string());
+        return Err(
+            "No DICOM slices from the selected series were found in that folder.".to_string(),
+        );
     }
 
     validate_and_sort_dicom_slices(&mut slices, &mut warnings)?;
@@ -1241,13 +1271,15 @@ fn build_dicom_volume_from_folder(folder: PathBuf, series_instance_uid: &str) ->
         ));
     }
 
-    let raw_spacing = dicom_spacing(first, &slices, &mut warnings);
+    let raw_spacing = dicom_spacing(first, &slices, &mut warnings)?;
     let orientation = dicom_orientation(first, raw_spacing, &mut warnings)?;
     let canonical_dims = orientation.canonical_dims(dims);
     let spacing = orientation.canonical_spacing(raw_spacing);
     let (min_hu, max_hu) = intensity_range(&voxels)?;
     let mut orientation_info = orientation.info.clone();
-    orientation_info.warnings.extend(dicom_series_warnings(first, &slices));
+    orientation_info
+        .warnings
+        .extend(dicom_series_warnings(first, &slices));
     orientation_info.warnings.sort();
     orientation_info.warnings.dedup();
     let voxels = canonicalize_voxels(
@@ -1295,7 +1327,10 @@ fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<Dicom
     let rows = dicom_int::<u16>(object, "Rows", &path)? as usize;
     let cols = dicom_int::<u16>(object, "Columns", &path)? as usize;
     if rows == 0 || cols == 0 {
-        return Err(format!("{} has invalid zero Rows/Columns.", display_name(&path)));
+        return Err(format!(
+            "{} has invalid zero Rows/Columns.",
+            display_name(&path)
+        ));
     }
     let samples_per_pixel = dicom_int_opt::<u16>(object, "SamplesPerPixel").unwrap_or(1);
     if samples_per_pixel != 1 {
@@ -1328,11 +1363,21 @@ fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<Dicom
         .element_by_name("PixelData")
         .map_err(|_| format!("{} is missing PixelData.", display_name(&path)))?
         .to_bytes()
-        .map_err(|error| format!("Could not read PixelData from {}: {error}", display_name(&path)))?;
+        .map_err(|error| {
+            format!(
+                "Could not read PixelData from {}: {error}",
+                display_name(&path)
+            )
+        })?;
     let expected_bytes = rows
         .checked_mul(cols)
         .and_then(|count| count.checked_mul(2))
-        .ok_or_else(|| format!("{} has pixel dimensions that are too large.", display_name(&path)))?;
+        .ok_or_else(|| {
+            format!(
+                "{} has pixel dimensions that are too large.",
+                display_name(&path)
+            )
+        })?;
     if pixel_bytes.len() < expected_bytes {
         return Err(format!(
             "{} has incomplete PixelData: expected at least {expected_bytes} bytes, found {}.",
@@ -1350,7 +1395,11 @@ fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<Dicom
         } else {
             i16::from_le_bytes([chunk[0], chunk[1]]) as f32
         };
-        voxels.push((raw * slope + intercept).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+        voxels.push(
+            (raw * slope + intercept)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+        );
     }
 
     Ok(DicomSlice {
@@ -1398,10 +1447,22 @@ fn validate_and_sort_dicom_slices(
             ));
         }
         if slice.pixel_spacing != first.pixel_spacing {
-            warnings.push("PixelSpacing varies across slices; measurements may be approximate.".to_string());
+            warnings.push(
+                "PixelSpacing varies across slices; measurements may be approximate.".to_string(),
+            );
         }
         if slice.orientation != first.orientation {
-            warnings.push("ImageOrientationPatient varies across slices; orientation may be approximate.".to_string());
+            warnings.push(
+                "ImageOrientationPatient varies across slices; orientation may be approximate."
+                    .to_string(),
+            );
+        }
+        if let (Some(reference), Some(candidate)) = (first.orientation, slice.orientation) {
+            let row_alignment = direction_alignment(reference[0], candidate[0]);
+            let column_alignment = direction_alignment(reference[1], candidate[1]);
+            if row_alignment < 0.999 || column_alignment < 0.999 {
+                return Err("Unsupported DICOM geometry: ImageOrientationPatient varies significantly across slices.".to_string());
+            }
         }
         if (slice.rescale_slope - first.rescale_slope).abs() > 0.001
             || (slice.rescale_intercept - first.rescale_intercept).abs() > 0.001
@@ -1412,7 +1473,9 @@ fn validate_and_sort_dicom_slices(
     warnings.sort();
     warnings.dedup();
 
-    let normal = first.orientation.map(|orientation| cross(orientation[0], orientation[1]));
+    let normal = first
+        .orientation
+        .map(|orientation| cross(orientation[0], orientation[1]));
     if let Some(normal) = normal {
         if slices.iter().all(|slice| slice.position.is_some()) {
             slices.sort_by(|a, b| {
@@ -1426,7 +1489,8 @@ fn validate_and_sort_dicom_slices(
 
     if slices.iter().all(|slice| slice.instance_number.is_some()) {
         warnings.push(
-            "Image position/orientation metadata is incomplete; sorted slices by InstanceNumber.".to_string(),
+            "Image position/orientation metadata is incomplete; sorted slices by InstanceNumber."
+                .to_string(),
         );
         slices.sort_by_key(|slice| slice.instance_number.unwrap_or_default());
         return Ok(());
@@ -1435,46 +1499,89 @@ fn validate_and_sort_dicom_slices(
     Err("Malformed DICOM series: cannot sort slices safely because ImagePositionPatient/ImageOrientationPatient and InstanceNumber are incomplete.".to_string())
 }
 
-fn dicom_spacing(first: &DicomSlice, slices: &[DicomSlice], warnings: &mut Vec<String>) -> [f32; 3] {
+fn dicom_spacing(
+    first: &DicomSlice,
+    slices: &[DicomSlice],
+    warnings: &mut Vec<String>,
+) -> Result<[f32; 3], String> {
     let [row_spacing, col_spacing] = match first.pixel_spacing {
-        Some(spacing) if spacing[0].is_finite() && spacing[0] > 0.0 && spacing[1].is_finite() && spacing[1] > 0.0 => spacing,
+        Some(spacing)
+            if spacing[0].is_finite()
+                && spacing[0] > 0.0
+                && spacing[1].is_finite()
+                && spacing[1] > 0.0 =>
+        {
+            spacing
+        }
         _ => {
-            warnings.push("PixelSpacing is missing or invalid; using 1.0 mm in-plane spacing.".to_string());
+            warnings.push(
+                "PixelSpacing is missing or invalid; using 1.0 mm in-plane spacing.".to_string(),
+            );
             [1.0, 1.0]
         }
     };
 
-    let slice_spacing = estimate_slice_spacing(first, slices).unwrap_or_else(|| {
-        warnings.push("Slice spacing metadata is incomplete; using 1.0 mm between slices.".to_string());
+    let slice_spacing = validate_regular_slice_spacing(first, slices)?.unwrap_or_else(|| {
+        warnings
+            .push("Slice spacing metadata is incomplete; using 1.0 mm between slices.".to_string());
         1.0
     });
 
-    [col_spacing, row_spacing, slice_spacing]
+    Ok([col_spacing, row_spacing, slice_spacing])
 }
 
-fn estimate_slice_spacing(first: &DicomSlice, slices: &[DicomSlice]) -> Option<f32> {
+fn validate_regular_slice_spacing(
+    first: &DicomSlice,
+    slices: &[DicomSlice],
+) -> Result<Option<f32>, String> {
     if slices.len() < 2 {
-        return Some(1.0);
+        return Ok(Some(1.0));
     }
-    let normal = first.orientation.map(|orientation| cross(orientation[0], orientation[1]))?;
+    let Some(normal) = first
+        .orientation
+        .map(|orientation| cross(orientation[0], orientation[1]))
+    else {
+        return Ok(None);
+    };
     let mut positions: Vec<f32> = slices
         .iter()
         .filter_map(|slice| slice.position.map(|position| dot(position, normal)))
         .collect();
     if positions.len() < 2 {
-        return None;
+        return Ok(None);
     }
     positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     let mut gaps: Vec<f32> = positions
         .windows(2)
         .map(|pair| (pair[1] - pair[0]).abs())
-        .filter(|gap| gap.is_finite() && *gap > 0.0)
+        .filter(|gap| gap.is_finite())
         .collect();
     if gaps.is_empty() {
-        return None;
+        return Ok(None);
+    }
+    if gaps.iter().any(|gap| *gap <= 0.01) {
+        return Err("Unsupported DICOM geometry: duplicate or effectively duplicate slice positions were found.".to_string());
     }
     gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-    Some(gaps[gaps.len() / 2])
+    let median = if gaps.len() % 2 == 0 {
+        (gaps[gaps.len() / 2 - 1] + gaps[gaps.len() / 2]) / 2.0
+    } else {
+        gaps[gaps.len() / 2]
+    };
+    let tolerance = (median * 0.2).max(0.05);
+    if gaps.iter().any(|gap| (*gap - median).abs() > tolerance) {
+        return Err("Unsupported DICOM geometry: slice positions have irregular gaps and cannot be represented as a trusted uniform MPR volume.".to_string());
+    }
+    Ok(Some(median))
+}
+
+fn direction_alignment(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let a_len = vector_length(a);
+    let b_len = vector_length(b);
+    if a_len <= 0.0 || b_len <= 0.0 {
+        return 0.0;
+    }
+    (dot(a, b) / (a_len * b_len)).abs()
 }
 
 fn dicom_orientation(
@@ -1509,11 +1616,13 @@ fn dicom_orientation(
         );
     } else {
         warnings.push(
-            "ImageOrientationPatient is missing; assuming raw DICOM pixel axes approximate RAS.".to_string(),
+            "ImageOrientationPatient is missing; assuming raw DICOM pixel axes approximate RAS."
+                .to_string(),
         );
     }
 
-    let mut orientation = build_orientation_transform(&fields, [first.cols, first.rows, 1], raw_spacing)?;
+    let mut orientation =
+        build_orientation_transform(&fields, [first.cols, first.rows, 1], raw_spacing)?;
     orientation.info.warnings.extend(warnings.clone());
     orientation.info.warnings.sort();
     orientation.info.warnings.dedup();
@@ -1526,7 +1635,9 @@ fn dicom_series_warnings(first: &DicomSlice, slices: &[DicomSlice]) -> Vec<Strin
         warnings.push("ImagePositionPatient is missing; origin is approximate.".to_string());
     }
     if first.orientation.is_none() {
-        warnings.push("ImageOrientationPatient is missing; orientation labels are approximate.".to_string());
+        warnings.push(
+            "ImageOrientationPatient is missing; orientation labels are approximate.".to_string(),
+        );
     }
     if first.pixel_spacing.is_none() {
         warnings.push("PixelSpacing is missing; measurement spacing uses a fallback.".to_string());
@@ -1547,12 +1658,18 @@ fn resolve_existing_folder(input: &str) -> Result<PathBuf, String> {
         return Err(format!("DICOM folder not found: {}", folder.display()));
     }
     if !folder.is_dir() {
-        return Err(format!("DICOM import expects a folder, not a file: {}", folder.display()));
+        return Err(format!(
+            "DICOM import expects a folder, not a file: {}",
+            folder.display()
+        ));
     }
     Ok(folder)
 }
 
-fn collect_files_recursive(root: &Path, warnings: &mut Vec<String>) -> Result<(Vec<PathBuf>, usize), String> {
+fn collect_files_recursive(
+    root: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<PathBuf>, usize), String> {
     let mut files = Vec::new();
     let mut unreadable_count = 0usize;
     collect_files_recursive_inner(root, &mut files, &mut unreadable_count, warnings)?;
@@ -1588,7 +1705,9 @@ fn collect_files_recursive_inner(
             }
         };
         if file_type.is_dir() {
-            if let Err(error) = collect_files_recursive_inner(&path, files, unreadable_count, warnings) {
+            if let Err(error) =
+                collect_files_recursive_inner(&path, files, unreadable_count, warnings)
+            {
                 warnings.push(error);
                 *unreadable_count += 1;
             }
@@ -1624,9 +1743,19 @@ where
 {
     object
         .element_by_name(name)
-        .map_err(|_| format!("{} is missing required DICOM tag {name}.", display_name(path)))?
+        .map_err(|_| {
+            format!(
+                "{} is missing required DICOM tag {name}.",
+                display_name(path)
+            )
+        })?
         .to_int::<T>()
-        .map_err(|error| format!("Could not read DICOM tag {name} from {}: {error}", display_name(path)))
+        .map_err(|error| {
+            format!(
+                "Could not read DICOM tag {name} from {}: {error}",
+                display_name(path)
+            )
+        })
 }
 
 fn dicom_int_opt<T>(object: &DefaultDicomObject, name: &str) -> Option<T>
@@ -1969,6 +2098,102 @@ mod tests {
         assert!(error.contains("gzip payload could not be decompressed"));
     }
 
+    fn orientation_fields(space: Option<&str>, directions: &str) -> HashMap<String, String> {
+        let mut fields = HashMap::new();
+        if let Some(space) = space {
+            fields.insert("space".to_string(), space.to_string());
+        }
+        fields.insert("space directions".to_string(), directions.to_string());
+        fields
+    }
+
+    #[test]
+    fn trusts_only_axis_aligned_anatomical_orientation() {
+        let axis_aligned =
+            orientation_fields(Some("right-anterior-superior"), "(1,0,0) (0,1,0) (0,0,1)");
+        let orientation = build_orientation_transform(&axis_aligned, [2, 2, 2], [1.0; 3]).unwrap();
+        assert_eq!(orientation.info.status, "trusted");
+
+        for degrees in [30.0_f32, 40.0_f32] {
+            let radians = degrees.to_radians();
+            let directions = format!(
+                "({},{},0) ({},{},0) (0,0,1)",
+                radians.cos(),
+                radians.sin(),
+                -radians.sin(),
+                radians.cos()
+            );
+            let fields = orientation_fields(Some("right-anterior-superior"), &directions);
+            let orientation = build_orientation_transform(&fields, [2, 2, 2], [1.0; 3]).unwrap();
+            assert_eq!(orientation.info.status, "unsupported");
+            assert!(orientation
+                .info
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Oblique acquisition")));
+            assert_eq!(orientation.info.plane_labels.axial.left, "?");
+        }
+    }
+
+    #[test]
+    fn scanner_and_missing_space_are_not_anatomically_trusted() {
+        for space in [Some("scanner-xyz"), None] {
+            let fields = orientation_fields(space, "(1,0,0) (0,1,0) (0,0,1)");
+            let orientation = build_orientation_transform(&fields, [2, 2, 2], [1.0; 3]).unwrap();
+            assert_eq!(orientation.info.status, "uncertain");
+            assert_eq!(orientation.info.plane_labels.axial.left, "?");
+        }
+    }
+
+    fn synthetic_dicom_slice(z: f32) -> DicomSlice {
+        DicomSlice {
+            path: PathBuf::from(format!("{z}.dcm")),
+            rows: 1,
+            cols: 1,
+            position: Some([0.0, 0.0, z]),
+            orientation: Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+            pixel_spacing: Some([1.0, 1.0]),
+            instance_number: Some(z as i32),
+            rescale_slope: 1.0,
+            rescale_intercept: 0.0,
+            voxels: vec![0],
+        }
+    }
+
+    #[test]
+    fn rejects_irregular_and_duplicate_dicom_slice_gaps() {
+        let irregular = vec![
+            synthetic_dicom_slice(0.0),
+            synthetic_dicom_slice(1.0),
+            synthetic_dicom_slice(9.0),
+        ];
+        assert!(validate_regular_slice_spacing(&irregular[0], &irregular)
+            .unwrap_err()
+            .contains("irregular gaps"));
+        let duplicate = vec![
+            synthetic_dicom_slice(0.0),
+            synthetic_dicom_slice(0.0),
+            synthetic_dicom_slice(1.0),
+        ];
+        assert!(validate_regular_slice_spacing(&duplicate[0], &duplicate)
+            .unwrap_err()
+            .contains("duplicate"));
+    }
+
+    #[test]
+    fn accepts_regular_dicom_slice_gaps() {
+        let regular = vec![
+            synthetic_dicom_slice(0.0),
+            synthetic_dicom_slice(1.0),
+            synthetic_dicom_slice(2.0),
+            synthetic_dicom_slice(3.0),
+        ];
+        assert_eq!(
+            validate_regular_slice_spacing(&regular[0], &regular).unwrap(),
+            Some(1.0)
+        );
+    }
+
     #[test]
     #[ignore = "Uses optional local uploaded CTA fixture when present."]
     fn parse_uploaded_cta_nrrd_when_available() {
@@ -1982,7 +2207,10 @@ mod tests {
         assert!(volume.width > 0);
         assert!(volume.height > 0);
         assert!(volume.depth > 0);
-        assert_eq!(volume.voxels.len(), volume.width * volume.height * volume.depth);
+        assert_eq!(
+            volume.voxels.len(),
+            volume.width * volume.height * volume.depth
+        );
         println!(
             "loaded CTA fixture: {}x{}x{}, HU {}..{}",
             volume.width, volume.height, volume.depth, volume.min_hu, volume.max_hu
@@ -2035,9 +2263,18 @@ impl OrientationTransform {
 }
 
 const IDENTITY_AXIS_MAPPING: [AxisMapping; 3] = [
-    AxisMapping { raw_axis: 0, sign: 1 },
-    AxisMapping { raw_axis: 1, sign: 1 },
-    AxisMapping { raw_axis: 2, sign: 1 },
+    AxisMapping {
+        raw_axis: 0,
+        sign: 1,
+    },
+    AxisMapping {
+        raw_axis: 1,
+        sign: 1,
+    },
+    AxisMapping {
+        raw_axis: 2,
+        sign: 1,
+    },
 ];
 
 fn identity_matrix(spacing: [f32; 3], origin: [f32; 3]) -> [[f32; 4]; 4] {
@@ -2121,7 +2358,9 @@ fn build_orientation_transform(
         }
     }
 
-    let space_signs = space_kind.map(ras_signs_for_space).unwrap_or([1.0, 1.0, 1.0]);
+    let space_signs = space_kind
+        .map(ras_signs_for_space)
+        .unwrap_or([1.0, 1.0, 1.0]);
 
     // Convert each raw IJK direction vector into RAS coordinates so we can
     // compare against canonical axes regardless of whether the file is stored
@@ -2144,18 +2383,35 @@ fn build_orientation_transform(
         ]
     });
 
+    let anatomical_space =
+        matches!(space_kind, Some(kind) if !matches!(kind, SpaceKind::ScannerXyz));
     let mut status = "trusted".to_string();
     let canonical_to_raw_mapping = match ras_directions.as_ref() {
-        Some(dirs) => match derive_axis_mapping(dirs, &mut warnings) {
-            Some(mapping) => mapping,
-            None => {
-                status = "uncertain".to_string();
-                warnings.push(
+        Some(dirs) if anatomical_space && directions_are_axis_aligned(dirs) => {
+            match derive_axis_mapping(dirs, &mut warnings) {
+                Some(mapping) => mapping,
+                None => {
+                    status = "uncertain".to_string();
+                    warnings.push(
                     "NRRD orientation is not orthogonal enough to canonicalize; falling back to raw IJK axes.".to_string(),
                 );
-                IDENTITY_AXIS_MAPPING
+                    IDENTITY_AXIS_MAPPING
+                }
             }
-        },
+        }
+        Some(_) if anatomical_space => {
+            status = "unsupported".to_string();
+            warnings.push(
+                "Oblique acquisition is not currently resampled into orthogonal patient planes."
+                    .to_string(),
+            );
+            IDENTITY_AXIS_MAPPING
+        }
+        Some(dirs) => {
+            status = "uncertain".to_string();
+            warnings.push("Scanner or unknown coordinate space cannot establish anatomical R/L/A/P/S/I directions.".to_string());
+            derive_axis_mapping(dirs, &mut warnings).unwrap_or(IDENTITY_AXIS_MAPPING)
+        }
         None => {
             if space_directions_field.is_some() {
                 warnings.push(
@@ -2163,7 +2419,8 @@ fn build_orientation_transform(
                 );
             } else {
                 warnings.push(
-                    "NRRD orientation metadata is missing; assuming raw IJK matches canonical RAS.".to_string(),
+                    "NRRD orientation metadata is missing; assuming raw IJK matches canonical RAS."
+                        .to_string(),
                 );
             }
             status = "uncertain".to_string();
@@ -2171,17 +2428,13 @@ fn build_orientation_transform(
         }
     };
 
-    let plane_labels = if status == "uncertain" {
+    let plane_labels = if status != "trusted" {
         uncertain_plane_labels()
     } else {
         canonical_plane_labels()
     };
 
-    let ijk_to_ras = build_ijk_to_ras_matrix(
-        ras_directions.as_ref(),
-        ras_origin,
-        raw_spacing,
-    );
+    let ijk_to_ras = build_ijk_to_ras_matrix(ras_directions.as_ref(), ras_origin, raw_spacing);
 
     let info = VolumeOrientationInfo {
         status,
@@ -2330,13 +2583,24 @@ fn derive_axis_mapping(
 
     let mut canonical_to_raw_arr = IDENTITY_AXIS_MAPPING;
     for (raw_axis, (canonical_axis, sign)) in raw_to_canonical.iter().copied().enumerate() {
-        canonical_to_raw_arr[canonical_axis] = AxisMapping {
-            raw_axis,
-            sign,
-        };
+        canonical_to_raw_arr[canonical_axis] = AxisMapping { raw_axis, sign };
     }
 
     Some(canonical_to_raw_arr)
+}
+
+fn directions_are_axis_aligned(directions: &[[f32; 3]; 3]) -> bool {
+    const MIN_AXIS_COSINE: f32 = 0.985;
+    directions.iter().all(|vector| {
+        let length = vector_length(*vector);
+        length.is_finite()
+            && length > 0.0
+            && vector
+                .iter()
+                .map(|component| component.abs() / length)
+                .fold(0.0_f32, f32::max)
+                >= MIN_AXIS_COSINE
+    })
 }
 
 fn build_ijk_to_ras_matrix(

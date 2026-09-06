@@ -57,9 +57,14 @@ export type Measurement = DistanceMeasurement | AngleMeasurement;
 /** Quiz integration shape — distance-only (kept for backwards compat with QuestionPanel). */
 export interface ViewerMeasurement {
   id: string;
+  /** Identifies the mounted source, preventing reuse across cases/studies. */
+  sourceKey: string;
+  volumeHandleId: string;
   plane: VolumePlane;
+  /** Slice whose pixels were committed when the measurement was created. */
   sliceIndex: number;
   distanceMm: number;
+  unit: 'mm';
 }
 
 export interface CrosshairVoxel {
