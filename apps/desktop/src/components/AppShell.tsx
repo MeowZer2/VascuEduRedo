@@ -164,7 +164,7 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
           </div>
           <div className="brand-text">
             <strong>VascEdu</strong>
-            <small>v0.45 · INTERNAL LOCAL</small>
+            <small>v0.46 · INTERNAL LOCAL</small>
           </div>
           <button
             className="sidebar-collapse"

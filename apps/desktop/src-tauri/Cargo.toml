@@ -1,6 +1,6 @@
 [package]
 name = "vascedu_desktop"
-version = "0.45.0"
+version = "0.46.0"
 description = "VascEdu vascular imaging and endovascular training desktop app"
 authors = ["VascEdu"]
 edition = "2021"

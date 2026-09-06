@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose, Engine as _};
 use dicom_object::{open_file as open_dicom_file, DefaultDicomObject};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
@@ -15,6 +15,30 @@ use tauri::{ipc::Response, State};
 const SAMPLE_AAA_NRRD: &[u8] =
     include_bytes!("../../../../content/aaa/volumes/sample-aaa-001.nrrd");
 const PREPARED_VOLUME_CACHE_CAPACITY: usize = 3;
+const PREPARED_VOLUME_CACHE_BYTE_BUDGET: usize = 1024 * 1024 * 1024;
+
+// VascEdu deliberately supports a bounded CT/MPR subset. These limits admit
+// large vascular CT studies while ensuring corrupt headers and hostile folder
+// trees cannot request effectively unbounded memory or discovery work.
+const MAX_VOLUME_VOXELS: usize = 512 * 1024 * 1024;
+const MAX_DECODED_VOLUME_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_ENCODED_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_NRRD_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_ROWS: usize = 4096;
+const MAX_COLUMNS: usize = 4096;
+const MAX_SLICES: usize = 8192;
+const MAX_DICOM_FILES_PER_SERIES: usize = MAX_SLICES;
+const MAX_DICOM_DISCOVERY_FILES: usize = 50_000;
+const MAX_DICOM_DIRECTORY_DEPTH: usize = 32;
+const MAX_DICOM_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+const SAFE_VOLUME_LIMIT_MESSAGE: &str =
+    "This scan exceeds VascEdu's current safe volume size limit.";
+const MALFORMED_IMAGING_MESSAGE: &str = "The imaging data is incomplete or malformed.";
+const DICOM_DISCOVERY_LIMIT_MESSAGE: &str =
+    "This folder exceeds VascEdu's current safe DICOM discovery limit.";
+const DICOM_SERIES_LIMIT_MESSAGE: &str =
+    "This DICOM series exceeds VascEdu's current safe slice-count limit.";
 
 #[derive(Default)]
 pub struct VolumeCache {
@@ -26,6 +50,7 @@ struct VolumeCacheInner {
     handles: HashMap<String, Arc<Volume>>,
     prepared: HashMap<String, Arc<Volume>>,
     lru: VecDeque<String>,
+    prepared_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -191,7 +216,7 @@ pub struct PlaneOrientationLabels {
     bottom: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AxisMapping {
     raw_axis: usize,
     sign: i8,
@@ -478,10 +503,18 @@ pub fn volume_release(handle_id: String, cache: State<'_, VolumeCache>) -> Resul
         .inner
         .lock()
         .map_err(|_| "Volume cache lock was poisoned".to_string())?;
-    Ok(inner.handles.remove(&handle_id).is_some())
+    let removed = inner.handles.remove(&handle_id).is_some();
+    if removed {
+        evict_prepared_volumes(&mut inner);
+    }
+    Ok(removed)
 }
 
 impl Volume {
+    fn estimated_bytes(&self) -> usize {
+        self.voxels.len().saturating_mul(std::mem::size_of::<i16>())
+    }
+
     fn info(&self, handle_id: String, cache_key: String, cache_status: &str) -> VolumeInfo {
         VolumeInfo {
             handle_id,
@@ -708,17 +741,24 @@ fn canonicalize_voxels(
     }
 
     let canonical_count = checked_voxel_count(canonical_dims)?;
-    let mut canonical = vec![0i16; canonical_count];
+    let mut canonical = Vec::new();
+    canonical
+        .try_reserve_exact(canonical_count)
+        .map_err(|_| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    canonical.resize(canonical_count, 0i16);
     let raw_plane = raw_dims[0]
         .checked_mul(raw_dims[1])
         .ok_or_else(|| "Raw volume plane dimensions are too large".to_string())?;
+    let raw_count = raw_plane
+        .checked_mul(raw_dims[2])
+        .ok_or_else(|| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
     for z in 0..canonical_dims[2] {
         for y in 0..canonical_dims[1] {
             for x in 0..canonical_dims[0] {
                 let raw = orientation.canonical_to_raw([x, y, z], raw_dims)?;
                 let raw_idx = (raw[2] * raw_dims[1] + raw[1]) * raw_dims[0] + raw[0];
                 let canonical_idx = (z * canonical_dims[1] + y) * canonical_dims[0] + x;
-                if raw_idx >= raw_plane * raw_dims[2] {
+                if raw_idx >= raw_count {
                     return Err("Orientation mapping produced an out-of-range voxel".to_string());
                 }
                 canonical[canonical_idx] = raw_voxels[raw_idx];
@@ -820,7 +860,14 @@ fn insert_prepared_volume(
         .lock()
         .map_err(|_| "Volume cache lock was poisoned".to_string())?;
     inner.handles.insert(handle_id, volume.clone());
-    inner.prepared.insert(cache_key.clone(), volume);
+    if let Some(previous) = inner.prepared.insert(cache_key.clone(), volume.clone()) {
+        inner.prepared_bytes = inner
+            .prepared_bytes
+            .saturating_sub(previous.estimated_bytes());
+    }
+    inner.prepared_bytes = inner
+        .prepared_bytes
+        .saturating_add(volume.estimated_bytes());
     touch_lru(&mut inner.lru, &cache_key);
     evict_prepared_volumes(&mut inner);
     Ok(info)
@@ -834,24 +881,42 @@ fn touch_lru(lru: &mut VecDeque<String>, cache_key: &str) {
 }
 
 fn evict_prepared_volumes(inner: &mut VolumeCacheInner) {
-    while inner.prepared.len() > PREPARED_VOLUME_CACHE_CAPACITY {
+    evict_prepared_volumes_to_limits(
+        inner,
+        PREPARED_VOLUME_CACHE_CAPACITY,
+        PREPARED_VOLUME_CACHE_BYTE_BUDGET,
+    );
+}
+
+fn evict_prepared_volumes_to_limits(
+    inner: &mut VolumeCacheInner,
+    max_entries: usize,
+    max_bytes: usize,
+) {
+    let candidates_this_pass = inner.lru.len();
+    for _ in 0..candidates_this_pass {
+        if inner.prepared.len() <= max_entries && inner.prepared_bytes <= max_bytes {
+            break;
+        }
         let Some(candidate) = inner.lru.pop_front() else {
             break;
         };
-        let is_active = inner.handles.values().any(|volume| {
-            inner
-                .prepared
-                .get(&candidate)
-                .is_some_and(|cached| Arc::ptr_eq(cached, volume))
-        });
+        let Some(cached) = inner.prepared.get(&candidate).cloned() else {
+            continue;
+        };
+        let is_active = inner
+            .handles
+            .values()
+            .any(|volume| Arc::ptr_eq(&cached, volume));
         if is_active {
             inner.lru.push_back(candidate);
-            if inner.lru.len() <= inner.prepared.len() {
-                break;
-            }
             continue;
         }
-        inner.prepared.remove(&candidate);
+        if let Some(removed) = inner.prepared.remove(&candidate) {
+            inner.prepared_bytes = inner
+                .prepared_bytes
+                .saturating_sub(removed.estimated_bytes());
+        }
     }
 }
 
@@ -860,8 +925,7 @@ fn resolve_nrrd_source(path: &str) -> Result<NrrdVolumeSource, String> {
     if trimmed.is_empty() || trimmed == "sample" || trimmed.ends_with("sample-aaa-001.nrrd") {
         if !trimmed.is_empty() && trimmed != "sample" {
             if let Some(candidate) = resolve_path(trimmed) {
-                let bytes = fs::read(&candidate)
-                    .map_err(|error| format!("Failed to read {}: {error}", candidate.display()))?;
+                let bytes = read_nrrd_file(&candidate)?;
                 let cache_key = file_cache_key("nrrd", &candidate)?;
                 return Ok(NrrdVolumeSource {
                     bytes,
@@ -878,8 +942,7 @@ fn resolve_nrrd_source(path: &str) -> Result<NrrdVolumeSource, String> {
             });
         }
         if let Some(candidate) = resolve_path("content/aaa/volumes/sample-aaa-001.nrrd") {
-            let bytes = fs::read(&candidate)
-                .map_err(|error| format!("Failed to read {}: {error}", candidate.display()))?;
+            let bytes = read_nrrd_file(&candidate)?;
             let cache_key = file_cache_key("nrrd", &candidate)?;
             return Ok(NrrdVolumeSource {
                 bytes,
@@ -895,8 +958,7 @@ fn resolve_nrrd_source(path: &str) -> Result<NrrdVolumeSource, String> {
     }
 
     if let Some(candidate) = resolve_path(trimmed) {
-        let bytes = fs::read(&candidate)
-            .map_err(|error| format!("Failed to read {}: {error}", candidate.display()))?;
+        let bytes = read_nrrd_file(&candidate)?;
         let cache_key = file_cache_key("nrrd", &candidate)?;
         return Ok(NrrdVolumeSource {
             bytes,
@@ -908,6 +970,15 @@ fn resolve_nrrd_source(path: &str) -> Result<NrrdVolumeSource, String> {
     Err(format!(
         "NRRD file not found: {trimmed}. Use an absolute path, a path relative to the project root, or 'sample'."
     ))
+}
+
+fn read_nrrd_file(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Failed to inspect {}: {error}", path.display()))?;
+    if metadata.len() > MAX_ENCODED_INPUT_BYTES {
+        return Err(SAFE_VOLUME_LIMIT_MESSAGE.to_string());
+    }
+    fs::read(path).map_err(|error| format!("Failed to read {}: {error}", path.display()))
 }
 
 fn resolve_dicom_source(
@@ -991,8 +1062,20 @@ fn resolve_path(input: &str) -> Option<PathBuf> {
 }
 
 fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
-    let header_end =
-        find_header_end(bytes).ok_or("Invalid NRRD: missing blank line after header")?;
+    if bytes.len() as u64 > MAX_ENCODED_INPUT_BYTES {
+        return Err(SAFE_VOLUME_LIMIT_MESSAGE.to_string());
+    }
+    let header_search_end = bytes.len().min(MAX_NRRD_HEADER_BYTES.saturating_add(4));
+    let header_end = find_header_end(&bytes[..header_search_end]).ok_or_else(|| {
+        if bytes.len() > MAX_NRRD_HEADER_BYTES {
+            "Invalid NRRD: header exceeds the safe 1 MiB limit.".to_string()
+        } else {
+            "Invalid NRRD: missing blank line after header".to_string()
+        }
+    })?;
+    if header_end > MAX_NRRD_HEADER_BYTES {
+        return Err("Invalid NRRD: header exceeds the safe 1 MiB limit.".to_string());
+    }
     let header_text = std::str::from_utf8(&bytes[..header_end])
         .map_err(|_| "Invalid NRRD: header is not UTF-8".to_string())?;
     let data = &bytes[header_end..];
@@ -1002,14 +1085,20 @@ fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
     }
 
     let fields = parse_header_fields(header_text);
+    if fields.contains_key("data file") || fields.contains_key("datafile") {
+        return Err(
+            "Unsupported NRRD: detached data payloads are not currently supported.".to_string(),
+        );
+    }
     let dimension = get_field(&fields, "dimension")?
         .parse::<usize>()
         .map_err(|_| "Invalid NRRD: dimension must be a number".to_string())?;
     if dimension != 3 {
         return Err(format!(
-            "Only 3D NRRD volumes are supported in this spike; got dimension {dimension}"
+            "Unsupported NRRD dimensionality: VascEdu supports 3D scalar volumes; got dimension {dimension}."
         ));
     }
+    validate_nrrd_kinds(fields.get("kinds").map(String::as_str))?;
 
     let sizes = parse_usize_list(get_field(&fields, "sizes")?)?;
     if sizes.len() != 3 {
@@ -1019,23 +1108,28 @@ fn parse_nrrd(bytes: &[u8], source_path: String) -> Result<Volume, String> {
     if dims.iter().any(|size| *size == 0) {
         return Err("Invalid NRRD: sizes must be greater than zero".to_string());
     }
-    let voxel_count = checked_voxel_count(dims)?;
-
     let encoding = fields
         .get("encoding")
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| "raw".to_string());
     let nrrd_type = get_field(&fields, "type")?.to_ascii_lowercase();
+    let source_bytes_per_voxel = nrrd_bytes_per_voxel(&nrrd_type)?;
+    let voxel_count = validate_volume_layout(dims, std::mem::size_of::<i16>())?;
     let endian = fields
         .get("endian")
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| "little".to_string());
 
     let voxels = match encoding.as_str() {
-        "raw" => parse_raw_voxels(data, &nrrd_type, &endian, voxel_count)?,
+        "raw" => {
+            validate_decoded_byte_count(voxel_count, source_bytes_per_voxel)?;
+            parse_raw_voxels(data, &nrrd_type, &endian, voxel_count)?
+        }
         "ascii" | "text" | "txt" => parse_ascii_voxels(data, voxel_count)?,
         "gzip" | "gz" => {
-            let decoded = decode_gzip_payload(data)?;
+            let expected_bytes =
+                validate_decoded_byte_count(voxel_count, source_bytes_per_voxel)?;
+            let decoded = decode_gzip_payload(data, expected_bytes)?;
             parse_raw_voxels(&decoded, &nrrd_type, &endian, voxel_count)?
         }
         other => {
@@ -1097,6 +1191,51 @@ struct DicomSlice {
     voxels: Vec<i16>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DicomPixelFormat {
+    bits_allocated: u16,
+    bits_stored: u16,
+    high_bit: u16,
+    pixel_representation: u16,
+}
+
+impl DicomPixelFormat {
+    fn validate(self) -> Result<(), String> {
+        if self.bits_allocated != 16 {
+            return Err(format!(
+                "Unsupported DICOM pixel format: BitsAllocated={} (VascEdu currently supports 16-bit CT containers only).",
+                self.bits_allocated
+            ));
+        }
+        if self.bits_stored == 0 || self.bits_stored > self.bits_allocated {
+            return Err(format!(
+                "Malformed DICOM pixel format: BitsStored={} must be between 1 and BitsAllocated={}",
+                self.bits_stored, self.bits_allocated
+            ));
+        }
+        if self.high_bit >= self.bits_allocated {
+            return Err(format!(
+                "Malformed DICOM pixel format: HighBit={} must be below BitsAllocated={}",
+                self.high_bit, self.bits_allocated
+            ));
+        }
+        if self.high_bit + 1 != self.bits_stored {
+            return Err(format!(
+                "Malformed DICOM pixel format: HighBit={} must equal BitsStored-1 ({})",
+                self.high_bit,
+                self.bits_stored - 1
+            ));
+        }
+        if !matches!(self.pixel_representation, 0 | 1) {
+            return Err(format!(
+                "Malformed DICOM pixel format: PixelRepresentation={} must be 0 (unsigned) or 1 (signed).",
+                self.pixel_representation
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, String> {
     let folder = resolve_existing_folder(folder_path)?;
     let mut grouped: HashMap<String, DicomSeriesAccumulator> = HashMap::new();
@@ -1107,6 +1246,11 @@ fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, Stri
     ignored_file_count += unreadable_count;
 
     for path in candidate_files {
+        if let Err(error) = validate_dicom_file_size(&path) {
+            warnings.push(format!("Ignored {}: {error}", display_name(&path)));
+            ignored_file_count += 1;
+            continue;
+        }
         let object = match open_dicom_file(&path) {
             Ok(object) => object,
             Err(_) => {
@@ -1147,6 +1291,7 @@ fn discover_dicom_folder(folder_path: &str) -> Result<DicomDiscoveryResult, Stri
             &mut entry.study_description,
             dicom_string_opt(&object, "StudyDescription"),
         );
+        ensure_dicom_series_capacity(entry.files.len())?;
         entry.files.push(path);
     }
 
@@ -1213,6 +1358,7 @@ fn build_dicom_volume_from_folder(
     let (candidate_files, _) = collect_files_recursive(&folder, &mut warnings)?;
 
     for path in candidate_files {
+        validate_dicom_file_size(&path)?;
         let object = match open_dicom_file(&path) {
             Ok(object) => object,
             Err(_) => continue,
@@ -1231,14 +1377,17 @@ fn build_dicom_volume_from_folder(
         })?;
         if modality != "CT" {
             return Err(format!(
-                "Unsupported DICOM modality '{modality}'. v0.18 imports CT series only."
+                "Unsupported DICOM modality '{modality}'. VascEdu currently imports CT series only."
             ));
         }
         merge_optional_string(
             &mut series_description,
             dicom_string_opt(&object, "SeriesDescription"),
         );
-        slices.push(parse_dicom_slice(&object, path)?);
+        ensure_dicom_series_capacity(slices.len())?;
+        let slice = parse_dicom_slice(&object, path)?;
+        validate_volume_layout([slice.cols, slice.rows, slices.len() + 1], 2)?;
+        slices.push(slice);
     }
 
     if slices.is_empty() {
@@ -1252,19 +1401,7 @@ fn build_dicom_volume_from_folder(
         .first()
         .ok_or_else(|| "Selected DICOM series has no slices.".to_string())?;
     let dims = [first.cols, first.rows, slices.len()];
-    let voxel_count = checked_voxel_count(dims)?;
-    let mut voxels = Vec::with_capacity(voxel_count);
-    for slice in &slices {
-        voxels.extend_from_slice(&slice.voxels);
-    }
-
-    if voxels.len() != voxel_count {
-        return Err(format!(
-            "Malformed DICOM series: expected {voxel_count} voxels but decoded {}.",
-            voxels.len()
-        ));
-    }
-
+    let voxel_count = validate_volume_layout(dims, std::mem::size_of::<i16>())?;
     if skipped_same_folder_dicom > 0 {
         warnings.push(format!(
             "Ignored {skipped_same_folder_dicom} DICOM file(s) from other series in the selected folder."
@@ -1275,13 +1412,29 @@ fn build_dicom_volume_from_folder(
     let orientation = dicom_orientation(first, raw_spacing, &mut warnings)?;
     let canonical_dims = orientation.canonical_dims(dims);
     let spacing = orientation.canonical_spacing(raw_spacing);
-    let (min_hu, max_hu) = intensity_range(&voxels)?;
     let mut orientation_info = orientation.info.clone();
     orientation_info
         .warnings
         .extend(dicom_series_warnings(first, &slices));
     orientation_info.warnings.sort();
     orientation_info.warnings.dedup();
+
+    // Move decoded slices into the contiguous raw volume so the per-slice
+    // buffers are released before canonicalization allocates its destination.
+    let mut voxels = Vec::new();
+    voxels
+        .try_reserve_exact(voxel_count)
+        .map_err(|_| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    for slice in slices {
+        voxels.extend(slice.voxels);
+    }
+    if voxels.len() != voxel_count {
+        return Err(format!(
+            "Malformed DICOM series: expected {voxel_count} voxels but decoded {}.",
+            voxels.len()
+        ));
+    }
+    let (min_hu, max_hu) = intensity_range(&voxels)?;
     let voxels = canonicalize_voxels(
         voxels,
         dims,
@@ -1315,13 +1468,94 @@ fn build_dicom_volume_from_folder(
     })
 }
 
+fn decode_dicom_pixels(
+    pixel_bytes: &[u8],
+    pixel_count: usize,
+    format: DicomPixelFormat,
+    slope: f64,
+    intercept: f64,
+) -> Result<Vec<i16>, String> {
+    format.validate()?;
+    if !slope.is_finite() || !intercept.is_finite() {
+        return Err(
+            "Malformed DICOM pixel transform: RescaleSlope and RescaleIntercept must be finite."
+                .to_string(),
+        );
+    }
+
+    let expected_bytes = pixel_count
+        .checked_mul(usize::from(format.bits_allocated / 8))
+        .ok_or_else(|| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    if pixel_bytes.len() != expected_bytes {
+        return Err(format!(
+            "{MALFORMED_IMAGING_MESSAGE} PixelData must contain exactly {expected_bytes} bytes; found {}.",
+            pixel_bytes.len()
+        ));
+    }
+
+    let low_bit = format.high_bit + 1 - format.bits_stored;
+    let stored_mask = if format.bits_stored == 16 {
+        u16::MAX as u32
+    } else {
+        (1_u32 << format.bits_stored) - 1
+    };
+    let sign_bit = 1_u32 << (format.bits_stored - 1);
+    let signed_modulus = 1_i32 << format.bits_stored;
+    let mut voxels = Vec::new();
+    voxels
+        .try_reserve_exact(pixel_count)
+        .map_err(|_| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+
+    for chunk in pixel_bytes.chunks_exact(2) {
+        let container = u32::from(u16::from_le_bytes([chunk[0], chunk[1]]));
+        let stored = (container >> low_bit) & stored_mask;
+        let integer = if format.pixel_representation == 1 && stored & sign_bit != 0 {
+            stored as i32 - signed_modulus
+        } else {
+            stored as i32
+        };
+        let rescaled = f64::from(integer) * slope + intercept;
+        if !rescaled.is_finite() {
+            return Err(
+                "Malformed DICOM pixel transform produced a non-finite intensity.".to_string(),
+            );
+        }
+        let rounded = rescaled.round();
+        if rounded < f64::from(i16::MIN) || rounded > f64::from(i16::MAX) {
+            return Err(
+                "Unsupported DICOM intensity range: rescaled CT values do not fit VascEdu's signed 16-bit HU representation."
+                    .to_string(),
+            );
+        }
+        voxels.push(rounded as i16);
+    }
+    Ok(voxels)
+}
+
+fn validate_dicom_photometric_contract(
+    samples_per_pixel: u16,
+    photometric: &str,
+) -> Result<(), String> {
+    if samples_per_pixel != 1 {
+        return Err(format!(
+            "Unsupported DICOM pixel layout: SamplesPerPixel={samples_per_pixel}; CT grayscale slices require one sample."
+        ));
+    }
+    if photometric.trim().to_ascii_uppercase() != "MONOCHROME2" {
+        return Err(format!(
+            "Unsupported DICOM photometric interpretation '{photometric}'. VascEdu currently supports MONOCHROME2 only and does not silently invert MONOCHROME1."
+        ));
+    }
+    Ok(())
+}
+
 fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<DicomSlice, String> {
     let transfer_syntax = object.meta().transfer_syntax().trim_end_matches('\0');
     if !is_supported_transfer_syntax(transfer_syntax) {
-        return Err(format!(
-            "{} uses transfer syntax {transfer_syntax}. v0.18 DICOM import currently supports uncompressed little-endian CT pixel data only.",
-            display_name(&path)
-        ));
+        return Err(
+            "This DICOM series uses a compressed or unsupported transfer syntax that VascEdu does not currently support."
+                .to_string(),
+        );
     }
 
     let rows = dicom_int::<u16>(object, "Rows", &path)? as usize;
@@ -1332,29 +1566,35 @@ fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<Dicom
             display_name(&path)
         ));
     }
-    let samples_per_pixel = dicom_int_opt::<u16>(object, "SamplesPerPixel").unwrap_or(1);
-    if samples_per_pixel != 1 {
-        return Err(format!(
-            "{} has SamplesPerPixel={samples_per_pixel}; CT grayscale slices only are supported.",
-            display_name(&path)
-        ));
-    }
-    let bits_allocated = dicom_int::<u16>(object, "BitsAllocated", &path)?;
-    let bits_stored = dicom_int_opt::<u16>(object, "BitsStored").unwrap_or(bits_allocated);
-    if bits_allocated != 16 || bits_stored > 16 {
-        return Err(format!(
-            "{} has BitsAllocated={bits_allocated}, BitsStored={bits_stored}; only 16-bit CT pixels are supported.",
-            display_name(&path)
-        ));
-    }
+    validate_volume_layout([cols, rows, 1], std::mem::size_of::<i16>())?;
 
-    let pixel_representation = dicom_int_opt::<u16>(object, "PixelRepresentation").unwrap_or(0);
+    let samples_per_pixel = dicom_int::<u16>(object, "SamplesPerPixel", &path)?;
+    let photometric = dicom_string_opt(object, "PhotometricInterpretation").ok_or_else(|| {
+        format!(
+            "{} is missing PhotometricInterpretation; MONOCHROME2 CT pixels are required.",
+            display_name(&path)
+        )
+    })?;
+    validate_dicom_photometric_contract(samples_per_pixel, &photometric)?;
+
+    let pixel_format = DicomPixelFormat {
+        bits_allocated: dicom_int::<u16>(object, "BitsAllocated", &path)?,
+        bits_stored: dicom_int::<u16>(object, "BitsStored", &path)?,
+        high_bit: dicom_int::<u16>(object, "HighBit", &path)?,
+        pixel_representation: dicom_int::<u16>(object, "PixelRepresentation", &path)?,
+    };
+    pixel_format.validate().map_err(|error| {
+        format!(
+            "{} has invalid pixel metadata: {error}",
+            display_name(&path)
+        )
+    })?;
     let frame_count = dicom_string_opt(object, "NumberOfFrames")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
     if frame_count != 1 {
         return Err(format!(
-            "{} is multi-frame ({frame_count} frames); v0.18 imports single-frame CT series only.",
+            "{} is multi-frame ({frame_count} frames); VascEdu currently imports single-frame CT series only.",
             display_name(&path)
         ));
     }
@@ -1369,18 +1609,18 @@ fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<Dicom
                 display_name(&path)
             )
         })?;
-    let expected_bytes = rows
-        .checked_mul(cols)
-        .and_then(|count| count.checked_mul(2))
-        .ok_or_else(|| {
-            format!(
-                "{} has pixel dimensions that are too large.",
-                display_name(&path)
-            )
-        })?;
-    if pixel_bytes.len() < expected_bytes {
+    let pixel_count = rows.checked_mul(cols).ok_or_else(|| {
+        format!(
+            "{} has pixel dimensions that are too large.",
+            display_name(&path)
+        )
+    })?;
+    let expected_bytes = pixel_count
+        .checked_mul(usize::from(pixel_format.bits_allocated / 8))
+        .ok_or_else(|| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    if pixel_bytes.len() != expected_bytes {
         return Err(format!(
-            "{} has incomplete PixelData: expected at least {expected_bytes} bytes, found {}.",
+            "{MALFORMED_IMAGING_MESSAGE} {} PixelData must contain exactly {expected_bytes} bytes; found {}.",
             display_name(&path),
             pixel_bytes.len()
         ));
@@ -1388,19 +1628,13 @@ fn parse_dicom_slice(object: &DefaultDicomObject, path: PathBuf) -> Result<Dicom
 
     let slope = dicom_float_opt(object, "RescaleSlope").unwrap_or(1.0);
     let intercept = dicom_float_opt(object, "RescaleIntercept").unwrap_or(0.0);
-    let mut voxels = Vec::with_capacity(rows * cols);
-    for chunk in pixel_bytes.chunks_exact(2).take(rows * cols) {
-        let raw = if pixel_representation == 0 {
-            u16::from_le_bytes([chunk[0], chunk[1]]) as f32
-        } else {
-            i16::from_le_bytes([chunk[0], chunk[1]]) as f32
-        };
-        voxels.push(
-            (raw * slope + intercept)
-                .round()
-                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-        );
-    }
+    let voxels = decode_dicom_pixels(
+        &pixel_bytes,
+        pixel_count,
+        pixel_format,
+        f64::from(slope),
+        f64::from(intercept),
+    )?;
 
     Ok(DicomSlice {
         path,
@@ -1435,6 +1669,30 @@ fn validate_and_sort_dicom_slices(
     let first = slices
         .first()
         .ok_or_else(|| "Selected DICOM series has no slices.".to_string())?;
+    let reference_orientation = first.orientation.ok_or_else(|| {
+        "Unsupported DICOM geometry: ImageOrientationPatient is required for accurate MPR."
+            .to_string()
+    })?;
+    validate_dicom_orientation(reference_orientation)?;
+    let reference_spacing = first.pixel_spacing.ok_or_else(|| {
+        "Unsupported DICOM geometry: PixelSpacing is required for accurate measurements."
+            .to_string()
+    })?;
+    if reference_spacing
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(
+            "Unsupported DICOM geometry: PixelSpacing must contain positive finite values."
+                .to_string(),
+        );
+    }
+    if first.position.is_none() {
+        return Err(
+            "Unsupported DICOM geometry: ImagePositionPatient is required for accurate slice ordering."
+                .to_string(),
+        );
+    }
     for slice in slices.iter() {
         if slice.rows != first.rows || slice.cols != first.cols {
             return Err(format!(
@@ -1446,22 +1704,46 @@ fn validate_and_sort_dicom_slices(
                 first.rows
             ));
         }
-        if slice.pixel_spacing != first.pixel_spacing {
-            warnings.push(
-                "PixelSpacing varies across slices; measurements may be approximate.".to_string(),
-            );
-        }
-        if slice.orientation != first.orientation {
-            warnings.push(
-                "ImageOrientationPatient varies across slices; orientation may be approximate."
+        let spacing = slice.pixel_spacing.ok_or_else(|| {
+            "Unsupported DICOM geometry: PixelSpacing is missing from one or more slices."
+                .to_string()
+        })?;
+        if !spacing_components_close(spacing, reference_spacing) {
+            return Err(
+                "Unsupported DICOM geometry: PixelSpacing varies significantly across slices."
                     .to_string(),
             );
         }
-        if let (Some(reference), Some(candidate)) = (first.orientation, slice.orientation) {
-            let row_alignment = direction_alignment(reference[0], candidate[0]);
-            let column_alignment = direction_alignment(reference[1], candidate[1]);
-            if row_alignment < 0.999 || column_alignment < 0.999 {
-                return Err("Unsupported DICOM geometry: ImageOrientationPatient varies significantly across slices.".to_string());
+        let candidate_orientation = slice.orientation.ok_or_else(|| {
+            "Unsupported DICOM geometry: ImageOrientationPatient is missing from one or more slices."
+                .to_string()
+        })?;
+        validate_dicom_orientation(candidate_orientation)?;
+        if slice.orientation != first.orientation {
+            warnings.push(
+                "Minor ImageOrientationPatient numeric variation was normalized across slices."
+                    .to_string(),
+            );
+        }
+        let row_alignment = direction_alignment(reference_orientation[0], candidate_orientation[0]);
+        let column_alignment =
+            direction_alignment(reference_orientation[1], candidate_orientation[1]);
+        if row_alignment < 0.999 || column_alignment < 0.999 {
+            return Err("Unsupported DICOM geometry: ImageOrientationPatient varies significantly across slices.".to_string());
+        }
+        match slice.position {
+            Some(position) if position.iter().all(|value| value.is_finite()) => {}
+            Some(_) => {
+                return Err(
+                    "Unsupported DICOM geometry: ImagePositionPatient contains non-finite values."
+                        .to_string(),
+                )
+            }
+            None => {
+                return Err(
+                    "Unsupported DICOM geometry: ImagePositionPatient is missing from one or more slices."
+                        .to_string(),
+                )
             }
         }
         if (slice.rescale_slope - first.rescale_slope).abs() > 0.001
@@ -1497,6 +1779,45 @@ fn validate_and_sort_dicom_slices(
     }
 
     Err("Malformed DICOM series: cannot sort slices safely because ImagePositionPatient/ImageOrientationPatient and InstanceNumber are incomplete.".to_string())
+}
+
+fn spacing_components_close(a: [f32; 2], b: [f32; 2]) -> bool {
+    a.into_iter().zip(b).all(|(left, right)| {
+        left.is_finite()
+            && right.is_finite()
+            && (left - right).abs() <= (left.abs().max(right.abs()) * 0.001).max(0.0001)
+    })
+}
+
+fn validate_dicom_orientation(orientation: [[f32; 3]; 2]) -> Result<(), String> {
+    if orientation.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(
+            "Unsupported DICOM geometry: ImageOrientationPatient contains non-finite values."
+                .to_string(),
+        );
+    }
+    let row_length = vector_length(orientation[0]);
+    let column_length = vector_length(orientation[1]);
+    if row_length <= 0.0 || column_length <= 0.0 {
+        return Err(
+            "Unsupported DICOM geometry: ImageOrientationPatient contains a zero direction vector."
+                .to_string(),
+        );
+    }
+    if (row_length - 1.0).abs() > 0.01 || (column_length - 1.0).abs() > 0.01 {
+        return Err(
+            "Unsupported DICOM geometry: ImageOrientationPatient directions are not unit length."
+                .to_string(),
+        );
+    }
+    let orthogonality = (dot(orientation[0], orientation[1]) / (row_length * column_length)).abs();
+    if orthogonality > 0.01 {
+        return Err(
+            "Unsupported DICOM geometry: ImageOrientationPatient row and column directions are not orthogonal."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn dicom_spacing(
@@ -1672,7 +1993,7 @@ fn collect_files_recursive(
 ) -> Result<(Vec<PathBuf>, usize), String> {
     let mut files = Vec::new();
     let mut unreadable_count = 0usize;
-    collect_files_recursive_inner(root, &mut files, &mut unreadable_count, warnings)?;
+    collect_files_recursive_inner(root, &mut files, &mut unreadable_count, warnings, 0)?;
     files.sort();
     Ok((files, unreadable_count))
 }
@@ -1682,7 +2003,11 @@ fn collect_files_recursive_inner(
     files: &mut Vec<PathBuf>,
     unreadable_count: &mut usize,
     warnings: &mut Vec<String>,
+    depth: usize,
 ) -> Result<(), String> {
+    if depth > MAX_DICOM_DIRECTORY_DEPTH {
+        return Err(DICOM_DISCOVERY_LIMIT_MESSAGE.to_string());
+    }
     let entries = fs::read_dir(folder)
         .map_err(|error| format!("Failed to read DICOM folder {}: {error}", folder.display()))?;
 
@@ -1706,12 +2031,16 @@ fn collect_files_recursive_inner(
         };
         if file_type.is_dir() {
             if let Err(error) =
-                collect_files_recursive_inner(&path, files, unreadable_count, warnings)
+                collect_files_recursive_inner(&path, files, unreadable_count, warnings, depth + 1)
             {
+                if error == DICOM_DISCOVERY_LIMIT_MESSAGE {
+                    return Err(error);
+                }
                 warnings.push(error);
                 *unreadable_count += 1;
             }
         } else if file_type.is_file() {
+            ensure_dicom_discovery_capacity(files.len())?;
             files.push(path);
         }
     }
@@ -1724,6 +2053,36 @@ fn is_supported_transfer_syntax(uid: &str) -> bool {
         uid,
         "1.2.840.10008.1.2" | "1.2.840.10008.1.2.1" | "1.2.840.10008.1.2.1.99"
     )
+}
+
+fn validate_dicom_file_size(path: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not inspect {}: {error}", display_name(path)))?;
+    validate_dicom_file_length(metadata.len())
+}
+
+fn validate_dicom_file_length(length: u64) -> Result<(), String> {
+    if length > MAX_DICOM_FILE_BYTES {
+        return Err(format!(
+            "file exceeds the safe {} MiB per-file limit.",
+            MAX_DICOM_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_dicom_discovery_capacity(current_file_count: usize) -> Result<(), String> {
+    if current_file_count >= MAX_DICOM_DISCOVERY_FILES {
+        return Err(DICOM_DISCOVERY_LIMIT_MESSAGE.to_string());
+    }
+    Ok(())
+}
+
+fn ensure_dicom_series_capacity(current_slice_count: usize) -> Result<(), String> {
+    if current_slice_count >= MAX_DICOM_FILES_PER_SERIES {
+        return Err(DICOM_SERIES_LIMIT_MESSAGE.to_string());
+    }
+    Ok(())
 }
 
 fn dicom_string_opt(object: &DefaultDicomObject, name: &str) -> Option<String> {
@@ -1865,11 +2224,74 @@ fn parse_usize_list(raw: &str) -> Result<Vec<usize>, String> {
         .collect()
 }
 
+fn validate_nrrd_kinds(raw: Option<&str>) -> Result<(), String> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    let kinds: Vec<&str> = raw.split_whitespace().collect();
+    if kinds.len() != 3
+        || kinds
+            .iter()
+            .any(|kind| !matches!(kind.to_ascii_lowercase().as_str(), "domain" | "space"))
+    {
+        return Err(
+            "Unsupported NRRD: VascEdu supports scalar 3D domain axes only, not vector, list, color, or time axes."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn nrrd_bytes_per_voxel(nrrd_type: &str) -> Result<usize, String> {
+    match nrrd_type {
+        "signed char" | "int8" | "int8_t" | "uchar" | "unsigned char" | "uint8"
+        | "uint8_t" => Ok(1),
+        "short" | "short int" | "signed short" | "int16" | "int16_t" | "ushort"
+        | "unsigned short" | "uint16" | "uint16_t" => Ok(2),
+        "int" | "signed int" | "int32" | "int32_t" | "uint" | "unsigned int"
+        | "uint32" | "uint32_t" => Ok(4),
+        other => Err(format!(
+            "Unsupported NRRD voxel type '{other}'. VascEdu supports 8-, 16-, and 32-bit integer scalar voxels only."
+        )),
+    }
+}
+
 fn checked_voxel_count(dims: [usize; 3]) -> Result<usize, String> {
     dims[0]
         .checked_mul(dims[1])
         .and_then(|xy| xy.checked_mul(dims[2]))
         .ok_or_else(|| "Invalid NRRD: volume dimensions are too large".to_string())
+}
+
+fn validate_volume_layout(dims: [usize; 3], bytes_per_voxel: usize) -> Result<usize, String> {
+    if dims.iter().any(|dimension| *dimension == 0) {
+        return Err(format!(
+            "{MALFORMED_IMAGING_MESSAGE} Volume dimensions must be non-zero."
+        ));
+    }
+    if dims[0] > MAX_COLUMNS || dims[1] > MAX_ROWS || dims[2] > MAX_SLICES {
+        return Err(SAFE_VOLUME_LIMIT_MESSAGE.to_string());
+    }
+    let voxel_count =
+        checked_voxel_count(dims).map_err(|_| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    if voxel_count > MAX_VOLUME_VOXELS {
+        return Err(SAFE_VOLUME_LIMIT_MESSAGE.to_string());
+    }
+    validate_decoded_byte_count(voxel_count, bytes_per_voxel)?;
+    Ok(voxel_count)
+}
+
+fn validate_decoded_byte_count(
+    voxel_count: usize,
+    bytes_per_voxel: usize,
+) -> Result<usize, String> {
+    let decoded_bytes = voxel_count
+        .checked_mul(bytes_per_voxel)
+        .ok_or_else(|| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    if decoded_bytes > MAX_DECODED_VOLUME_BYTES {
+        return Err(SAFE_VOLUME_LIMIT_MESSAGE.to_string());
+    }
+    Ok(decoded_bytes)
 }
 
 fn intensity_range(voxels: &[i16]) -> Result<(i16, i16), String> {
@@ -1899,10 +2321,13 @@ fn parse_raw_voxels(
         other => return Err(format!("Unsupported endian value '{other}'")),
     };
 
-    let mut voxels = Vec::with_capacity(voxel_count);
+    let mut voxels = Vec::new();
+    voxels
+        .try_reserve_exact(voxel_count)
+        .map_err(|_| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
     match nrrd_type {
         "signed char" | "int8" | "int8_t" => {
-            ensure_len(data, voxel_count, 1)?;
+            ensure_exact_len(data, voxel_count, 1)?;
             voxels.extend(
                 data.iter()
                     .take(voxel_count)
@@ -1910,11 +2335,11 @@ fn parse_raw_voxels(
             );
         }
         "uchar" | "unsigned char" | "uint8" | "uint8_t" => {
-            ensure_len(data, voxel_count, 1)?;
+            ensure_exact_len(data, voxel_count, 1)?;
             voxels.extend(data.iter().take(voxel_count).map(|value| *value as i16));
         }
         "short" | "short int" | "signed short" | "int16" | "int16_t" => {
-            ensure_len(data, voxel_count, 2)?;
+            ensure_exact_len(data, voxel_count, 2)?;
             for chunk in data.chunks_exact(2).take(voxel_count) {
                 let arr = [chunk[0], chunk[1]];
                 voxels.push(if little {
@@ -1925,7 +2350,7 @@ fn parse_raw_voxels(
             }
         }
         "ushort" | "unsigned short" | "uint16" | "uint16_t" => {
-            ensure_len(data, voxel_count, 2)?;
+            ensure_exact_len(data, voxel_count, 2)?;
             for chunk in data.chunks_exact(2).take(voxel_count) {
                 let arr = [chunk[0], chunk[1]];
                 let value = if little {
@@ -1937,7 +2362,7 @@ fn parse_raw_voxels(
             }
         }
         "int" | "signed int" | "int32" | "int32_t" => {
-            ensure_len(data, voxel_count, 4)?;
+            ensure_exact_len(data, voxel_count, 4)?;
             for chunk in data.chunks_exact(4).take(voxel_count) {
                 let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
                 let value = if little {
@@ -1949,7 +2374,7 @@ fn parse_raw_voxels(
             }
         }
         "uint" | "unsigned int" | "uint32" | "uint32_t" => {
-            ensure_len(data, voxel_count, 4)?;
+            ensure_exact_len(data, voxel_count, 4)?;
             for chunk in data.chunks_exact(4).take(voxel_count) {
                 let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
                 let value = if little {
@@ -1973,14 +2398,32 @@ fn parse_raw_voxels(
     Ok(voxels)
 }
 
-fn decode_gzip_payload(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut decoder = GzDecoder::new(data);
+fn decode_gzip_payload(data: &[u8], expected_bytes: usize) -> Result<Vec<u8>, String> {
+    if expected_bytes == 0 || expected_bytes > MAX_DECODED_VOLUME_BYTES {
+        return Err(SAFE_VOLUME_LIMIT_MESSAGE.to_string());
+    }
+    let read_limit = expected_bytes
+        .checked_add(1)
+        .ok_or_else(|| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    let decoder = MultiGzDecoder::new(data);
     let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(expected_bytes.min(8 * 1024 * 1024))
+        .map_err(|_| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
     decoder
+        .take(read_limit as u64)
         .read_to_end(&mut decoded)
         .map_err(|e| format!("Invalid NRRD: gzip payload could not be decompressed: {e}"))?;
-    if decoded.is_empty() {
-        return Err("Invalid NRRD: gzip payload decompressed to no data".to_string());
+    if decoded.len() < expected_bytes {
+        return Err(format!(
+            "{MALFORMED_IMAGING_MESSAGE} Gzip payload decoded to {} bytes; expected {expected_bytes}.",
+            decoded.len()
+        ));
+    }
+    if decoded.len() > expected_bytes {
+        return Err(format!(
+            "{MALFORMED_IMAGING_MESSAGE} Gzip payload exceeds its declared volume size."
+        ));
     }
     Ok(decoded)
 }
@@ -1988,32 +2431,40 @@ fn decode_gzip_payload(data: &[u8]) -> Result<Vec<u8>, String> {
 fn parse_ascii_voxels(data: &[u8], voxel_count: usize) -> Result<Vec<i16>, String> {
     let text = std::str::from_utf8(data)
         .map_err(|_| "Invalid NRRD: ASCII data is not valid UTF-8".to_string())?;
-    let voxels: Result<Vec<i16>, String> = text
-        .split_whitespace()
-        .take(voxel_count)
-        .map(|part| {
-            part.parse::<f32>()
-                .map(|value| value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16)
-                .map_err(|_| format!("Invalid ASCII voxel value: {part}"))
-        })
-        .collect();
-    let voxels = voxels?;
-    if voxels.len() != voxel_count {
+    let mut parts = text.split_whitespace();
+    let mut voxels = Vec::new();
+    voxels
+        .try_reserve_exact(voxel_count)
+        .map_err(|_| SAFE_VOLUME_LIMIT_MESSAGE.to_string())?;
+    for index in 0..voxel_count {
+        let part = parts.next().ok_or_else(|| {
+            format!(
+                "{MALFORMED_IMAGING_MESSAGE} ASCII payload ended at voxel {index}; expected {voxel_count}."
+            )
+        })?;
+        let value = part
+            .parse::<f64>()
+            .map_err(|_| format!("Invalid ASCII voxel value: {part}"))?;
+        if !value.is_finite() {
+            return Err(format!("Invalid ASCII voxel value: {part} is not finite."));
+        }
+        voxels.push(value.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16);
+    }
+    if parts.next().is_some() {
         return Err(format!(
-            "Invalid NRRD: expected {voxel_count} voxels but decoded {}",
-            voxels.len()
+            "{MALFORMED_IMAGING_MESSAGE} ASCII payload contains more than {voxel_count} voxels."
         ));
     }
     Ok(voxels)
 }
 
-fn ensure_len(data: &[u8], voxel_count: usize, bytes_per_voxel: usize) -> Result<(), String> {
+fn ensure_exact_len(data: &[u8], voxel_count: usize, bytes_per_voxel: usize) -> Result<(), String> {
     let required = voxel_count
         .checked_mul(bytes_per_voxel)
         .ok_or_else(|| "Invalid NRRD: required data length is too large".to_string())?;
-    if data.len() < required {
+    if data.len() != required {
         return Err(format!(
-            "Invalid NRRD: data too short, expected at least {required} bytes but found {}",
+            "{MALFORMED_IMAGING_MESSAGE} NRRD payload must contain exactly {required} bytes; found {}.",
             data.len()
         ));
     }
@@ -2091,11 +2542,120 @@ mod tests {
     }
 
     #[test]
+    fn supported_embedded_nrrd_fixture_remains_compatible() {
+        let volume = parse_nrrd(SAMPLE_AAA_NRRD, "sample-aaa-001.nrrd".to_string()).unwrap();
+        assert_eq!([volume.width, volume.height, volume.depth], [64, 64, 32]);
+        assert_eq!(volume.spacing, [1.5, 1.5, 2.5]);
+        assert_eq!(volume.voxels.len(), 64 * 64 * 32);
+        assert_eq!(volume.orientation.info.status, "uncertain");
+    }
+
+    #[test]
     fn malformed_gzip_returns_readable_error() {
         let bytes =
             b"NRRD0005\ntype: short\ndimension: 3\nsizes: 2 2 1\nencoding: gzip\nendian: little\n\nnot gzip";
         let error = parse_nrrd(bytes, "bad.nrrd".to_string()).unwrap_err();
         assert!(error.contains("gzip payload could not be decompressed"));
+    }
+
+    fn gzip_nrrd(dims: [usize; 3], raw: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut bytes = format!(
+            "NRRD0005\ntype: short\ndimension: 3\nsizes: {} {} {}\nencoding: gzip\nendian: little\n\n",
+            dims[0], dims[1], dims[2]
+        )
+        .into_bytes();
+        bytes.extend_from_slice(&compressed);
+        bytes
+    }
+
+    #[test]
+    fn rejects_truncated_short_and_excessive_gzip_payloads() {
+        let raw = [1_i16, 2, 3, 4]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let mut truncated = gzip_nrrd([2, 2, 1], &raw);
+        truncated.truncate(truncated.len() - 4);
+        let error = parse_nrrd(&truncated, "truncated.nrrd".to_string()).unwrap_err();
+        assert!(error.contains("gzip payload") || error.contains(MALFORMED_IMAGING_MESSAGE));
+
+        let short = gzip_nrrd([2, 2, 1], &raw[..6]);
+        let error = parse_nrrd(&short, "short.nrrd".to_string()).unwrap_err();
+        assert!(error.contains("decoded to 6 bytes"));
+
+        let mut excessive_raw = raw.clone();
+        excessive_raw.extend_from_slice(&5_i16.to_le_bytes());
+        let excessive = gzip_nrrd([2, 2, 1], &excessive_raw);
+        let error = parse_nrrd(&excessive, "excessive.nrrd".to_string()).unwrap_err();
+        assert!(error.contains("exceeds its declared volume size"));
+    }
+
+    #[test]
+    fn rejects_unsafe_or_malformed_nrrd_declarations_before_allocation() {
+        let gigantic = format!(
+            "NRRD0005\ntype: short\ndimension: 3\nsizes: {} 2 2\nencoding: raw\nendian: little\n\n",
+            MAX_COLUMNS + 1
+        );
+        assert_eq!(
+            parse_nrrd(gigantic.as_bytes(), "huge.nrrd".to_string()).unwrap_err(),
+            SAFE_VOLUME_LIMIT_MESSAGE
+        );
+        assert!(checked_voxel_count([usize::MAX, 2, 2]).is_err());
+
+        let zero =
+            b"NRRD0005\ntype: short\ndimension: 3\nsizes: 2 0 1\nencoding: raw\nendian: little\n\n";
+        assert!(parse_nrrd(zero, "zero.nrrd".to_string())
+            .unwrap_err()
+            .contains("greater than zero"));
+
+        let detached = b"NRRD0005\ntype: short\ndimension: 3\nsizes: 1 1 1\nencoding: raw\ndata file: pixels.raw\n\n";
+        assert!(parse_nrrd(detached, "detached.nhdr".to_string())
+            .unwrap_err()
+            .contains("detached data payloads"));
+
+        let vector = b"NRRD0005\ntype: short\ndimension: 3\nsizes: 1 1 1\nkinds: vector domain domain\nencoding: raw\nendian: little\n\n\0\0";
+        assert!(parse_nrrd(vector, "vector.nrrd".to_string())
+            .unwrap_err()
+            .contains("scalar 3D"));
+
+        let mut oversized_header = b"NRRD0005\n#".to_vec();
+        oversized_header.resize(MAX_NRRD_HEADER_BYTES + 8, b'a');
+        assert!(parse_nrrd(&oversized_header, "header.nrrd".to_string())
+            .unwrap_err()
+            .contains("header exceeds"));
+
+        assert_eq!(
+            validate_volume_layout([512, 512, MAX_SLICES + 1], 2).unwrap_err(),
+            SAFE_VOLUME_LIMIT_MESSAGE
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_or_excess_ascii_voxels() {
+        let non_finite =
+            b"NRRD0005\ntype: short\ndimension: 3\nsizes: 1 1 1\nencoding: ascii\n\nNaN";
+        assert!(parse_nrrd(non_finite, "nan.nrrd".to_string())
+            .unwrap_err()
+            .contains("not finite"));
+
+        let excess = b"NRRD0005\ntype: short\ndimension: 3\nsizes: 1 1 1\nencoding: ascii\n\n1 2";
+        assert!(parse_nrrd(excess, "excess.nrrd".to_string())
+            .unwrap_err()
+            .contains("more than 1 voxels"));
+    }
+
+    #[test]
+    fn enforces_dicom_file_discovery_and_series_resource_boundaries() {
+        assert!(validate_dicom_file_length(MAX_DICOM_FILE_BYTES).is_ok());
+        assert!(validate_dicom_file_length(MAX_DICOM_FILE_BYTES + 1).is_err());
+        assert!(ensure_dicom_discovery_capacity(MAX_DICOM_DISCOVERY_FILES - 1).is_ok());
+        assert!(ensure_dicom_discovery_capacity(MAX_DICOM_DISCOVERY_FILES).is_err());
+        assert!(ensure_dicom_series_capacity(MAX_DICOM_FILES_PER_SERIES - 1).is_ok());
+        assert!(ensure_dicom_series_capacity(MAX_DICOM_FILES_PER_SERIES).is_err());
     }
 
     fn orientation_fields(space: Option<&str>, directions: &str) -> HashMap<String, String> {
@@ -2145,6 +2705,146 @@ mod tests {
         }
     }
 
+    fn dicom_pixel_bytes(values: &[u16]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn decodes_unsigned_12_bit_pixels_and_masks_unused_upper_bits() {
+        let format = DicomPixelFormat {
+            bits_allocated: 16,
+            bits_stored: 12,
+            high_bit: 11,
+            pixel_representation: 0,
+        };
+        let bytes = dicom_pixel_bytes(&[0xf000, 0xf001, 0xf7ff, 0xffff]);
+        assert_eq!(
+            decode_dicom_pixels(&bytes, 4, format, 1.0, 0.0).unwrap(),
+            vec![0, 1, 2047, 4095]
+        );
+    }
+
+    #[test]
+    fn decodes_signed_12_bit_pixels_with_sign_extension() {
+        let format = DicomPixelFormat {
+            bits_allocated: 16,
+            bits_stored: 12,
+            high_bit: 11,
+            pixel_representation: 1,
+        };
+        let bytes = dicom_pixel_bytes(&[0x000, 0x001, 0x7ff, 0x800, 0xafff]);
+        assert_eq!(
+            decode_dicom_pixels(&bytes, 5, format, 1.0, 0.0).unwrap(),
+            vec![0, 1, 2047, -2048, -1]
+        );
+    }
+
+    #[test]
+    fn applies_dicom_rescale_slope_and_intercept_after_bit_extraction() {
+        let unsigned = DicomPixelFormat {
+            bits_allocated: 16,
+            bits_stored: 12,
+            high_bit: 11,
+            pixel_representation: 0,
+        };
+        assert_eq!(
+            decode_dicom_pixels(&dicom_pixel_bytes(&[0, 100]), 2, unsigned, 1.0, -1024.0).unwrap(),
+            vec![-1024, -924]
+        );
+        let hu_volume = identity_test_volume(
+            decode_dicom_pixels(&dicom_pixel_bytes(&[0, 100]), 2, unsigned, 1.0, -1024.0).unwrap(),
+            [2, 1, 1],
+        );
+        assert_eq!(
+            Plane::Axial.sample_voxel(&hu_volume, 0, 0, 0).unwrap(),
+            -1024
+        );
+        assert_eq!(
+            Plane::Axial.sample_voxel(&hu_volume, 0, 1, 0).unwrap(),
+            -924
+        );
+        assert_eq!(
+            decode_dicom_pixels(&dicom_pixel_bytes(&[100]), 1, unsigned, 1.5, -10.0).unwrap(),
+            vec![140]
+        );
+
+        let signed = DicomPixelFormat {
+            pixel_representation: 1,
+            ..unsigned
+        };
+        assert_eq!(
+            decode_dicom_pixels(&dicom_pixel_bytes(&[0xfff]), 1, signed, 2.0, 100.0).unwrap(),
+            vec![98]
+        );
+        let signed_volume = identity_test_volume(
+            decode_dicom_pixels(&dicom_pixel_bytes(&[0x800, 0xfff]), 2, signed, 1.0, 0.0).unwrap(),
+            [2, 1, 1],
+        );
+        assert_eq!(
+            Plane::Axial.sample_voxel(&signed_volume, 0, 0, 0).unwrap(),
+            -2048
+        );
+        assert_eq!(
+            Plane::Axial.sample_voxel(&signed_volume, 0, 1, 0).unwrap(),
+            -1
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_dicom_pixel_metadata_and_transforms() {
+        let valid = DicomPixelFormat {
+            bits_allocated: 16,
+            bits_stored: 12,
+            high_bit: 11,
+            pixel_representation: 0,
+        };
+        for invalid in [
+            DicomPixelFormat {
+                bits_stored: 0,
+                ..valid
+            },
+            DicomPixelFormat {
+                bits_stored: 17,
+                ..valid
+            },
+            DicomPixelFormat {
+                high_bit: 16,
+                ..valid
+            },
+            DicomPixelFormat {
+                high_bit: 12,
+                ..valid
+            },
+            DicomPixelFormat {
+                pixel_representation: 2,
+                ..valid
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
+        assert!(decode_dicom_pixels(&[0, 0], 1, valid, f64::NAN, 0.0).is_err());
+        assert!(decode_dicom_pixels(&[0, 0], 1, valid, 1.0, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn enforces_monochrome_single_sample_native_dicom_contract() {
+        assert!(validate_dicom_photometric_contract(1, "MONOCHROME2").is_ok());
+        assert!(validate_dicom_photometric_contract(1, "MONOCHROME1")
+            .unwrap_err()
+            .contains("does not silently invert"));
+        assert!(validate_dicom_photometric_contract(3, "RGB")
+            .unwrap_err()
+            .contains("SamplesPerPixel=3"));
+
+        assert!(is_supported_transfer_syntax("1.2.840.10008.1.2"));
+        assert!(is_supported_transfer_syntax("1.2.840.10008.1.2.1"));
+        assert!(!is_supported_transfer_syntax("1.2.840.10008.1.2.4.90"));
+        assert!(!is_supported_transfer_syntax("1.2.840.10008.1.2.5"));
+    }
+
     fn synthetic_dicom_slice(z: f32) -> DicomSlice {
         DicomSlice {
             path: PathBuf::from(format!("{z}.dcm")),
@@ -2192,6 +2892,261 @@ mod tests {
             validate_regular_slice_spacing(&regular[0], &regular).unwrap(),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn sorts_reversed_dicom_positions_and_preserves_regular_spacing() {
+        let mut reversed = vec![
+            synthetic_dicom_slice(3.0),
+            synthetic_dicom_slice(2.0),
+            synthetic_dicom_slice(1.0),
+            synthetic_dicom_slice(0.0),
+        ];
+        validate_and_sort_dicom_slices(&mut reversed, &mut Vec::new()).unwrap();
+        let positions: Vec<f32> = reversed
+            .iter()
+            .map(|slice| slice.position.unwrap()[2])
+            .collect();
+        assert_eq!(positions, vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(
+            validate_regular_slice_spacing(&reversed[0], &reversed).unwrap(),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn accepts_minor_orientation_noise_and_rejects_significant_variation() {
+        let mut minor = vec![synthetic_dicom_slice(0.0), synthetic_dicom_slice(1.0)];
+        minor[1].orientation = Some([[1.0, 0.0001, 0.0], [-0.0001, 1.0, 0.0]]);
+        minor[1].pixel_spacing = Some([1.00001, 0.99999]);
+        validate_and_sort_dicom_slices(&mut minor, &mut Vec::new()).unwrap();
+
+        let mut significant = vec![synthetic_dicom_slice(0.0), synthetic_dicom_slice(1.0)];
+        significant[1].orientation = Some([[0.98, 0.2, 0.0], [-0.2, 0.98, 0.0]]);
+        assert!(
+            validate_and_sort_dicom_slices(&mut significant, &mut Vec::new())
+                .unwrap_err()
+                .contains("varies significantly")
+        );
+
+        let mut spacing_variation = vec![synthetic_dicom_slice(0.0), synthetic_dicom_slice(1.0)];
+        spacing_variation[1].pixel_spacing = Some([1.0, 1.2]);
+        assert!(
+            validate_and_sort_dicom_slices(&mut spacing_variation, &mut Vec::new())
+                .unwrap_err()
+                .contains("PixelSpacing varies significantly")
+        );
+        assert!(
+            validate_dicom_orientation([[2.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+                .unwrap_err()
+                .contains("unit length")
+        );
+    }
+
+    fn map_with_expected_axes(
+        canonical: [usize; 3],
+        raw_dims: [usize; 3],
+        mapping: [AxisMapping; 3],
+    ) -> [usize; 3] {
+        let mut raw = [0; 3];
+        for canonical_axis in 0..3 {
+            let axis = mapping[canonical_axis];
+            raw[axis.raw_axis] = if axis.sign > 0 {
+                canonical[canonical_axis]
+            } else {
+                raw_dims[axis.raw_axis] - 1 - canonical[canonical_axis]
+            };
+        }
+        raw
+    }
+
+    #[test]
+    fn orientation_phantom_canonicalizes_ras_lps_permutations_and_flips() {
+        let cases = [
+            (
+                "right-anterior-superior",
+                "(1,0,0) (0,1,0) (0,0,1)",
+                [2, 3, 4],
+                IDENTITY_AXIS_MAPPING,
+            ),
+            (
+                "left-posterior-superior",
+                "(1,0,0) (0,1,0) (0,0,1)",
+                [2, 3, 4],
+                [
+                    AxisMapping {
+                        raw_axis: 0,
+                        sign: -1,
+                    },
+                    AxisMapping {
+                        raw_axis: 1,
+                        sign: -1,
+                    },
+                    AxisMapping {
+                        raw_axis: 2,
+                        sign: 1,
+                    },
+                ],
+            ),
+            (
+                "right-anterior-superior",
+                "(0,-1,0) (0,0,1) (1,0,0)",
+                [3, 4, 2],
+                [
+                    AxisMapping {
+                        raw_axis: 2,
+                        sign: 1,
+                    },
+                    AxisMapping {
+                        raw_axis: 0,
+                        sign: -1,
+                    },
+                    AxisMapping {
+                        raw_axis: 1,
+                        sign: 1,
+                    },
+                ],
+            ),
+        ];
+
+        for (space, directions, raw_dims, expected_mapping) in cases {
+            let fields = orientation_fields(Some(space), directions);
+            let orientation = build_orientation_transform(&fields, raw_dims, [1.0; 3]).unwrap();
+            assert_eq!(orientation.info.status, "trusted");
+            assert_eq!(orientation.canonical_to_raw, expected_mapping);
+            let canonical_dims = orientation.canonical_dims(raw_dims);
+            assert_eq!(canonical_dims, [2, 3, 4]);
+
+            let mut raw_voxels = vec![0; checked_voxel_count(raw_dims).unwrap()];
+            let mut expected = Vec::new();
+            for z in 0..canonical_dims[2] {
+                for y in 0..canonical_dims[1] {
+                    for x in 0..canonical_dims[0] {
+                        let value = (100 * x + 10 * y + z) as i16;
+                        expected.push(value);
+                        let raw = map_with_expected_axes([x, y, z], raw_dims, expected_mapping);
+                        let raw_index = (raw[2] * raw_dims[1] + raw[1]) * raw_dims[0] + raw[0];
+                        raw_voxels[raw_index] = value;
+                    }
+                }
+            }
+            assert_eq!(
+                canonicalize_voxels(raw_voxels, raw_dims, canonical_dims, &orientation).unwrap(),
+                expected
+            );
+        }
+    }
+
+    fn identity_test_volume(voxels: Vec<i16>, dims: [usize; 3]) -> Volume {
+        let fields = orientation_fields(Some("right-anterior-superior"), "(1,0,0) (0,1,0) (0,0,1)");
+        let orientation = build_orientation_transform(&fields, dims, [1.0; 3]).unwrap();
+        let (min_hu, max_hu) = intensity_range(&voxels).unwrap();
+        Volume {
+            id: String::new(),
+            source_path: "synthetic".to_string(),
+            width: dims[0],
+            height: dims[1],
+            depth: dims[2],
+            spacing: [1.0; 3],
+            orientation,
+            encoding: "synthetic".to_string(),
+            nrrd_type: "short".to_string(),
+            min_hu,
+            max_hu,
+            voxels,
+        }
+    }
+
+    #[test]
+    fn anatomical_marker_phantom_matches_all_plane_extraction_conventions() {
+        let mut voxels = vec![0_i16; 27];
+        let offset = |x: usize, y: usize, z: usize| (z * 3 + y) * 3 + x;
+        voxels[offset(0, 1, 1)] = 100; // left
+        voxels[offset(2, 1, 1)] = 200; // right
+        voxels[offset(1, 2, 1)] = 300; // anterior
+        voxels[offset(1, 0, 1)] = 400; // posterior
+        voxels[offset(1, 1, 2)] = 500; // superior
+        voxels[offset(1, 1, 0)] = 600; // inferior
+        let volume = identity_test_volume(voxels, [3, 3, 3]);
+
+        assert_eq!(Plane::Axial.sample_voxel(&volume, 1, 0, 1).unwrap(), 100);
+        assert_eq!(Plane::Axial.sample_voxel(&volume, 1, 2, 1).unwrap(), 200);
+        assert_eq!(Plane::Axial.sample_voxel(&volume, 1, 1, 2).unwrap(), 300);
+        assert_eq!(Plane::Axial.sample_voxel(&volume, 1, 1, 0).unwrap(), 400);
+        assert_eq!(Plane::Coronal.sample_voxel(&volume, 1, 1, 0).unwrap(), 500);
+        assert_eq!(Plane::Coronal.sample_voxel(&volume, 1, 1, 2).unwrap(), 600);
+        assert_eq!(Plane::Sagittal.sample_voxel(&volume, 1, 0, 1).unwrap(), 400);
+        assert_eq!(Plane::Sagittal.sample_voxel(&volume, 1, 2, 1).unwrap(), 300);
+        assert_eq!(volume.orientation.info.plane_labels.axial.left, "L");
+        assert_eq!(volume.orientation.info.plane_labels.coronal.top, "S");
+        assert_eq!(volume.orientation.info.plane_labels.sagittal.right, "A");
+    }
+
+    fn cache_volume(voxel_count: usize) -> Arc<Volume> {
+        Arc::new(identity_test_volume(
+            vec![0; voxel_count],
+            [voxel_count, 1, 1],
+        ))
+    }
+
+    fn add_cache_entry(inner: &mut VolumeCacheInner, key: &str, volume: Arc<Volume>, active: bool) {
+        inner.prepared_bytes += volume.estimated_bytes();
+        inner.prepared.insert(key.to_string(), volume.clone());
+        inner.lru.push_back(key.to_string());
+        if active {
+            inner.handles.insert(format!("handle-{key}"), volume);
+        }
+    }
+
+    #[test]
+    fn cache_eviction_skips_active_oldest_and_continues_to_inactive_entries() {
+        let mut inner = VolumeCacheInner::default();
+        add_cache_entry(&mut inner, "A", cache_volume(1), true);
+        add_cache_entry(&mut inner, "B", cache_volume(1), false);
+        add_cache_entry(&mut inner, "C", cache_volume(1), false);
+        add_cache_entry(&mut inner, "D", cache_volume(1), true);
+
+        evict_prepared_volumes_to_limits(&mut inner, 3, usize::MAX);
+        assert_eq!(inner.prepared.len(), 3);
+        assert!(inner.prepared.contains_key("A"));
+        assert!(!inner.prepared.contains_key("B"));
+        assert_eq!(inner.prepared_bytes, 6);
+        assert_eq!(
+            inner.lru.iter().cloned().collect::<Vec<_>>(),
+            vec!["C", "D", "A"]
+        );
+    }
+
+    #[test]
+    fn cache_allows_active_overage_then_recovers_after_release() {
+        let mut inner = VolumeCacheInner::default();
+        for key in ["A", "B", "C", "D"] {
+            add_cache_entry(&mut inner, key, cache_volume(2), true);
+        }
+        evict_prepared_volumes_to_limits(&mut inner, 3, 12);
+        assert_eq!(inner.prepared.len(), 4);
+        assert_eq!(inner.prepared_bytes, 16);
+
+        inner.handles.remove("handle-B");
+        evict_prepared_volumes_to_limits(&mut inner, 3, 12);
+        assert_eq!(inner.prepared.len(), 3);
+        assert!(!inner.prepared.contains_key("B"));
+        assert_eq!(inner.prepared_bytes, 12);
+    }
+
+    #[test]
+    fn cache_enforces_byte_budget_in_lru_order() {
+        let mut inner = VolumeCacheInner::default();
+        add_cache_entry(&mut inner, "A", cache_volume(2), true);
+        add_cache_entry(&mut inner, "B", cache_volume(2), false);
+        add_cache_entry(&mut inner, "C", cache_volume(2), false);
+        touch_lru(&mut inner.lru, "B");
+
+        evict_prepared_volumes_to_limits(&mut inner, 10, 8);
+        assert_eq!(inner.prepared_bytes, 8);
+        assert!(inner.prepared.contains_key("A"));
+        assert!(inner.prepared.contains_key("B"));
+        assert!(!inner.prepared.contains_key("C"));
     }
 
     #[test]
